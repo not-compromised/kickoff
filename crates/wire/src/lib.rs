@@ -12,6 +12,7 @@ mod bounded;
 mod invite;
 mod lan;
 mod msg;
+mod ports;
 mod ticket;
 
 #[cfg(test)]
@@ -29,6 +30,7 @@ pub use msg::{
     MAX_JOIN_LEN, MAX_NAME_LEN, Member, Name, Platform, WireMessage, decode, encode, encode_framed,
     frame_len,
 };
+pub use ports::{DENIED_PORTS, denied_port};
 pub use ticket::{Cap, MAX_TICKET_LEN, Nonce, SessionId, Ticket, encode_ticket, parse_ticket};
 
 use iroh_base::EndpointId;

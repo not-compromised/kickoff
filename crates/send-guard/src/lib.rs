@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_bind_answers_through_its_guard_until_dropped() {
+    fn si_29_a_registered_bind_answers_through_its_guard_until_dropped() {
         let bind = addr("127.0.0.1:40001");
         let ok = addr("127.0.0.1:40002");
         let other = addr("127.0.0.1:40003");
@@ -93,15 +93,15 @@ mod tests {
         assert!(admit(bind, ok));
         assert!(!admit(bind, other));
         assert!(
-            admit(addr("127.0.0.1:40009"), other),
-            "unregistered binds pass"
+            !admit(addr("127.0.0.1:40009"), other),
+            "unregistered binds refuse"
         );
         assert!(
             register(bind, Arc::new(Only(ok))).is_none(),
             "one guard per bind"
         );
         drop(registration);
-        assert!(admit(bind, other));
+        assert!(!admit(bind, other));
     }
 
     #[test]

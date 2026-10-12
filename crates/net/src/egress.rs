@@ -38,28 +38,7 @@ const NOT_GLOBAL: [(Ipv4Addr, u8); 15] = [
     (Ipv4Addr::new(240, 0, 0, 0), 4),
 ];
 
-/// The §3.1 denylist, inclusive ranges: no packet goes to these ports
-/// whatever else allows it. The LAN filter keeps the same list in
-/// `kickoff-vlan` (`ports::DENYLIST`); the two must stay equal.
-const DENIED_PORTS: &[(u16, u16)] = &[
-    (22, 22),
-    (53, 53),
-    (67, 68),
-    (137, 138),
-    (1900, 1900),
-    (5353, 5353),
-    (5355, 5355),
-    (9002, 9002),
-    (47984, 48010),
-    (49123, 49124),
-    (53317, 53317),
-];
-
-fn denied_port(port: u16) -> bool {
-    DENIED_PORTS
-        .iter()
-        .any(|&(lo, hi)| (lo..=hi).contains(&port))
-}
+use kickoff_wire::denied_port;
 
 fn in_net(ip: Ipv4Addr, (net, len): (Ipv4Addr, u8)) -> bool {
     let mask = u32::MAX

@@ -15,25 +15,7 @@ pub(crate) const GAME_PORTS: GamePorts = GamePorts {
     discovery: &[14001],
 };
 
-/// Inclusive ranges that never pass in either direction, whatever
-/// `GAME_PORTS` or a flow says.
-const DENYLIST: &[(u16, u16)] = &[
-    (22, 22),
-    (53, 53),
-    (67, 68),
-    (137, 138),
-    (1900, 1900),
-    (5353, 5353),
-    (5355, 5355),
-    (9002, 9002), // BakkesMod RCON
-    (47984, 48010),
-    (49123, 49124),
-    (53317, 53317),
-];
-
-pub(crate) fn denied(port: u16) -> bool {
-    DENYLIST.iter().any(|&(lo, hi)| (lo..=hi).contains(&port))
-}
+use kickoff_wire::{DENIED_PORTS as DENYLIST, denied_port as denied};
 
 pub(crate) fn game(port: u16) -> bool {
     GAME_PORTS.game.contains(&port) || discovery(port)
