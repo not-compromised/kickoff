@@ -114,6 +114,9 @@ impl Rx {
     }
 
     fn charge(&mut self, now: Instant, len: usize) -> Charge {
+        if cfg!(feature = "mutant-si23-no-datagram-budget") {
+            return Charge::Pass;
+        }
         let len = u64::try_from(len).unwrap_or(u64::MAX);
         let flood = self.abuse_datagrams.exceeded(now, 1);
         let flood = self.abuse_bytes.exceeded(now, len) || flood;
@@ -171,7 +174,7 @@ impl Link {
             session_key,
         };
         let (link, ctl) = Link::new(conn, peer, side, (send, recv), frags);
-        if !link.current() {
+        if !cfg!(feature = "mutant-si18-link-accept-unchecked") && !link.current() {
             link.conn.close(close::STALE, b"");
             return Err(NetError::Closed);
         }
@@ -206,6 +209,11 @@ impl Link {
         self.peer
     }
 
+    /// The re-check on every datagram and stream the link touches (SI-18).
+    fn still_current(&self) -> bool {
+        cfg!(feature = "mutant-si18-no-datagram-gen-check") || self.current()
+    }
+
     fn current(&self) -> bool {
         match &self.side {
             Side::Host {
@@ -219,7 +227,11 @@ impl Link {
     /// Fragments into at most `MAX_FRAGMENTS` QUIC datagrams at the path's
     /// current `max_datagram_size`; drop-oldest. Never blocks.
     pub fn send_lan(&self, datagram: &LanDatagram) {
-        let Some(max) = self.conn.max_datagram_size().filter(|_| self.current()) else {
+        let Some(max) = self
+            .conn
+            .max_datagram_size()
+            .filter(|_| self.still_current())
+        else {
             bump(&self.counters.dropped_send);
             return;
         };
@@ -251,7 +263,7 @@ impl Link {
                 None => self.conn.read_datagram().await,
             }
             .map_err(|_| NetError::Closed)?;
-            if !self.current() {
+            if !self.still_current() {
                 self.conn.close(close::STALE, b"");
                 return Err(NetError::Closed);
             }
@@ -319,7 +331,7 @@ impl Link {
         }
         loop {
             let (mut send, mut recv) = self.conn.accept_bi().await.map_err(|_| NetError::Closed)?;
-            if !self.current() {
+            if !self.still_current() {
                 self.conn.close(close::STALE, b"");
                 return Err(NetError::Closed);
             }
@@ -441,7 +453,11 @@ impl CtlStream {
                 self.prefix_have = self.prefix_have.saturating_add(n);
                 continue;
             }
-            let len = frame_len::<M>(self.prefix).map_err(wire)?;
+            let len = if cfg!(feature = "mutant-si23-ctl-length-unchecked") {
+                usize::try_from(u32::from_be_bytes(self.prefix)).unwrap_or(0)
+            } else {
+                frame_len::<M>(self.prefix).map_err(wire)?
+            };
             self.wait_for_budget(len).await;
             self.body = Some((vec![0; len], 0));
         }
@@ -463,6 +479,9 @@ impl CtlStream {
 
     async fn wait_for_budget(&mut self, len: usize) {
         let len = u64::try_from(len).unwrap_or(u64::MAX).min(CTL_BYTE_RATE);
+        if cfg!(feature = "mutant-si23-no-ctl-rate") {
+            return;
+        }
         loop {
             let now = Instant::now();
             if self.msgs.ready(now, 1) && self.bytes.ready(now, len) {

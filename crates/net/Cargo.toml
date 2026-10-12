@@ -5,9 +5,32 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
 
 [lints]
 workspace = true
+
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si18-hook-admits-unknown = []
+mutant-si18-no-establish-recheck = []
+mutant-si18-link-accept-unchecked = []
+mutant-si18-no-datagram-gen-check = []
+mutant-si18-set-admitted-keeps-stale = []
+mutant-si18-duplicate-connections = []
+mutant-si21-guest-serves = []
+mutant-si23-no-datagram-budget = []
+mutant-si23-ctl-length-unchecked = []
+mutant-si23-no-ctl-rate = []
+mutant-si23-no-per-link-reassembly-cap = []
+mutant-si23-no-global-reassembly-cap = []
+mutant-si23-door-no-invalid-limit = []
+mutant-si23-no-handshake-deadline = []
+mutant-si29-scope-any = []
+mutant-si29-no-connect-guard = []
+mutant-si31-publish-all = []
+mutant-si31-unbound = []
 
 [dependencies]
 kickoff-wire.workspace = true

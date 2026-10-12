@@ -306,7 +306,7 @@ impl InvalidLimiter {
     fn blocked(&mut self, now: Instant, id: EndpointId, priority: bool) -> bool {
         let own = self.per_id.get_mut(&id).is_some_and(|w| w.full(now));
         let global = !priority && self.global_window(now).full(now);
-        own || global
+        !cfg!(feature = "mutant-si23-door-no-invalid-limit") && (own || global)
     }
 
     fn record(&mut self, now: Instant, id: EndpointId) {
