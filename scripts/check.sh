@@ -28,6 +28,10 @@ for manifest in crates/*/Cargo.toml bins/*/Cargo.toml xtask/Cargo.toml; do
 done
 echo ok
 
+step "vendored iroh (design §3.4)"
+# Upstream iroh 1.3.0 plus the one reviewed patch, nothing else.
+scripts/check-vendor.sh
+
 step "cargo fmt --check"
 cargo fmt --all --check
 
