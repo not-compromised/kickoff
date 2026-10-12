@@ -160,11 +160,13 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
    connects and stalls delays the next accept by up to 1 s. Other uids are
    refused before anything is read.
 10. **Cancelled I/O fails closed.** Dropping a polled `Client::call`,
-    `Channel::recv` or `Channel::reply` before completion permanently closes
-    that endpoint. Later operations return `Closed`, so a held reply cannot
+    `Channel::recv` or `Channel::reply` before completion makes that endpoint
+    permanently unusable. Later operations return `Closed`, so a held reply cannot
     answer another command and a partial frame cannot become a new request.
     Dropping an unpolled future leaves the endpoint usable. Completed calls,
-    receives and replies preserve normal sequential use.
+    receives and replies preserve normal sequential use. Drop the endpoint
+    and reconnect after cancellation; an already dispatched command is not
+    rolled back.
 11. **Ancillary data is refused by giving it no room.** Every read is a
     `recvmsg` with a zero-length control buffer, on both ends. The kernel
     then closes any `SCM_RIGHTS` descriptors itself (they never enter this
