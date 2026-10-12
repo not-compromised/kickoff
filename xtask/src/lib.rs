@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub mod invariants;
 pub mod policy;
 pub mod registry;
+pub mod scope;
 pub mod workspace;
 
 pub const REGISTRY_FILE: &str = "mutants.toml";
@@ -35,6 +36,7 @@ pub fn load(
         |file: &str| std::fs::read_to_string(root.join(file)).map_err(|e| format!("{file}: {e}"));
     let registry = registry::parse(&read(REGISTRY_FILE)?).map_err(|e| e.to_string())?;
     let rows = invariants::parse(&read(INVARIANTS_FILE)?).map_err(|e| e.to_string())?;
+    scope::check_claims(&read("docs/design.md")?, &rows)?;
     let ws = workspace::Workspace::load(root).map_err(|e| format!("workspace: {e}"))?;
     Ok((registry, rows, ws))
 }

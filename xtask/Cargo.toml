@@ -17,6 +17,7 @@ path = "src/main.rs"
 [features]
 # SI-33 mutant (see /mutants.toml): the policy stops checking mutants.
 mutant-si33-tests-only = []
+mutant-si33-no-scope-check = []
 # SI-33 mutant: the policy stops checking that mutant crates carry the
 # release guard.
 mutant-si33-no-release-guard-check = []

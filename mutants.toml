@@ -180,3 +180,6 @@ note = "the policy stops checking that rows have registered mutants"
 
 [[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-no-state-lock", test = "si_22_concurrent_creators_return_the_published_identity", note = "identity transactions do not hold the kernel state lock"
 [[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-stale-trust-save", test = "si_22_stale_trust_save_cannot_restore_a_reset_identity", note = "a stale trust snapshot overwrites a reset revocation"
+[[mutant]] si = "SI-33", crate = "kickoff-xtask", feature = "mutant-si33-no-scope-check", test = "si_33_linux_m2_refuses_an_invariant_scoped_only_to_windows", note = "platform scope no longer constrains Linux M2 or numbered claims"
+
+[[mutant]] si = "SI-33", crate = "kickoff-xtask", feature = "mutant-si33-no-scope-check", test = "si_33_claim_scope_rejects_windows_same_user_containment_and_missing_mapping", note = "scope and claim mapping validation removed"

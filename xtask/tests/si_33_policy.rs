@@ -151,3 +151,51 @@ fn si_33_registered_mutants_must_point_at_declared_features_and_real_tests() {
         item: s("mutant")
     }));
 }
+
+#[test]
+fn si_33_linux_m2_refuses_an_invariant_scoped_only_to_windows() {
+    let (registry, mut rows, ws) = load(&root()).unwrap();
+    let baseline = policy::check(&rows, &registry, &ws, MILESTONE);
+    let row = rows.iter_mut().find(|row| row.id == "SI-7").unwrap();
+    row.scope = "Windows".to_owned();
+    let report = policy::check(&rows, &registry, &ws, MILESTONE);
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|f| !baseline.failures.contains(f)),
+        "Linux M2 accepted a Windows-only invariant"
+    );
+}
+
+#[test]
+fn si_33_claim_scope_rejects_windows_same_user_containment_and_missing_mapping() {
+    let (_, rows, _) = load(&root()).unwrap();
+    let design = std::fs::read_to_string(root().join("docs/design.md")).unwrap();
+    assert!(kickoff_xtask::scope::check_claims(&design, &rows).is_ok());
+    let widened = design.replace("| SI-34 | SI-34 | — |", "| SI-34 | SI-34 | SI-34 |");
+    assert_ne!(widened, design);
+    assert!(kickoff_xtask::scope::check_claims(&widened, &rows).is_err());
+    for bad in [
+        design
+            .lines()
+            .filter(|l| !l.starts_with("| 14 |"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        design.replace("| SI-30 | SI-30 | SI-30 |", "| SI-404 | SI-30 | SI-30 |"),
+        design.replace("| SI-30 | SI-30 | SI-30 |", "| | SI-30 | SI-30 |"),
+        design.replace("| SI-30 | SI-30 | SI-30 |", "| — | — | — |"),
+        design.replace("Invariants Linux", "Invariants Solaris"),
+        design
+            .lines()
+            .filter(|l| !l.starts_with("| # | Claim |"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ] {
+        assert_ne!(bad, design);
+        assert!(kickoff_xtask::scope::check_claims(&bad, &rows).is_err());
+    }
+    let mut unknown = rows;
+    unknown.iter_mut().find(|r| r.id == "SI-30").unwrap().scope = "Linuz".to_owned();
+    assert!(kickoff_xtask::scope::check_claims(&design, &unknown).is_err());
+}

@@ -13,38 +13,76 @@ use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Finding {
+    Scope {
+        detail: String,
+    },
     /// The row has no `si_<n>_` test and names none.
-    NoTest { si: String },
+    NoTest {
+        si: String,
+    },
     /// The Enforced-by column names a test function nobody defines.
-    NamedTestMissing { si: String, test: String },
+    NamedTestMissing {
+        si: String,
+        test: String,
+    },
     /// No registered mutant carries this row's id.
-    NoMutant { si: String },
+    NoMutant {
+        si: String,
+    },
     /// The Mutant column names a build mutant the registry lacks.
-    NamedMutantUnregistered { si: String, feature: String },
+    NamedMutantUnregistered {
+        si: String,
+        feature: String,
+    },
     /// A registry entry names a package that is not in the workspace.
-    UnknownPackage { feature: String, package: String },
+    UnknownPackage {
+        feature: String,
+        package: String,
+    },
     /// A registry entry's feature is not declared by its package.
-    FeatureUndeclared { package: String, feature: String },
+    FeatureUndeclared {
+        package: String,
+        feature: String,
+    },
     /// A registry entry's feature is not `mutant-si<n>-...` for its row.
-    FeatureNameMismatch { si: String, feature: String },
+    FeatureNameMismatch {
+        si: String,
+        feature: String,
+    },
     /// A registry entry's test is not defined in its test package.
-    MutantTestMissing { feature: String, test: String },
+    MutantTestMissing {
+        feature: String,
+        test: String,
+    },
     /// A package declares a mutant feature that no registry entry runs.
-    FeatureUnregistered { package: String, feature: String },
+    FeatureUnregistered {
+        package: String,
+        feature: String,
+    },
     /// A package declares mutant features but its build script is not the
     /// release guard.
-    NoReleaseGuard { package: String },
+    NoReleaseGuard {
+        package: String,
+    },
     /// An `si_<n>_` test of a held row has no mutant and no recorded reason.
-    TestUnaccounted { test: String },
+    TestUnaccounted {
+        test: String,
+    },
     /// An `[[unmutated]]` entry names a missing test or one that has a mutant.
-    StaleUnmutated { test: String },
+    StaleUnmutated {
+        test: String,
+    },
     /// A `[[pending]]` entry is no longer missing.
-    StalePending { si: String, item: String },
+    StalePending {
+        si: String,
+        item: String,
+    },
 }
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Finding::Scope { detail } => write!(f, "{detail}"),
             Finding::NoTest { si } => write!(f, "{si}: no si_<n>_ test exists"),
             Finding::NamedTestMissing { si, test } => {
                 write!(f, "{si}: named test `{test}` is not defined")
@@ -117,6 +155,11 @@ pub struct Report {
 /// Checks every row held in `milestone` and the whole registry.
 pub fn check(rows: &[Row], registry: &Registry, ws: &Workspace, milestone: &str) -> Report {
     let mut found = BTreeSet::new();
+    found.extend(
+        crate::scope::check_rows(rows, milestone)
+            .into_iter()
+            .map(|detail| Finding::Scope { detail }),
+    );
     let held: Vec<&Row> = rows.iter().filter(|r| r.held_in(milestone)).collect();
 
     for row in &held {

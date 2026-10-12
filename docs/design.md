@@ -49,23 +49,26 @@ Measured on a fresh Windows 11 PC with Rocket League installed from Epic, and on
 
 ### 1.2 Claims, and the design choice behind each
 
-| # | Claim | Design choice that delivers it |
-|---|---|---|
-| 1 | Runs on Windows and on Linux (Heroic/umu); one link per platform | One L2 codec with two tap adapters (§3.2, §3.3); a landing page with one download button per platform (§8.4) |
-| 2 | Kickoff never puts a modified file where an anti-cheat session can load it | Kickoff writes only immutable copy generations that no launcher knows about and that lack the EAC bootstrap. The online install is read-only to Kickoff: a Landlock rule on Linux, read-only handles on Windows (§5.3). One stated exception on Linux: legendary refreshing its own login session, as it does on every normal Play (§6.4) |
-| 3 | A malicious map or peer cannot get you banned by modifying your game | **Linux:** the game runs in the gamebox, where the online install is not mounted and the copy is read-only (§3.2). **Windows:** only in contained mode (§8.2). Otherwise this is a residual risk, shown at install and when a session starts |
-| 4 | A malicious map cannot read your files or control your desktop | **Linux:** the gamebox shows the game only its copy, an ephemeral prefix, a render node, a restricted audio socket and gamescope's own display server (§3.2). **Windows:** contained mode only (§8.2) |
-| 5 | Peers can reach only the Rocket League process Kickoff started | Linux: peer traffic exists only inside the gamebox network namespace. Windows: a WFP permit bound to one game process, one user and one image, held by a service handle and removed when that process exits (§3.3). The wire carries UDP tuples, never Ethernet or IP (§3.1) |
-| 6 | A crash or game update never leaves anything to repair | Nothing is written to the online install. A new game build gets a new copy generation (§5.3) |
-| 7 | No accounts beyond your game account | Invites are https links that open Kickoff, or offer the download if it is missing (§4.2) |
-| 8 | Smallest privileged surface | Linux: no root at install or at run time. Windows: solo play needs no driver or service; multiplayer adds one SYSTEM service that holds the tap and WFP filters and never touches a file (§3.3) |
-| 9 | Lower relay dependence | Direct QUIC paths after admission, with an egress guard on every transport send (§3.4) |
-| 10 | Maps reach friends as the exact bytes the host has | Content addressing and whole-file BLAKE3, computed by kickoffd itself (§5.2) |
-| 11 | Game traffic never waits behind a map download | QUIC datagrams for LAN traffic; transfers yield to the host's own measured game state (§3.4) |
-| 12 | A compromised download host cannot fake the first install, push an update or silently freeze updates | Authenticode on Windows and independent package pins on Linux for the first install; an offline-signed release record with root epochs, sequence and expiry after that (§8.4) |
-| 13 | Open, reproducible and reviewed | Approved inputs, two isolated builders, signing bound to provenance and test evidence (§8.4) |
-| 14 | Diagnostics carry no secrets | Allowlisted schema; secrets are a type that cannot be printed; no core dumps (§6.4) |
-| 15 | A built-in map browser that credits authors | A signed catalog of map pages; downloads come from the author's own site, on your machine (§5.7) |
+The invariant columns are the authoritative SI-33 claim/platform mapping. `—` means the claim is not made in that mode. Windows same-user includes stock mode; contained mode is option A (§8.2). Scope checks run now; exact-artifact release evidence lands in M11.
+
+| # | Claim | Design choice that delivers it | Invariants Linux | Invariants Windows contained | Invariants Windows same-user |
+|---|---|---|---|---|---|
+| 1 | Runs on Windows and on Linux (Heroic/umu); one link per platform | One L2 codec with two tap adapters (§3.2, §3.3); a landing page with one download button per platform (§8.4) | SI-10 | SI-10 | SI-10 |
+| 2 | Kickoff never puts a modified file where an anti-cheat session can load it | Kickoff writes only immutable copy generations that no launcher knows about and that lack the EAC bootstrap. The online install is read-only to Kickoff: a Landlock rule on Linux, read-only handles on Windows (§5.3). One stated exception on Linux: legendary refreshing its own login session, as it does on every normal Play (§6.4) | SI-1, SI-2, SI-3, SI-39 | SI-1, SI-2, SI-3, SI-39 | SI-1, SI-2, SI-3, SI-39 |
+| 3 | A malicious map or peer cannot get you banned by modifying your game | **Linux:** the game runs in the gamebox, where the online install is not mounted and the copy is read-only (§3.2). **Windows:** only in contained mode (§8.2). Otherwise this is a residual risk, shown at install and when a session starts | SI-34 | SI-34 | — |
+| 4 | A malicious map cannot read your files or control your desktop | **Linux:** the gamebox shows the game only its copy, an ephemeral prefix, a render node, a restricted audio socket and gamescope's own display server (§3.2). **Windows:** contained mode only (§8.2) | SI-14, SI-34, SI-35, SI-36 | SI-34, SI-36 | — |
+| 5 | Peers can reach only the Rocket League process Kickoff started | Linux: peer traffic exists only inside the gamebox network namespace. Windows: a WFP permit bound to one game process, one user and one image, held by a service handle and removed when that process exits (§3.3). The wire carries UDP tuples, never Ethernet or IP (§3.1) | SI-11, SI-12 | SI-11, SI-12, SI-40 | SI-11, SI-12, SI-40 |
+| 6 | A crash or game update never leaves anything to repair | Nothing is written to the online install. A new game build gets a new copy generation (§5.3) | SI-4, SI-5 | SI-4, SI-5 | SI-4, SI-5 |
+| 7 | No accounts beyond your game account | Invites are https links that open Kickoff, or offer the download if it is missing (§4.2) | SI-20 | SI-20 | SI-20 |
+| 8 | Smallest privileged surface | Linux: no root at install or at run time. Windows: solo play needs no driver or service; multiplayer adds one SYSTEM service that holds the tap and WFP filters and never touches a file (§3.3) | SI-13 | SI-6, SI-8 | SI-6, SI-8 |
+| 9 | Lower relay dependence | Direct QUIC paths after admission, with an egress guard on every transport send (§3.4) | SI-29, SI-31 | SI-29, SI-31 | SI-29, SI-31 |
+| 10 | Maps reach friends as the exact bytes the host has | Content addressing and whole-file BLAKE3, computed by kickoffd itself (§5.2) | SI-5, SI-37 | SI-5, SI-37 | SI-5, SI-37 |
+| 11 | Game traffic never waits behind a map download | QUIC datagrams for LAN traffic; transfers yield to the host's own measured game state (§3.4) | SI-23 | SI-23 | SI-23 |
+| 12 | A compromised download host cannot fake the first install, push an update or silently freeze updates | Authenticode on Windows and independent package pins on Linux for the first install; an offline-signed release record with root epochs, sequence and expiry after that (§8.4) | SI-24, SI-25, SI-26 | SI-24, SI-25, SI-26 | SI-24, SI-25, SI-26 |
+| 13 | Open, reproducible and reviewed | Approved inputs, two isolated builders, signing bound to provenance and test evidence (§8.4) | SI-26, SI-27, SI-33 | SI-26, SI-27, SI-33 | SI-26, SI-27, SI-33 |
+| 14 | Diagnostics carry no secrets | Allowlisted schema; secrets are a type that cannot be printed; no core dumps (§6.4) | SI-30 | SI-30 | SI-30 |
+| 15 | A built-in map browser that credits authors | A signed catalog of map pages; downloads come from the author's own site, on your machine (§5.7) | SI-29 | SI-29 | SI-29 |
+
 
 ### 1.3 First-run journeys
 
