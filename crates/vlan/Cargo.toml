@@ -5,9 +5,23 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
 
 [lints]
 workspace = true
+
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si18-flows-survive-reset = []
+mutant-si21-star-open = []
+mutant-si23-no-peer-budget = []
+mutant-si23-no-byte-budget = []
+mutant-si23-filter-before-charge = []
+mutant-si23-unbounded-game-queue = []
+mutant-si23-no-broadcast-budget = []
+mutant-si23-flow-table-grows = []
+mutant-si23-reset-refills-budget = []
 
 [dependencies]
 kickoff-wire.workspace = true

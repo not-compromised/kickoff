@@ -151,6 +151,10 @@ pub enum HostMsg {
     },
     Ping,
     End,
+    #[cfg(feature = "mutant-si3-path-field")]
+    Launch {
+        path: std::path::PathBuf,
+    },
 }
 
 /// `JoinRequest` carries a capability, so it implements no serde trait of its
@@ -257,7 +261,7 @@ impl WireMessage for JoinRequest {
 /// The message body, without the length prefix.
 pub fn encode<M: WireMessage>(msg: &M) -> Result<Bytes, WireError> {
     let body = msg.write()?;
-    if body.len() > M::MAX_LEN {
+    if !cfg!(feature = "mutant-si23-no-message-cap") && body.len() > M::MAX_LEN {
         return Err(WireError::TooLong { max: M::MAX_LEN });
     }
     Ok(Bytes::from(body))
@@ -269,7 +273,7 @@ pub fn encode<M: WireMessage>(msg: &M) -> Result<Bytes, WireError> {
 /// trailing bytes, over-long varints, unsorted or duplicate address sets,
 /// unknown nested variants.
 pub fn decode<M: WireMessage>(bytes: &[u8]) -> Result<M, WireError> {
-    if bytes.len() > M::MAX_LEN {
+    if !cfg!(feature = "mutant-si23-no-message-cap") && bytes.len() > M::MAX_LEN {
         return Err(WireError::TooLong { max: M::MAX_LEN });
     }
     if let (Some(known), Ok((index, _))) = (M::VARIANTS, postcard_read::<u32>(bytes))
@@ -299,7 +303,7 @@ pub fn encode_framed<M: WireMessage>(msg: &M) -> Result<Bytes, WireError> {
 pub fn frame_len<M: WireMessage>(prefix: [u8; LEN_PREFIX_LEN]) -> Result<usize, WireError> {
     let len = usize::try_from(u32::from_be_bytes(prefix))
         .map_err(|_| WireError::TooLong { max: M::MAX_LEN })?;
-    if len > M::MAX_LEN {
+    if !cfg!(feature = "mutant-si23-no-frame-cap") && len > M::MAX_LEN {
         return Err(WireError::TooLong { max: M::MAX_LEN });
     }
     if len == 0 {

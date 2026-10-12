@@ -1,7 +1,7 @@
 //! `cargo run -p kickoff-xtask -- <command>`
 //!
-//! - `mutants [FILTER...]`: runs every registered mutant, or those whose SI,
-//!   feature or test contains a FILTER. Each test must pass without its
+//! - `mutants [FILTER...]`: runs every registered mutant, or those whose SI
+//!   or package equals a FILTER or whose feature or test contains one. Each test must pass without its
 //!   feature and fail with it; a mutant that does not compile is an error,
 //!   not a pass.
 //! - `release-guard`: a release build of each package that has mutants, with
@@ -71,7 +71,11 @@ fn mutants(filters: &[String]) -> Result<(), String> {
         .filter(|m| {
             filters.is_empty()
                 || filters.iter().any(|f| {
-                    m.si == *f || m.feature.contains(f.as_str()) || m.test.contains(f.as_str())
+                    m.si == *f
+                        || m.krate == *f
+                        || m.test_crate == *f
+                        || m.feature.contains(f.as_str())
+                        || m.test.contains(f.as_str())
                 })
         })
         .collect();

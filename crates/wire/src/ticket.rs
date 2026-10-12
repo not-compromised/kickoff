@@ -36,6 +36,13 @@ pub struct Cap {
     pub sig: Signature,
 }
 
+#[cfg(feature = "mutant-si30-cap-debug")]
+impl std::fmt::Debug for Cap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Cap")
+    }
+}
+
 impl Cap {
     pub(crate) fn sign(
         door_key: &Secret<SecretKey>,
