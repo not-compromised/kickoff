@@ -137,8 +137,8 @@ Some earlier choices make steps harder, and each is still open:
 
 ```
 kickoff/crates/
-  wire/     postcard messages, LAN header, tickets, L2 frame codec   (pure, forbid(unsafe))
-  vlan/     game-facing LAN: filter + adapters NsTap, WinTap, Mem
+  wire/     postcard messages, LAN header, tickets, confined secret transmission (forbid(unsafe))
+  vlan/     game-facing L2 codec, filter + adapters NsTap, WinTap, Mem
   net/      iroh door and session endpoints, fragmentation, egress policy and send guard
   session/  admission (identity × generation), approvals, roster, pump, budgets
   store/    the only module that writes or opens game-reachable files
@@ -146,6 +146,7 @@ kickoff/crates/
   maps/     library, transfer, catalog, sources (decoding goes through parse)
   game/     install discovery (read-only), copy generations, gamebox + display sandbox launch, state
   ipc/      local channels: peer authentication, versioned role-scoped commands
+  local/    shared Linux kernel authentication and ancillary-refusing transport
   secret/   Secret<T>, process hardening, diagnostics schema
 vendor/iroh-1.3.0/   upstream plus one audited send-guard patch (§3.4)
 vendor/noq-1.3.0/    upstream plus one audited stable send-context patch (§3.4)
@@ -153,9 +154,18 @@ bins/  kickoffd  kickoff  kickoff-parse  kickoff-gamebox  kickoff-svc
 ui/  site/ (landing page)  packaging/  tests/
 ```
 
+Wire keeps secret serialization and each borrowed transport write within its
+designated consumer (§6.4). Public byte encoders accept only nonsecret message
+types. Local transmission requires a fixed installed-peer capability; a Join
+transmission verifies its immutable issuing door before opening a QUIC stream.
+
 ### 2.3 Module interfaces
 
-Each module is deep: a small interface over the hard part. Each seam has at least two adapters. Draft 3 changes the `net`, `session`, `store`, `game` and `parse` interfaces only where a finding required it; `wire` and `vlan` are unchanged.
+Each module is deep: a small interface over the hard part. Adapter seams have
+at least two adapters. The sketches below describe module responsibilities;
+the crate READMEs record their implemented M2 interfaces. Wire's designated
+transmission owner keeps serialized secrets within the §6.4 consumer, while
+VLAN generation resets are coordinated by session's admission owner.
 
 **`vlan`** hides the frame codec (ARP answered locally, MAC synthesis, IPv4/UDP build and checksums), the filter and adapter I/O.
 ```rust

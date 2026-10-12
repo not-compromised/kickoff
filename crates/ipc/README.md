@@ -128,7 +128,8 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
    requires explicit removal of the stale name before starting a daemon.
 3. **`SO_PEERPIDFD` comes from `nix`, liveness from `poll`.** rustix 1.1.5
    has no `SO_PEERPIDFD` wrapper; `nix` 0.31.3 (`socket` feature only) has a
-   safe one, so it is a new dependency of this crate. The design names
+   safe one used by the shared local authentication owner. IPC also uses nix
+   for its private control pair. The design names
    `pidfd_send_signal(pidfd, 0)` for the liveness check, but rustix's
    `Signal` cannot be 0 without `unsafe`; a pidfd polls readable once its
    process has exited, so "not readable" answers the same question (and also
@@ -153,7 +154,8 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
    and not a symlink.
 8. **Installed binaries** are `kickoffd`, `kickoff` and `kickoff-ui` next to
    the running executable. Packaging must keep them in one directory; if the
-   Tauri binary gets another name, change `CLIENT_BINARIES` in `trust.rs`.
+   Tauri binary gets another name, change `CLIENT_BINARIES` in
+   [`kickoff-local::trust`](../local/src/trust.rs).
 9. **`Server::accept` does the handshake inline**, so a same-uid caller that
    connects and stalls delays the next accept by up to 1 s. Other uids are
    refused before anything is read.

@@ -2,8 +2,9 @@
 
 Kickoff's peer-facing formats (design §4.2, §4.5): the LAN datagram header and
 fragments, join and control messages, tickets, and the host's ledger of the
-capabilities it issued. Pure: no files, no network. The only call out of the
-process is `getrandom`, for fresh session ids and nonces.
+capabilities it issued. Codec and invitation operations perform no I/O except
+fresh randomness. The designated transmission owner writes protected frames
+directly to authenticated local or QUIC recipients.
 
 Every decoder reads hostile bytes. Sizes are bounded by type and checked before
 allocation; decoding is strict, so a decoded value re-encodes to exactly the
@@ -32,10 +33,10 @@ lives in [`kickoff-vlan::codec`](../vlan/src/codec.rs).
 | SI | Test |
 |---|---|
 | SI-3 | `schema_tests::si_3_peer_messages_cannot_express_eac_paths_or_launch_options` |
-| SI-20 | `tests/tickets.rs`: `si_20_capability_admits_at_most_once`, `si_20_replayed_capability_refused`, `si_20_ticket_from_another_session_or_host_process_refused`, `si_20_bearer_validity_uses_host_monotonic_clock` |
-| SI-23 (wire part) | `bounded::tests::si_23_bounded_vec_refuses_a_declared_length_before_reserving_for_it`, `tests/messages.rs`: `si_23_*` |
-| SI-29 (tickets) | `tests/tickets.rs`: `si_29_ticket_cannot_carry_direct_address` |
-| SI-30 | `tests/tickets.rs`: `si_30_caps_tickets_and_join_requests_cannot_be_printed_cloned_or_serialized`, `si_30_ticket_errors_carry_no_input` |
+| SI-20 | `src/tickets_tests.rs`: `si_20_capability_admits_at_most_once`, `si_20_replayed_capability_refused`, `si_20_ticket_from_another_session_or_host_process_refused`, `si_20_bearer_validity_uses_host_monotonic_clock` |
+| SI-23 (wire part) | `bounded::tests::si_23_bounded_vec_refuses_a_declared_length_before_reserving_for_it`, `src/messages_tests.rs`: `si_23_*` |
+| SI-29 (tickets) | `src/tickets_tests.rs`: `si_29_ticket_cannot_carry_direct_address` |
+| SI-30 | `src/tickets_tests.rs`: `si_30_caps_tickets_and_join_requests_cannot_be_printed_cloned_or_serialized`, `si_30_ticket_errors_carry_no_input`; downstream ownership contracts in `tests/secret_owners.rs`; live frame wipe proof in `src/transport.rs` |
 
 ## Fuzzing
 

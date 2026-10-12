@@ -137,10 +137,11 @@ scaffolding M2.
    design says a link carries.
 6. **`JoinAttempt::answer(Result<Admitted, JoinRefused>)`** is how the host
    replies; §2.3 names `JoinAttempt` without a reply path.
-7. **`CtlStream::{send, recv}` are generic over a sealed `WireMessage`**, whose
-   `MAX_LEN` bounds each message type (join 4 KiB, control 64 KiB).
-8. **The L2 frame codec is in `vlan`** as §2.3 says; §2.2 lists it under
-   `wire`. One of the two should change.
+7. **`CtlStream` uses sealed message types.** Receive uses `WireMessage`;
+   send requires `PublicWireMessage`, excluding secret-bearing Join requests.
+   `MAX_LEN` bounds each type: join 4 KiB, control 64 KiB.
+8. **The L2 frame codec is in `vlan`.** Both workspace layout (§2.2) and
+   module interface (§2.3) use that owner.
 9. **iroh default features are off.** Kept `tls-ring`. Dropped `portmapper`,
    which maps router ports over UPnP/PCP/NAT-PMP and advertises them as extra
    candidates, against §3.4 and SI-31; dropped `metrics` and
