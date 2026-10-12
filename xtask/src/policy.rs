@@ -178,7 +178,10 @@ pub fn check(rows: &[Row], registry: &Registry, ws: &Workspace, milestone: &str)
                 });
             }
         }
-        if !package.mutant_features.is_empty() && !package.guarded(&ws.root) {
+        if !cfg!(feature = "mutant-si33-no-release-guard-check")
+            && !package.mutant_features.is_empty()
+            && !package.guarded(&ws.root)
+        {
             found.insert(Finding::NoReleaseGuard {
                 package: package.name.clone(),
             });

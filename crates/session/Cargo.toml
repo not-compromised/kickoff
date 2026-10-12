@@ -5,9 +5,37 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
 
 [lints]
 workspace = true
+
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si18-no-gen-check = []
+mutant-si18-deliver-outside-lock = []
+mutant-si18-two-seats-per-identity = []
+mutant-si18-claimed-session-key = []
+mutant-si18-no-flow-reset = []
+mutant-si18-link-up-any = []
+mutant-si19-trust-overrides-kick = []
+mutant-si19-kick-does-not-revoke = []
+mutant-si21-link-to-link = []
+mutant-si23-over-budget-is-a-drop = []
+mutant-si23-no-hello-deadline = []
+# Both ingress budgets at once: the link's (net) and the LAN's (vlan) each
+# hold the flooded guest alone.
+mutant-si23-unbudgeted-ingress = [
+    "kickoff-net/mutant-si23-no-datagram-budget",
+    "kickoff-vlan/mutant-si23-no-peer-budget",
+]
+# A bound capability raced by its own invitee is held by spend-once (wire)
+# and by one seat per identity (here); this removes both.
+mutant-si20-reusable-cap-and-seat = [
+    "kickoff-wire/mutant-si20-nonatomic-nonce",
+    "mutant-si18-two-seats-per-identity",
+]
 
 [dependencies]
 iroh-base.workspace = true

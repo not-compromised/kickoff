@@ -136,20 +136,23 @@ impl Admission {
         request: &JoinRequest,
         now: Instant,
     ) -> Result<Joined, JoinRefused> {
-        if self.revoked.contains(&id) {
+        let trust_wins =
+            cfg!(feature = "mutant-si19-trust-overrides-kick") && self.trusted.contains(&id);
+        if self.revoked.contains(&id) && !trust_wins {
             return Err(JoinRefused::Revoked);
         }
         if !compatible(request.kickoff_version) {
             return Err(JoinRefused::Version);
         }
-        if self.seat_of(id).is_some() {
+        if !cfg!(feature = "mutant-si18-two-seats-per-identity") && self.seat_of(id).is_some() {
             return Err(JoinRefused::Busy);
         }
         // A session key names exactly one admission in the published set; a
         // claimed duplicate would overwrite another guest's entry.
         let key = request.session_key;
-        if self.host_keys.contains(&key)
-            || self.seats.iter().flatten().any(|s| s.session_key == key)
+        if !cfg!(feature = "mutant-si18-claimed-session-key")
+            && (self.host_keys.contains(&key)
+                || self.seats.iter().flatten().any(|s| s.session_key == key))
         {
             return Err(JoinRefused::InvalidCap);
         }
@@ -220,6 +223,11 @@ impl Admission {
     /// A link arrived for `peer` and its first message was `Hello { pass }`.
     /// True if that makes the seat live.
     pub(crate) fn link_up(&mut self, peer: PeerRef, pass: Generation) -> bool {
+        if cfg!(feature = "mutant-si18-link-up-any") {
+            return index_of(peer.slot)
+                .and_then(|i| self.seats.get(i))
+                .is_some_and(Option::is_some);
+        }
         match self.seat_at_mut(peer) {
             Some(seat) if seat.pass == pass => match seat.state {
                 State::Admitted { .. } | State::Reconnecting { .. } => {
@@ -252,7 +260,9 @@ impl Admission {
         if !self.revoked.contains(&id) && self.revoked.len() >= MAX_REVOKED {
             return Err(RevokedFull);
         }
-        self.revoked.insert(id);
+        if !cfg!(feature = "mutant-si19-kick-does-not-revoke") {
+            self.revoked.insert(id);
+        }
         self.bound.remove(&id);
         Ok(self.remove(id))
     }
@@ -460,6 +470,35 @@ mod tests {
         let index = adm.seat_of(id)?;
         let s = adm.seats.get(index)?.as_ref()?;
         Some((peer_of(index, s)?, s.pass))
+    }
+
+    /// SI-18, the session's layer under net's: a link makes a seat live only
+    /// if it names the seat's identity and current generation, its `Hello`
+    /// carries the pass, and the seat has no live link already.
+    #[test]
+    fn si_18_link_up_needs_the_seat_generation_and_pass() {
+        let door = Secret::new(SecretKey::from_bytes(&[200; 32]));
+        let host_key = SecretKey::from_bytes(&[201; 32]).public();
+        let mut adm =
+            Admission::new(&door, host_key, Name::new("host").unwrap(), [key(0)]).unwrap();
+        let session_key = SecretKey::from_bytes(&[150; 32]).public();
+        let Ok(Joined::Admitted(peer)) = adm.join(key(0), &request(session_key), Instant::now())
+        else {
+            panic!("a trusted identity is admitted");
+        };
+        let pass = peer.generation;
+        let wrong = Generation::new(999);
+        assert!(!adm.link_up(
+            PeerRef {
+                generation: wrong,
+                ..peer
+            },
+            pass
+        ));
+        assert!(!adm.link_up(PeerRef { id: key(1), ..peer }, pass));
+        assert!(!adm.link_up(peer, wrong), "a Hello without the pass");
+        assert!(adm.link_up(peer, pass));
+        assert!(!adm.link_up(peer, pass), "a second link for a live seat");
     }
 
     proptest! {

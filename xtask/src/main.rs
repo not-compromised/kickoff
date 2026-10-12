@@ -256,6 +256,9 @@ fn cargo(args: &[String], timeout: Duration) -> Result<Output, String> {
     let mut child = Command::new(program)
         .args(args)
         .current_dir(root())
+        // A mutant fails proptest suites on purpose; the counterexample must
+        // not be written into the source tree as a regression file.
+        .env("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
