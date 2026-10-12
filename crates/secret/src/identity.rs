@@ -21,9 +21,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use iroh_base::{EndpointId, SecretKey};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::key::IdentityKey;
+use crate::{OwnedSecret, Secret, Wipe};
 
 const APP_DIR: &str = "kickoff";
 const STATE_DIR: &str = "state";
@@ -208,6 +209,131 @@ pub struct IdentityStore {
     before_publish: Option<std::sync::Arc<(std::sync::Barrier, std::sync::Barrier)>>,
 }
 
+struct StateBytes {
+    bytes: std::cell::RefCell<Zeroizing<Vec<u8>>>,
+    used: std::cell::Cell<usize>,
+    #[cfg(test)]
+    allocation: (usize, usize),
+}
+
+struct StateConsumer;
+
+impl OwnedSecret for StateBytes {
+    type Consumer = StateConsumer;
+}
+
+impl StateBytes {
+    fn read(mut reader: impl Read, max_len: usize) -> Result<Secret<Self>, StoreError> {
+        let len = max_len.checked_add(1).ok_or(StoreError::Damaged)?;
+        let growing = cfg!(feature = "mutant-si30-identity-read-growth");
+        // Initialize the sentinel before reading keys. Only slices reach Read,
+        // so neither a full buffer nor an EOF probe can grow this allocation.
+        let bytes = if growing {
+            Vec::with_capacity(max_len)
+        } else {
+            vec![0; len]
+        };
+        let out = Secret::new(Self::new(bytes));
+        out.expose(&StateConsumer, |state| {
+            let mut bytes = state.bytes.borrow_mut();
+            if growing {
+                let limit = u64::try_from(max_len).map_err(|_| StoreError::Damaged)?;
+                reader
+                    .take(limit.saturating_add(1))
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| StoreError::Io(e.kind()))?;
+                state.used.set(bytes.len());
+            } else {
+                while let Some(remaining) = bytes
+                    .get_mut(state.used.get()..)
+                    .filter(|bytes| !bytes.is_empty())
+                {
+                    match reader.read(remaining) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            state.used.set(
+                                state
+                                    .used
+                                    .get()
+                                    .checked_add(read)
+                                    .filter(|used| *used <= len)
+                                    .ok_or(StoreError::Damaged)?,
+                            );
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => return Err(StoreError::Io(error.kind())),
+                    }
+                }
+            }
+            if state.used.get() > max_len {
+                return Err(StoreError::Damaged);
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            #[cfg(test)]
+            allocation: (bytes.as_ptr() as usize, bytes.capacity()),
+            bytes: std::cell::RefCell::new(Zeroizing::new(bytes)),
+            used: std::cell::Cell::new(0),
+        }
+    }
+
+    fn identity(&self) -> Result<IdentityKey, StoreError> {
+        let bytes = self.bytes.borrow();
+        decode_identity(bytes.get(..self.used.get()).unwrap_or_default())
+    }
+
+    fn trust(&self) -> Result<TrustList, StoreError> {
+        let bytes = self.bytes.borrow();
+        TrustList::decode(bytes.get(..self.used.get()).unwrap_or_default())
+    }
+}
+
+impl Wipe for StateBytes {
+    fn wipe(&mut self) {
+        let bytes = self.bytes.get_mut();
+        #[cfg(test)]
+        let before = STATE_READ_AUDIT.with(|audit| {
+            audit.borrow().as_ref().map(|audit| {
+                (
+                    bytes.get(HEADER_LEN..IDENTITY_LEN) == Some(audit.key.as_slice()),
+                    self.allocation == (bytes.as_ptr() as usize, bytes.capacity()),
+                    bytes.len(),
+                )
+            })
+        });
+        bytes.as_mut_slice().zeroize();
+        #[cfg(test)]
+        if let Some((owned_key, same_allocation, allocation_len)) = before {
+            STATE_READ_AUDIT.with(|audit| {
+                if let Some(audit) = audit.borrow_mut().as_mut() {
+                    audit.observations.push((
+                        owned_key,
+                        same_allocation,
+                        allocation_len,
+                        bytes.iter().all(|byte| *byte == 0),
+                    ));
+                }
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+struct StateReadAudit {
+    key: [u8; KEY_LEN],
+    observations: Vec<(bool, bool, usize, bool)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STATE_READ_AUDIT: std::cell::RefCell<Option<StateReadAudit>> = const { std::cell::RefCell::new(None) };
+}
+
 struct Transaction<'a> {
     fd: &'a OwnedFd,
     _local: MutexGuard<'a, ()>,
@@ -298,7 +424,7 @@ impl IdentityStore {
     pub fn load_or_create(&self) -> Result<IdentityKey, StoreError> {
         let _transaction = self.transaction()?;
         match self.read(IDENTITY, IDENTITY_LEN)? {
-            Some(bytes) => match decode_identity(&bytes) {
+            Some(bytes) => match bytes.expose(&StateConsumer, StateBytes::identity) {
                 Err(StoreError::Damaged) if cfg!(feature = "mutant-si22-replace-damaged") => {
                     let _ = rustix::fs::unlinkat(&self.dir, IDENTITY, AtFlags::empty());
                     self.create_identity()
@@ -317,7 +443,7 @@ impl IdentityStore {
     pub fn reset(&self) -> Result<IdentityKey, StoreError> {
         let _transaction = self.transaction()?;
         if let Some(bytes) = self.read(IDENTITY, IDENTITY_LEN)? {
-            let old = decode_identity(&bytes)?.public();
+            let old = bytes.expose(&StateConsumer, StateBytes::identity)?.public();
             let mut trust = self.read_trust()?;
             if !cfg!(feature = "mutant-si22-reset-keeps-trust") {
                 trust.revoke(old)?;
@@ -342,7 +468,7 @@ impl IdentityStore {
 
     fn read_trust(&self) -> Result<TrustList, StoreError> {
         match self.read(TRUST, TRUST_MAX_LEN)? {
-            Some(bytes) => TrustList::decode(&bytes),
+            Some(bytes) => bytes.expose(&StateConsumer, StateBytes::trust),
             None => Ok(TrustList::default()),
         }
     }
@@ -391,7 +517,7 @@ impl IdentityStore {
 
     /// `None` if `name` does not exist. Opened without following a symlink
     /// and without blocking on a FIFO, then checked on the open handle.
-    fn read(&self, name: &str, max_len: usize) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError> {
+    fn read(&self, name: &str, max_len: usize) -> Result<Option<Secret<StateBytes>>, StoreError> {
         let unchecked = cfg!(feature = "mutant-si22-file-unchecked");
         let follow = if unchecked {
             OFlags::empty()
@@ -416,16 +542,7 @@ impl IdentityStore {
         {
             return Err(StoreError::UnsafePath);
         }
-        let mut bytes = Zeroizing::new(Vec::with_capacity(max_len));
-        let limit = u64::try_from(max_len).map_err(|_| StoreError::Damaged)?;
-        File::from(fd)
-            .take(limit.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|e| StoreError::Io(e.kind()))?;
-        if bytes.len() > max_len {
-            return Err(StoreError::Damaged);
-        }
-        Ok(Some(bytes))
+        StateBytes::read(File::from(fd), max_len).map(Some)
     }
 
     /// Writes `bytes` to a staging file created exclusively with `FILE_MODE`,
@@ -587,6 +704,138 @@ fn decode_identity(bytes: &[u8]) -> Result<IdentityKey, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn si_30_overlong_persisted_identity_never_releases_an_unwiped_allocation() {
+        struct TempBase(PathBuf);
+        impl Drop for TempBase {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let base =
+            TempBase(std::env::temp_dir().join(format!("ksec-overlong-{}", std::process::id())));
+        std::fs::create_dir(&base.0).unwrap();
+        rustix::fs::chmod(&base.0, Mode::from_raw_mode(0o700)).unwrap();
+        let store = IdentityStore::open_in(&base.0).unwrap();
+        let path = base.0.join("kickoff/state/identity");
+        let key = [0xa7; 32];
+        let expected = SecretKey::from_bytes(&key).public();
+        let mut record = Zeroizing::new(b"KOID\0\x01".to_vec());
+        record.extend_from_slice(&key);
+        std::fs::write(&path, &*record).unwrap();
+        rustix::fs::chmod(&path, Mode::from_raw_mode(0o600)).unwrap();
+        STATE_READ_AUDIT.with(|audit| {
+            *audit.borrow_mut() = Some(StateReadAudit {
+                key,
+                observations: Vec::new(),
+            });
+        });
+        let loaded = store.load_or_create().unwrap();
+        assert_eq!(loaded.public(), expected);
+        expected
+            .verify(
+                b"persisted identity control",
+                &loaded.sign(b"persisted identity control"),
+            )
+            .unwrap();
+        STATE_READ_AUDIT.with(|audit| {
+            let audit = audit.borrow();
+            let observations = &audit.as_ref().unwrap().observations;
+            assert_eq!(observations.len(), 1);
+            let (owned_key, same_allocation, allocation_len, wiped) = observations[0];
+            assert!(
+                owned_key && same_allocation && allocation_len >= 38 && wiped,
+                "valid persisted key read wipes its live unchanged allocation before release"
+            );
+        });
+        let mut trust = store.trust_list().unwrap();
+        trust.trust(expected).unwrap();
+        store.save_trust(&trust).unwrap();
+        let trust_path = base.0.join("kickoff/state/trust");
+        let trust_before = std::fs::read(&trust_path).unwrap();
+        STATE_READ_AUDIT.with(|audit| audit.borrow_mut().as_mut().unwrap().observations.clear());
+        record.push(0xe3);
+        std::fs::write(&path, &*record).unwrap();
+        assert_eq!(store.load_or_create().err(), Some(StoreError::Damaged));
+        assert_eq!(store.reset().err(), Some(StoreError::Damaged));
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), record.as_slice());
+        assert_eq!(std::fs::read(&trust_path).unwrap(), trust_before);
+        let observations =
+            STATE_READ_AUDIT.with(|audit| audit.borrow_mut().take().unwrap().observations);
+        assert_eq!(
+            observations.len(),
+            2,
+            "both public error paths release their owned read buffer"
+        );
+        for (owned_key, same_allocation, allocation_len, wiped) in observations {
+            assert!(
+                owned_key,
+                "the live read allocation must contain the persisted synthetic key before wipe"
+            );
+            assert!(
+                same_allocation,
+                "identity read grew its key-bearing allocation before refusal"
+            );
+            assert_eq!(
+                allocation_len, 39,
+                "the sentinel must share the fixed wiping allocation"
+            );
+            assert!(
+                wiped,
+                "inspect the live owned allocation after wipe and before release"
+            );
+        }
+    }
+
+    #[test]
+    fn si_30_identity_read_wipes_after_partial_io_failure() {
+        struct FaultAfterKey {
+            file: File,
+            step: u8,
+        }
+        impl Read for FaultAfterKey {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.step = self.step.saturating_add(1);
+                match self.step {
+                    1 => self.file.read(&mut bytes[..38]),
+                    2 => Err(std::io::ErrorKind::Interrupted.into()),
+                    _ => Err(std::io::ErrorKind::Other.into()),
+                }
+            }
+        }
+        let path = std::env::temp_dir().join(format!("ksec-read-error-{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        rustix::fs::fchmod(&file, Mode::from_raw_mode(0o600)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let key = [0xb6; 32];
+        file.write_all(b"KOID\0\x01").unwrap();
+        file.write_all(&key).unwrap();
+        std::io::Seek::rewind(&mut file).unwrap();
+        STATE_READ_AUDIT.with(|audit| {
+            *audit.borrow_mut() = Some(StateReadAudit {
+                key,
+                observations: Vec::new(),
+            });
+        });
+        let result = StateBytes::read(FaultAfterKey { file, step: 0 }, 38);
+        assert_eq!(
+            result.err(),
+            Some(StoreError::Io(std::io::ErrorKind::Other))
+        );
+        let observations =
+            STATE_READ_AUDIT.with(|audit| audit.borrow_mut().take().unwrap().observations);
+        assert_eq!(
+            observations,
+            [(true, true, 39, true)],
+            "the real file's key bytes and unread sentinel are wiped on interrupted then failed I/O"
+        );
+    }
 
     fn id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()

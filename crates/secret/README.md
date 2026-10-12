@@ -40,6 +40,11 @@ diagnostics schema (design §3.4, §6.4, SI-22, SI-30).
   flock and a local mutex; reset holds it across trust revocation and key
   publication. A trust list remembers its loaded snapshot, so `save_trust`
   rejects stale edits as `Raced`. Reload after saving or after a race.
+  Persisted reads hold a private `Secret` owner and initialize a fixed wiping
+  allocation with one extra sentinel byte before reading. The reader receives only its remaining slice. An
+  overlong identity is `Damaged`, and the entire initialized allocation is
+  wiped on valid, malformed and I/O-error returns. This private owner adds no
+  raw-key access to the public identity interface.
 
 ```
 open_in(base)  base: absolute, ours, no g/o write (may be reached by symlink)
@@ -60,7 +65,15 @@ if any impl is added, including a conditional one), `si_30_secret_wiped_on_drop`
 file with the wrong mode, a symlink, a FIFO or a directory refused untouched;
 a state directory with the wrong mode, a symlink or a file refused untouched;
 a damaged key refused, not replaced; reset revokes the old key's trust
-entries; a real second uid (`unshare --map-auto`) cannot read the key while
+entries; a real persisted identity verifies a signature before an appended
+sentinel is refused by both load and reset without changing identity or trust.
+Private scalar observers check that known key bytes inhabit the live read
+allocation, that it never grows, and that every initialized byte is zero
+before release, including after a partial read followed by an I/O error.
+These observations cover this owned heap allocation, not compiler stack copies
+or dependency-owned buffers. The dedicated `mutant-si30-identity-read-growth`
+restores the ordinary growing reader and must fail the overlength regression.
+A real second uid (`unshare --map-auto`) cannot read the key while
 the same reader as our uid can.
 
 ## NOTES
