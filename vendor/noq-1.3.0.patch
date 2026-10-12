@@ -40,3 +40,73 @@ noq 1.3.0: transport send-context and egress-guard patch.
 +    /// Assigns the stable owner of every send, including after a socket rebind.
 +    fn set_connection_context(self: Pin<&mut Self>, _context: u64, _initial_destination: SocketAddr, _is_client: bool) {}
 +
+diff --git a/Cargo.lock b/Cargo.lock
+index ba1d27f..d854d9a 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -311,2 +311,2 @@ dependencies = [
+-name = "aws-lc-rs"
+-version = "1.16.2"
++name = "aws-lc-fips-sys"
++version = "0.14.2"
+@@ -314 +314 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a054912289d18629dc78375ba2c3726a3afe3ff71b4edba9dedfca0e3446d1fc"
++checksum = "03367707e92796b190a4207d4d39b0a4271d574503d2969c2b0cfbf5c87658ee"
+@@ -316,2 +316,17 @@ dependencies = [
+- "aws-lc-fips-sys",
+- "aws-lc-sys",
++ "bindgen",
++ "cc",
++ "cmake",
++ "dunce",
++ "fs_extra",
++ "pkg-config",
++ "regex",
++]
++
++[[package]]
++name = "aws-lc-rs"
++version = "1.18.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
++dependencies = [
++ "aws-lc-fips-sys 0.14.2",
++ "aws-lc-sys 0.45.0",
+@@ -332,0 +348,13 @@ dependencies = [
++[[package]]
++name = "aws-lc-sys"
++version = "0.45.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
++dependencies = [
++ "cc",
++ "cmake",
++ "dunce",
++ "fs_extra",
++ "pkg-config",
++]
++
+@@ -1415,2 +1443,2 @@ dependencies = [
+- "aws-lc-fips-sys",
+- "aws-lc-sys",
++ "aws-lc-fips-sys 0.13.13",
++ "aws-lc-sys 0.39.0",
+@@ -1642,0 +1671,6 @@ dependencies = [
++[[package]]
++name = "pkg-config"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
++
+@@ -1857 +1891 @@ name = "rustls"
+-version = "0.23.42"
++version = "0.23.45"
+@@ -1859 +1893 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
++checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+@@ -1922 +1956 @@ name = "rustls-webpki"
+-version = "0.103.13"
++version = "0.103.15"
+@@ -1924 +1958 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
++checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
