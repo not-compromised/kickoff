@@ -24,12 +24,16 @@ diagnostics schema (design §3.4, §6.4, SI-22, SI-30).
   trust_list, save_trust}` and `TrustList::{state, trusted, trust, revoke}`.
   The key lives in `$XDG_DATA_HOME/kickoff/state/identity` (0600, in a 0700
   directory), the trust list in `state/trust`. Both files carry a magic and
-  a format version.
+  a format version. Every state operation holds `state.lock` with a kernel
+  flock and a local mutex; reset holds it across trust revocation and key
+  publication. A trust list remembers its loaded snapshot, so `save_trust`
+  rejects stale edits as `Raced`. Reload after saving or after a race.
 
 ```
 open_in(base)  base: absolute, ours, no g/o write (may be reached by symlink)
   kickoff/     created 0700, or ours with no g/o write, never a symlink
   state/       created 0700, or exactly 0700 and ours, never a symlink
+  state.lock   regular, ours, 0600, single link; held throughout each transaction
 load_or_create read identity: O_NOFOLLOW|O_NONBLOCK, fstat on the handle:
                regular, ours, 0600, exactly one key   else UnsafePath/Damaged
                missing: identity.new O_EXCL 0600 -> fsync -> rename NOREPLACE
@@ -102,4 +106,8 @@ the same reader as our uid can.
      symlink checks share its code path and its mutant.
    - The key comes from `getrandom` into a zeroizing buffer rather than from
      `SecretKey::generate`, which leaves its seed on the stack.
+   - Concurrent creators return the same published identity. A controlled
+     overlap test pauses the first writer before rename and confirms the
+     second waits; another test holds the lock from a different process.
+     A stale trust snapshot cannot overwrite a reset revocation.
    - This supplies SI-22's local M2 storage. Remote revocation notices remain M10.

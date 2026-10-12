@@ -16,6 +16,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use iroh_base::{EndpointId, SecretKey};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
@@ -30,6 +31,7 @@ const IDENTITY: &str = "identity";
 const IDENTITY_STAGING: &str = "identity.new";
 const TRUST: &str = "trust";
 const TRUST_STAGING: &str = "trust.new";
+const STATE_LOCK: &str = "state.lock";
 
 const DIR_MODE: u32 = if cfg!(feature = "mutant-si22-world-readable") {
     0o755
@@ -104,10 +106,18 @@ pub enum TrustState {
 /// The local trust list. kickoffd hands `trusted()` to the session's
 /// admission owner; a revoked entry stays, so the identity is not trusted
 /// again by accident.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct TrustList {
     entries: Vec<(EndpointId, TrustState)>,
+    baseline: Vec<(EndpointId, TrustState)>,
 }
+
+impl PartialEq for TrustList {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+impl Eq for TrustList {}
 
 impl TrustList {
     pub fn state(&self, id: &EndpointId) -> Option<TrustState> {
@@ -181,6 +191,7 @@ impl TrustList {
             list.entries.push((id, state));
             rest = tail;
         }
+        list.baseline = list.entries.clone();
         Ok(list)
     }
 }
@@ -191,6 +202,23 @@ impl TrustList {
 pub struct IdentityStore {
     dir: OwnedFd,
     uid: u32,
+    state_lock: OwnedFd,
+    local_lock: Mutex<()>,
+    #[cfg(test)]
+    before_publish: Option<std::sync::Arc<(std::sync::Barrier, std::sync::Barrier)>>,
+}
+
+struct Transaction<'a> {
+    fd: &'a OwnedFd,
+    _local: MutexGuard<'a, ()>,
+}
+
+impl Drop for Transaction<'_> {
+    fn drop(&mut self) {
+        if !cfg!(feature = "mutant-si22-no-state-lock") {
+            let _ = rustix::fs::flock(self.fd, rustix::fs::FlockOperation::Unlock);
+        }
+    }
 }
 
 impl IdentityStore {
@@ -222,13 +250,53 @@ impl IdentityStore {
         let state = subdir(&app, STATE_DIR, uid, |mode| {
             cfg!(feature = "mutant-si22-dir-unchecked") || mode == DIR_MODE
         })?;
-        Ok(IdentityStore { dir: state, uid })
+        let state_lock = match rustix::fs::openat(
+            &state,
+            STATE_LOCK,
+            OFlags::RDWR
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK
+                | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        ) {
+            Ok(fd) => {
+                rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o600)).map_err(io)?;
+                fd
+            }
+            Err(Errno::EXIST) => rustix::fs::openat(
+                &state,
+                STATE_LOCK,
+                OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| StoreError::UnsafePath)?,
+            Err(_) => return Err(StoreError::UnsafePath),
+        };
+        let metadata = rustix::fs::fstat(&state_lock).map_err(io)?;
+        if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
+            || metadata.st_uid != uid
+            || metadata.st_mode & 0o7777 != 0o600
+            || metadata.st_nlink != 1
+        {
+            return Err(StoreError::UnsafePath);
+        }
+        Ok(IdentityStore {
+            dir: state,
+            uid,
+            state_lock,
+            local_lock: Mutex::new(()),
+            #[cfg(test)]
+            before_publish: None,
+        })
     }
 
     /// The identity key, created on first use. An existing file must be a
     /// regular file we own with mode 0600 holding exactly one key; anything
     /// else is refused and left alone.
     pub fn load_or_create(&self) -> Result<Secret<SecretKey>, StoreError> {
+        let _transaction = self.transaction()?;
         match self.read(IDENTITY, IDENTITY_LEN)? {
             Some(bytes) => match decode_identity(&bytes) {
                 Err(StoreError::Damaged) if cfg!(feature = "mutant-si22-replace-damaged") => {
@@ -247,13 +315,14 @@ impl IdentityStore {
     /// key replaces the old one. A crash in between leaves the old key with
     /// its trust revoked, which fails closed.
     pub fn reset(&self) -> Result<Secret<SecretKey>, StoreError> {
+        let _transaction = self.transaction()?;
         if let Some(bytes) = self.read(IDENTITY, IDENTITY_LEN)? {
             let old = decode_identity(&bytes)?.expose(SecretKey::public);
-            let mut trust = self.trust_list()?;
+            let mut trust = self.read_trust()?;
             if !cfg!(feature = "mutant-si22-reset-keeps-trust") {
                 trust.revoke(old)?;
             }
-            self.save_trust(&trust)?;
+            self.save_trust_locked(&trust)?;
         }
         let key = new_key()?;
         self.publish(
@@ -267,14 +336,46 @@ impl IdentityStore {
 
     /// The trust list; empty if none was saved yet.
     pub fn trust_list(&self) -> Result<TrustList, StoreError> {
+        let _transaction = self.transaction()?;
+        self.read_trust()
+    }
+
+    fn read_trust(&self) -> Result<TrustList, StoreError> {
         match self.read(TRUST, TRUST_MAX_LEN)? {
             Some(bytes) => TrustList::decode(&bytes),
             None => Ok(TrustList::default()),
         }
     }
 
+    /// Saves only against the snapshot this list was loaded from. Reload the
+    /// list after a successful save or a `Raced` error before another edit.
     pub fn save_trust(&self, list: &TrustList) -> Result<(), StoreError> {
+        let _transaction = self.transaction()?;
+        self.save_trust_locked(list)
+    }
+
+    fn save_trust_locked(&self, list: &TrustList) -> Result<(), StoreError> {
+        if !cfg!(feature = "mutant-si22-stale-trust-save")
+            && list.baseline != self.read_trust()?.entries
+        {
+            return Err(StoreError::Raced);
+        }
         self.publish(TRUST, TRUST_STAGING, &list.encode()?, Publish::Replace)
+    }
+
+    fn transaction(&self) -> Result<Transaction<'_>, StoreError> {
+        let local = self
+            .local_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !cfg!(feature = "mutant-si22-no-state-lock") {
+            rustix::fs::flock(&self.state_lock, rustix::fs::FlockOperation::LockExclusive)
+                .map_err(io)?;
+        }
+        Ok(Transaction {
+            fd: &self.state_lock,
+            _local: local,
+        })
     }
 
     fn create_identity(&self) -> Result<Secret<SecretKey>, StoreError> {
@@ -359,6 +460,11 @@ impl IdentityStore {
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|e| StoreError::Io(e.kind()))?;
+        #[cfg(test)]
+        if let Some(barriers) = &self.before_publish {
+            barriers.0.wait();
+            barriers.1.wait();
+        }
         let renamed = match how {
             Publish::Exclusive => rustix::fs::renameat_with(
                 &self.dir,
@@ -484,6 +590,52 @@ mod tests {
 
     fn id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    #[test]
+    fn si_22_concurrent_creators_return_the_published_identity() {
+        use std::sync::{Arc, Barrier, mpsc};
+        use std::time::Duration;
+        let base = std::env::temp_dir().join(format!("ksec-overlap-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        rustix::fs::chmod(&base, Mode::from_raw_mode(0o700)).unwrap();
+        let mut first = IdentityStore::open_in(&base).unwrap();
+        let second = IdentityStore::open_in(&base).unwrap();
+        let barriers = Arc::new((Barrier::new(2), Barrier::new(2)));
+        first.before_publish = Some(Arc::clone(&barriers));
+        let creator = std::thread::spawn(move || {
+            first
+                .load_or_create()
+                .map(|key| key.expose(SecretKey::public))
+        });
+        barriers.0.wait();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = second
+                .load_or_create()
+                .map(|key| key.expose(SecretKey::public));
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let early = done_rx.recv_timeout(Duration::from_millis(100)).ok();
+        barriers.1.wait();
+        let published = creator.join().unwrap();
+        let other = early.or_else(|| done_rx.recv_timeout(Duration::from_secs(2)).ok());
+        contender.join().unwrap();
+        let on_disk = IdentityStore::open_in(&base)
+            .unwrap()
+            .load_or_create()
+            .map(|key| key.expose(SecretKey::public));
+        std::fs::remove_dir_all(base).unwrap();
+        assert!(
+            early.is_none(),
+            "a second writer took the first writer's staging file"
+        );
+        assert!(published.is_ok(), "the creator lost its staging file");
+        assert_eq!(other, Some(published));
+        assert_eq!(on_disk, published);
     }
 
     #[test]

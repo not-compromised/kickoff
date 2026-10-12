@@ -177,3 +177,6 @@ note = "the policy stops checking that rows have registered mutants"
 [[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-no-approval-timeout", test = "si_41_an_approval_dies_with_its_moment", note = "approvals never time out"
 [[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-end-keeps-approvals", test = "si_41_session_end_retires_every_approval", note = "the end of the session leaves pending approvals in place"
 
+
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-no-state-lock", test = "si_22_concurrent_creators_return_the_published_identity", note = "identity transactions do not hold the kernel state lock"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-stale-trust-save", test = "si_22_stale_trust_save_cannot_restore_a_reset_identity", note = "a stale trust snapshot overwrites a reset revocation"

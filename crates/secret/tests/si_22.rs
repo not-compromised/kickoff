@@ -77,11 +77,16 @@ fn si_22_identity_key_created_0600_in_a_0700_dir() {
     assert!(file.file_type().is_file());
     assert_eq!(file.mode() & 0o7777, 0o600);
     assert_eq!(file.uid(), state.uid());
-    let names: Vec<_> = std::fs::read_dir(base.state())
+    let mut names: Vec<_> = std::fs::read_dir(base.state())
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(names, ["identity"], "no staging file left behind");
+    names.sort();
+    assert_eq!(
+        names,
+        ["identity", "state.lock"],
+        "no staging file left behind"
+    );
 
     // Persistent: the next start loads the same key.
     assert_eq!(public(&base.store()), first);
@@ -315,4 +320,85 @@ fn si_22_another_user_cannot_read_the_identity_key() {
         read_as(&reader, &base.identity(), true),
         "open-error:PermissionDenied"
     );
+}
+
+#[test]
+fn si_22_stale_trust_save_cannot_restore_a_reset_identity() {
+    let base = TempBase::new();
+    let store = base.store();
+    let old = public(&store);
+    let mut initial = store.trust_list().unwrap();
+    initial.trust(old).unwrap();
+    store.save_trust(&initial).unwrap();
+    let stale = store.trust_list().unwrap();
+    store.reset().unwrap();
+    assert_eq!(store.save_trust(&stale), Err(StoreError::Raced));
+    assert_eq!(
+        store.trust_list().unwrap().state(&old),
+        Some(TrustState::Revoked)
+    );
+}
+
+const CREATOR_ENV: &str = "KSEC_CREATE_IDENTITY";
+
+#[test]
+fn identity_creator() {
+    let Some(base) = std::env::var_os(CREATOR_ENV) else {
+        return;
+    };
+    let store = IdentityStore::open_in(Path::new(&base)).unwrap();
+    println!("KSEC creator-ready");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    println!("KSEC identity:{}", public(&store));
+}
+
+#[test]
+fn identity_transaction_lock_is_held_across_processes() {
+    use std::io::{BufRead, BufReader};
+    use std::time::Duration;
+    let base = TempBase::new();
+    let store = base.store();
+    let lock = std::fs::File::open(base.state().join("state.lock")).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "identity_creator",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CREATOR_ENV, &base.0)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert!(
+            reader.read_line(&mut line).unwrap() > 0,
+            "child exited before opening store"
+        );
+        if line.contains("KSEC creator-ready") {
+            break;
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let output = std::thread::spawn(move || {
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).unwrap();
+        tx.send(rest).unwrap();
+    });
+    let early = rx.recv_timeout(Duration::from_millis(100)).ok();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock).unwrap();
+    let result = early
+        .clone()
+        .unwrap_or_else(|| rx.recv_timeout(Duration::from_secs(3)).unwrap());
+    let status = child.wait().unwrap();
+    output.join().unwrap();
+    assert!(status.success());
+    assert!(
+        early.is_none(),
+        "a different process ignored the held identity transaction lock"
+    );
+    assert!(result.contains(&format!("KSEC identity:{}", public(&store))));
 }
