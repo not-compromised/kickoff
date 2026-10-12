@@ -108,36 +108,89 @@ async fn si_18_handshake_hook_rejects_an_unadmitted_key() {
     assert!(shared.live().is_empty());
 }
 
-/// Layer 2: the key the hook admitted is looked up again once the
-/// connection is accepted. Here the owner removed it in between.
+/// Layer 2 must refuse with NOT_ADMITTED; later stale-link refusal or the
+/// Hello timeout also return Closed, but cannot prove this earlier check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn si_18_admission_is_rechecked_after_the_handshake() {
+    establish_recheck(false).await;
+    establish_recheck(true).await;
+}
+
+async fn establish_recheck(revoke: bool) {
     let shared = Arc::new(Shared::default());
-    let host = endpoint(true, None).await;
+    let hook = AdmissionHook {
+        shared: Arc::clone(&shared),
+        role: Role::Host,
+    };
+    let host = endpoint(true, Some(hook)).await;
     let guest = endpoint(false, None).await;
-    // What the hook recorded when it admitted the key.
-    let (first, _dialing) = dial(&host, &guest).await;
-    let recorded = first.accept().unwrap().await.unwrap();
-    shared.live().insert(
-        guest.id(),
-        Live {
-            peer: peer(1),
-            conn: recorded.weak_handle(),
-            hello_deadline: tokio::time::Instant::now()
-                .checked_add(HELLO_WINDOW)
-                .unwrap(),
-        },
-    );
-    // The owner has since published a set without it.
-    let (incoming, _dialing) = dial(&host, &guest).await;
+    let p = peer(1);
+    shared.admitted.store(admitted(&[(guest.id(), p)]));
+    let (reached, paused) = tokio::sync::oneshot::channel();
+    let (resume, proceed) = tokio::sync::oneshot::channel();
+    *shared.establish_boundary.lock().unwrap() = Some(EstablishBoundary { reached, proceed });
+    let (incoming, dialing) = dial(&host, &guest).await;
     let pending = Arc::new(tokio::sync::Semaphore::new(1))
         .try_acquire_owned()
         .unwrap();
-    let established = tokio::time::timeout(WAIT, establish(incoming, pending, shared, None)).await;
-    assert!(
-        matches!(established, Ok(Err(NetError::Closed))),
-        "a key removed after the handshake was not refused"
-    );
+    let worker_shared = Arc::clone(&shared);
+    let (done, result) = tokio::sync::oneshot::channel();
+    let _establishing = AbortOnDrop(tokio::spawn(async move {
+        let _ = done.send(establish(incoming, pending, worker_shared, None).await);
+    }));
+    let client = tokio::time::timeout(WAIT, dialing)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(WAIT, paused).await.unwrap().unwrap();
+    {
+        let live = shared.live();
+        let actual = live.get(&guest.id()).unwrap();
+        assert_eq!(actual.peer, p);
+        assert!(
+            actual.is_open(),
+            "the real hook did not retain this connection"
+        );
+    }
+    assert!(client.close_reason().is_none());
+    let (mut send, _recv) = client.open_bi().await.unwrap();
+    let hello = GuestMsg::Hello {
+        generation: p.generation,
+    };
+    send.write_all(&kickoff_wire::encode_framed(&hello).unwrap())
+        .await
+        .unwrap();
+    if revoke {
+        // Bypass set_admitted's independent eager close so this layer alone
+        // must observe the published removal on the same TLS connection.
+        shared.admitted.store(Arc::new(AdmittedSet::default()));
+    }
+    resume.send(()).unwrap();
+    let established = tokio::time::timeout(WAIT, result).await.unwrap().unwrap();
+    if revoke {
+        assert!(matches!(established, Err(NetError::Closed)));
+        let closed = tokio::time::timeout(WAIT, client.closed()).await.unwrap();
+        assert!(
+            matches!(closed, iroh::endpoint::ConnectionError::ApplicationClosed(ref close)
+            if close.error_code == crate::close::NOT_ADMITTED),
+            "the establish recheck did not refuse the revoked key: {closed:?}"
+        );
+    } else {
+        let (link, mut ctl) = established.unwrap();
+        assert_eq!(link.peer(), p);
+        assert!(shared.is_current(&guest.id(), &p));
+        assert_eq!(
+            tokio::time::timeout(WAIT, ctl.recv::<GuestMsg>())
+                .await
+                .unwrap()
+                .unwrap(),
+            hello
+        );
+        client.close(close::DONE, b"");
+    }
+    host.close().await;
+    guest.close().await;
 }
 
 /// Layer 3: a link is handed out only if its generation is still current

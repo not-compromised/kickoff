@@ -69,6 +69,15 @@ pub(crate) struct Shared {
     /// At most one live connection per session key, with what it was admitted as.
     live: Mutex<HashMap<EndpointId, Live>>,
     pub(crate) frags: Arc<GlobalBudget>,
+    #[cfg(test)]
+    establish_boundary: Mutex<Option<EstablishBoundary>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct EstablishBoundary {
+    reached: tokio::sync::oneshot::Sender<()>,
+    proceed: tokio::sync::oneshot::Receiver<()>,
 }
 
 #[derive(Debug)]
@@ -92,6 +101,8 @@ impl Shared {
             admitted: ArcSwap::default(),
             live: Mutex::default(),
             frags: Arc::new(GlobalBudget::new(role)),
+            #[cfg(test)]
+            establish_boundary: Mutex::default(),
         }
     }
 
@@ -402,6 +413,18 @@ async fn establish(
         .map_err(|_| NetError::Closed)?
         .map_err(|_| NetError::Closed)?;
     drop(pending);
+    #[cfg(test)]
+    {
+        let boundary = shared
+            .establish_boundary
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(boundary) = boundary {
+            let _ = boundary.reached.send(());
+            let _ = boundary.proceed.await;
+        }
+    }
     let key = conn.remote_id();
     let admitted = if cfg!(feature = "mutant-si18-no-establish-recheck") {
         shared.live().get(&key).map(|live| live.peer)

@@ -82,6 +82,10 @@ build, compile with its mitigation removed, and fail on that mutated build;
 handshake, `Link::accept`, every datagram, `set_admitted`'s close), so each
 layer has a mutant and a test that drives it alone: the four in
 `session::tests` and `si_18_republished_generation_closes_an_idle_link`.
+The post-handshake regression holds the same authenticated connection before
+the lookup, then requires `NOT_ADMITTED` after removal. Its admitted positive
+receives Hello; a later stale-link refusal or Hello timeout cannot mask the
+lookup mutation. The rendezvous is private, per instance and test-only.
 Likewise `si_29_connect_guard_refuses_what_scope_would_drop` for the
 `before_connect` guard under `scope`, `si_21_guest_refuses_even_a_key_it_was_told_to_admit`
 for the guest's own refusal, and `si_23_silent_connection_closed_at_the_handshake_deadline`.
