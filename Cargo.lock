@@ -1424,6 +1424,7 @@ name = "kickoff-session"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "getrandom 0.4.3",
  "iroh",
  "iroh-base",
  "kickoff-net",

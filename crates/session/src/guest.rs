@@ -16,13 +16,13 @@ use kickoff_wire::{
 };
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio::task::JoinSet;
-use tokio::time::Instant;
 
-use crate::{EndReason, JoinOpts, KICKOFF_VERSION, SessionError, SessionEvent};
+use crate::{Clock, EndReason, JoinOpts, KICKOFF_VERSION, SessionError, SessionEvent};
 
 /// The host's first roster must follow `Hello` within this (§4.3).
 const ROSTER_DEADLINE: Duration = Duration::from_secs(5);
-/// Redial backoff (§4.6): 250 ms doubling to 4 s, for 30 s.
+/// Redial backoff (§4.6): 250 ms doubling to 4 s, for 30 s on the guest's
+/// clock.
 const BACKOFF_FIRST: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(4);
 const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
@@ -37,6 +37,7 @@ pub(crate) struct Guest {
 
 struct Ctx {
     me: EndpointId,
+    clock: Clock,
     admitted: Admitted,
     net: SessionNet,
     lan: Lan,
@@ -86,6 +87,7 @@ pub(crate) async fn start(
     let (leave_tx, leave_rx) = oneshot::channel();
     let ctx = Ctx {
         me,
+        clock: opts.clock,
         admitted,
         net,
         lan,
@@ -269,29 +271,25 @@ async fn reconnect(
     ctx: &Ctx,
     leave: &mut oneshot::Receiver<()>,
 ) -> Result<(Arc<Link>, CtlStream, (u64, Vec<Member>)), EndReason> {
-    let start = Instant::now();
+    let start = ctx.clock.now();
     let deadline = start.checked_add(RECONNECT_WINDOW).unwrap_or(start);
     let mut backoff = BACKOFF_FIRST;
     loop {
-        let attempt = tokio::time::timeout_at(deadline, connect(&ctx.net, &ctx.admitted, ctx.me));
         tokio::select! {
             biased;
             _ = &mut *leave => return Err(EndReason::Left),
-            connected = attempt => match connected {
-                Ok(Ok(connected)) => return Ok(connected),
-                Ok(Err(_)) => {}
-                Err(_) => return Err(EndReason::HostLost),
-            },
-        }
-        let now = Instant::now();
-        let wake = now.checked_add(backoff).unwrap_or(now);
-        if wake >= deadline {
-            return Err(EndReason::HostLost);
+            () = ctx.clock.until(deadline) => return Err(EndReason::HostLost),
+            connected = connect(&ctx.net, &ctx.admitted, ctx.me) => {
+                if let Ok(connected) = connected {
+                    return Ok(connected);
+                }
+            }
         }
         tokio::select! {
             biased;
             _ = &mut *leave => return Err(EndReason::Left),
-            () = tokio::time::sleep_until(wake) => {}
+            () = ctx.clock.until(deadline) => return Err(EndReason::HostLost),
+            () = tokio::time::sleep(backoff) => {}
         }
         backoff = backoff.saturating_mul(2).min(BACKOFF_MAX);
     }

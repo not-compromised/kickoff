@@ -6,7 +6,6 @@
 //! flight), then the LAN's flow table, then the published admitted set and
 //! roster. A link task changes only its own seat, and only through the owner.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -23,14 +22,17 @@ use tokio::sync::{Semaphore, broadcast, oneshot, watch};
 use tokio::task::JoinSet;
 
 use crate::admission::{Admission, Joined};
+use crate::approval::{Approval, ApprovalId};
 use crate::budget::Bucket;
 use crate::routes::{Route, Routes};
 use crate::{Clock, Command, EndReason, HostOpts, InviteKind, SessionError, SessionEvent};
 
-/// A bearer-invite prompt the owner leaves unanswered is declined.
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
-/// From the link's arrival to its `Hello`.
-const HELLO_DEADLINE: Duration = Duration::from_secs(5);
+/// From the link's arrival to its `Hello` (§3.4).
+const HELLO_DEADLINE: Duration = Duration::from_secs(2);
+/// The host pings each link this often, and closes one that has sent no
+/// `Pong` for `IDLE`, measured on the host clock (§4.5, PRIV-29).
+const PING: Duration = Duration::from_secs(5);
+const IDLE: Duration = Duration::from_secs(15);
 /// How long a link's task waits to send its last message and see the guest
 /// close; the kick or end waiting on it allows a little longer.
 const FAREWELL: Duration = Duration::from_millis(500);
@@ -54,7 +56,9 @@ pub(crate) struct Host {
     clock: Clock,
     admission: Mutex<Admission>,
     routes: Routes<Arc<Link>, Farewell>,
-    prompts: Mutex<HashMap<EndpointId, oneshot::Sender<bool>>>,
+    /// The approvals now pending. A watch keeps the current set, so a reader
+    /// that falls behind still sees every approval it can decide.
+    approvals: watch::Sender<Vec<Approval>>,
     roster: watch::Sender<(u64, HostMsg)>,
     events: broadcast::Sender<SessionEvent>,
     /// Set once by whoever starts ending the session; `ended` follows after
@@ -93,7 +97,7 @@ pub(crate) fn start(
         clock: opts.clock,
         admission: Mutex::new(admission),
         routes: Routes::new(),
-        prompts: Mutex::new(HashMap::new()),
+        approvals: watch::channel(Vec::new()).0,
         roster,
         events,
         ending: AtomicBool::new(false),
@@ -146,14 +150,17 @@ impl Host {
                 self.publish(&adm);
                 Ok(())
             }
-            Command::Approve(id) => self.answer_prompt(id, true),
-            Command::Decline(id) => self.answer_prompt(id, false),
+            Command::Decide { approval, allow } => self.decide(approval, allow),
             Command::PickMap(_) => Err(SessionError::NotImplemented),
             Command::Leave => {
                 self.end(EndReason::Left).await;
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn approvals(&self) -> watch::Receiver<Vec<Approval>> {
+        self.approvals.subscribe()
     }
 
     pub(crate) fn members(&self) -> Vec<kickoff_wire::Member> {
@@ -177,9 +184,6 @@ impl Host {
             let held = adm.kick(id).map_err(|_| SessionError::RevokedFull)?;
             held.and_then(|peer| self.unroute(peer))
         };
-        if let Some(prompt) = self.prompts().remove(&id) {
-            let _ = prompt.send(false);
-        }
         if let Some(route) = route {
             let reason = KickReason::Kicked;
             farewell(route, HostMsg::Kick { reason }).await;
@@ -190,16 +194,26 @@ impl Host {
         Ok(())
     }
 
-    fn answer_prompt(&self, id: EndpointId, approve: bool) -> Result<(), SessionError> {
-        let prompt = self.prompts().remove(&id).ok_or(SessionError::NoPrompt)?;
-        prompt.send(approve).map_err(|_| SessionError::NoPrompt)
+    fn decide(&self, approval: ApprovalId, allow: bool) -> Result<(), SessionError> {
+        let mut adm = self.admission();
+        // `end` marks the session before it clears approvals under this
+        // lock, so a decision either lands before the end or not at all.
+        self.live()?;
+        adm.decide(approval, allow, self.clock.now())
+            .map_err(|_| SessionError::NoApproval)?;
+        self.publish(&adm);
+        Ok(())
     }
 
     async fn end(&self, reason: EndReason) {
         if self.ending.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.prompts().clear();
+        {
+            let mut adm = self.admission();
+            adm.end();
+            self.publish(&adm);
+        }
         let mut goodbyes = JoinSet::new();
         for route in self.routes.drain() {
             goodbyes.spawn(farewell(route, HostMsg::End));
@@ -262,6 +276,14 @@ impl Host {
         if changed {
             let _ = self.events.send(SessionEvent::Roster { epoch, members });
         }
+        let pending = adm.pending_approvals();
+        self.approvals.send_if_modified(|current| {
+            let newer = *current != pending;
+            if newer {
+                *current = pending;
+            }
+            newer
+        });
     }
 
     fn pass(&self, peer: PeerRef) -> Admitted {
@@ -276,43 +298,52 @@ impl Host {
 
     async fn admit(&self, attempt: JoinAttempt) {
         let id = attempt.id();
+        // Subscribed before the decision, so no retirement of the approval
+        // can slip between it and the wait.
+        let mut approvals = self.approvals.subscribe();
         let decision = {
             let mut adm = self.admission();
             let decision = adm.join(id, attempt.request(), self.clock.now());
-            if decision.is_ok() {
+            if let Ok(joined) = &decision {
                 self.publish(&adm);
+                if let Joined::Prompt(approval) = joined {
+                    let _ = self
+                        .events
+                        .send(SessionEvent::ApprovalRequested(approval.clone()));
+                }
             }
             decision
         };
         let reply = match decision {
             Ok(Joined::Admitted(peer)) => Ok(self.pass(peer)),
-            Ok(Joined::Prompt) => self.prompt(id, attempt.request().name.clone()).await,
+            Ok(Joined::Prompt(approval)) => self.decided(&approval, &mut approvals).await,
             Err(why) => Err(why),
         };
         let _ = attempt.answer(reply).await;
     }
 
-    /// A bearer invite was redeemed: the seat is held until the owner answers.
-    async fn prompt(
+    /// Waits until `approval` leaves the pending set (decided, kicked, timed
+    /// out by the sweep, or the session ended), then answers as the table
+    /// says.
+    async fn decided(
         &self,
-        id: EndpointId,
-        name: kickoff_wire::Name,
+        approval: &Approval,
+        approvals: &mut watch::Receiver<Vec<Approval>>,
     ) -> Result<Admitted, JoinRefused> {
-        let (tx, rx) = oneshot::channel();
-        self.prompts().insert(id, tx);
-        let _ = self.events.send(SessionEvent::JoinPrompt { id, name });
-        let approved = matches!(tokio::time::timeout(PROMPT_TIMEOUT, rx).await, Ok(Ok(true)));
-        self.prompts().remove(&id);
-        let mut adm = self.admission();
-        if !approved {
-            adm.decline(id);
-            return Err(JoinRefused::Declined);
+        let mut ended = self.ended.subscribe();
+        loop {
+            if let Some(outcome) = self.admission().outcome(approval) {
+                return outcome.map(|peer| self.pass(peer));
+            }
+            tokio::select! {
+                changed = approvals.changed() => {
+                    if changed.is_err() {
+                        return Err(JoinRefused::Declined);
+                    }
+                }
+                _ = ended.wait_for(|ended| *ended) => return Err(JoinRefused::Declined),
+            }
         }
-        let peer = adm
-            .approve(id, self.clock.now())
-            .ok_or(JoinRefused::Revoked)?;
-        self.publish(&adm);
-        Ok(self.pass(peer))
     }
 
     fn admission(&self) -> MutexGuard<'_, Admission> {
@@ -321,10 +352,6 @@ impl Host {
         self.admission
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn prompts(&self) -> MutexGuard<'_, HashMap<EndpointId, oneshot::Sender<bool>>> {
-        self.prompts.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -482,8 +509,23 @@ async fn carry(host: &Host, link: &Link, peer: PeerRef) -> Ended {
 async fn control(host: &Host, ctl: &mut CtlStream) -> Ended {
     let mut roster = host.roster.subscribe();
     roster.mark_changed();
+    let start = tokio::time::Instant::now();
+    let mut ping = tokio::time::interval_at(start.checked_add(PING).unwrap_or(start), PING);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_pong = host.clock.now();
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                let silent = host.clock.now().saturating_duration_since(last_pong);
+                if silent >= IDLE && !cfg!(feature = "mutant-si23-no-idle-close") {
+                    // Treated as a lost path: the seat waits out the
+                    // reconnect window under a new generation.
+                    return Ended::Lost;
+                }
+                if ctl.send(&HostMsg::Ping).await.is_err() {
+                    return Ended::Lost;
+                }
+            }
             changed = roster.changed() => {
                 if changed.is_err() {
                     return Ended::Lost;
@@ -494,8 +536,9 @@ async fn control(host: &Host, ctl: &mut CtlStream) -> Ended {
                 }
             }
             msg = ctl.recv::<GuestMsg>() => match msg {
+                Ok(GuestMsg::Pong) => last_pong = host.clock.now(),
                 // `Status` is informational and decides nothing (§3.4).
-                Ok(GuestMsg::Status { .. } | GuestMsg::Pong) => {}
+                Ok(GuestMsg::Status { .. }) => {}
                 Ok(GuestMsg::Hello { .. }) | Err(NetError::Protocol | NetError::Version) => {
                     return Ended::Evict;
                 }
@@ -533,7 +576,8 @@ async fn pump(host: Arc<Host>) {
     }
 }
 
-/// Frees seats whose admission or reconnect window ran out.
+/// Retires approvals past their timeout and frees seats whose admission or
+/// reconnect window, or approval, ran out.
 async fn sweep(host: Arc<Host>) {
     let mut ended = host.ended.subscribe();
     let mut tick = tokio::time::interval(SWEEP);
@@ -543,8 +587,10 @@ async fn sweep(host: Arc<Host>) {
             _ = ended.wait_for(|ended| *ended) => break,
         }
         let mut adm = host.admission();
-        let due = adm.expired(host.clock.now());
-        if due.is_empty() {
+        let now = host.clock.now();
+        let retired = adm.expire_approvals(now);
+        let due = adm.expired(now);
+        if due.is_empty() && !retired {
             continue;
         }
         for peer in due {

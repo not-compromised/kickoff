@@ -238,3 +238,108 @@ async fn guest_redials_after_a_drop_and_carries_on() {
     let got = next_udp(&alice.game, WAIT).await.unwrap();
     assert_eq!((got.from, got.payload.as_slice()), (1, &b"still here"[..]));
 }
+
+/// §4.6: a guest whose host stays unreachable for the 30 s reconnect window,
+/// on the guest's clock, ends with `HostLost`, and not before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guest_reports_host_lost_after_the_reconnect_window() {
+    use kickoff_net::{AdmittedSet, Role};
+    use kickoff_secret::Secret;
+    use kickoff_session::{EndReason, SessionEvent};
+    use kickoff_wire::{
+        AdmitPass, Admitted, BoundedVec, Cap, Generation, GuestMsg, HostMsg, Member, Nonce,
+        PeerRef, SessionId, Ticket,
+    };
+
+    let host_identity = Identity::new().await;
+    let host_net = session_net(Role::Host).await;
+    let ticket = Secret::new(Ticket {
+        door: host_identity.door.addr(),
+        cap: Cap {
+            session_id: SessionId([1; 16]),
+            invitee: None,
+            nonce: Nonce([2; 16]),
+            sig: iroh::Signature::from_bytes(&[0; 64]),
+        },
+    });
+    let slot = PeerSlot::new(2).unwrap();
+    let pass = AdmitPass {
+        slot,
+        generation: Generation::new(1),
+    };
+    let alice = Identity::new().await;
+    let alice_id = alice.id();
+    let clock = Clock::system();
+    let mut opts = join_opts("guest");
+    opts.clock = clock.clone();
+
+    let joining = tokio::spawn(join_with(alice, ticket, opts));
+    let attempt = tokio::time::timeout(WAIT, host_identity.door.next_join())
+        .await
+        .unwrap()
+        .unwrap();
+    let key = attempt.request().session_key;
+    let peer = PeerRef {
+        id: alice_id,
+        slot,
+        generation: Generation::new(1),
+    };
+    host_net.set_admitted([(key, peer)].into_iter().collect::<AdmittedSet>());
+    attempt
+        .answer(Ok(Admitted {
+            session_addr: host_net.addr(),
+            pass,
+        }))
+        .await
+        .unwrap();
+    let (_link, mut ctl) = tokio::time::timeout(WAIT, host_net.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        ctl.recv::<GuestMsg>().await.unwrap(),
+        GuestMsg::Hello { .. }
+    ));
+    let members = BoundedVec::new(vec![
+        Member {
+            slot: PeerSlot::HOST,
+            id: host_identity.id(),
+            name: name("host"),
+        },
+        Member {
+            slot,
+            id: alice_id,
+            name: name("guest"),
+        },
+    ])
+    .unwrap();
+    ctl.send(&HostMsg::Roster { epoch: 1, members })
+        .await
+        .unwrap();
+    let mut alice = joining.await.unwrap().unwrap();
+
+    // The host forgets Alice: her connection closes and every redial is
+    // refused at the handshake.
+    host_net.set_admitted(AdmittedSet::new());
+    event(&mut alice.events, |e| {
+        matches!(e, SessionEvent::Reconnecting).then_some(())
+    })
+    .await;
+    let early = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(SessionEvent::Ended(_)) = alice.events.recv().await {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(early.is_err(), "the guest gave up inside the window");
+
+    clock.advance(Duration::from_secs(30));
+    let ended = event(&mut alice.events, |e| match e {
+        SessionEvent::Ended(reason) => Some(*reason),
+        _ => None,
+    })
+    .await;
+    assert_eq!(ended, EndReason::HostLost);
+}

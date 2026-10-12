@@ -5,11 +5,12 @@ reconnect, budgets and the pump between the local game's LAN and the links.
 
 | Module | Owns |
 |---|---|
-| `admission` | the admission owner (§4.4): seats keyed by identity and generation, the session-wide generation counter, revocation, trusted ids, the invite ledger, and the admitted set and roster it publishes. Pure state, no I/O |
-| `host` | applies each decision in one critical section (route removal, LAN flow reset, published set and roster), the join loop, the accept loop, one task per link, the pump, the window sweep |
+| `admission` | the admission owner (§4.4): seats keyed by identity and generation, the session-wide generation counter, revocation, trusted ids, the invite ledger, the approvals, and the admitted set and roster it publishes. Pure state, no I/O |
+| `approval` | approval objects (§4.4, SI-41): random ids, one pending per kind, consumed once, retired by a kick, a generation change, a newer map pick, the session's end or 60 s. Pure state, owned by `admission` |
+| `host` | applies each decision in one critical section (route removal, LAN flow reset, published set, roster and pending approvals), the join loop, the accept loop, one task per link (Hello deadline, Ping and idle close), the pump, the window and approval sweep |
 | `guest` | join, the first-roster check, the guest pump, redial with backoff |
 | `routes` | the pump's only shared state: slot → (generation, link). Deliveries run under its read lock, changes take the write lock |
-| `budget`, `clock` | the host fan-out bucket; the host's forward-only monotonic clock |
+| `budget`, `clock` | the host fan-out bucket; the session's forward-only monotonic clock |
 
 ## Interface
 
@@ -18,11 +19,14 @@ pub async fn host(door: Arc<Door>, door_key: &Secret<SecretKey>, net: SessionNet
 pub async fn join(door: &Door, net: SessionNet, adapter: Adapter, ticket: Secret<Ticket>, opts: JoinOpts) -> Result<Session, SessionError>;
 impl Session {
     pub fn invite(&self, kind: InviteKind) -> Result<Secret<Ticket>, SessionError>;  // host only
-    pub fn events(&self) -> broadcast::Receiver<SessionEvent>;
+    pub fn events(&self) -> broadcast::Receiver<SessionEvent>;      // includes ApprovalRequested(Approval)
+    pub fn approvals(&self) -> watch::Receiver<Vec<Approval>>;      // the pending set; cannot lose one
     pub fn slot(&self) -> PeerSlot;
     pub fn members(&self) -> Vec<Member>;
-    pub async fn command(&self, command: Command) -> Result<(), SessionError>;  // Kick, Readmit, Approve, Decline, PickMap, Leave
+    pub async fn command(&self, command: Command) -> Result<(), SessionError>;  // Kick, Readmit, Decide{approval, allow}, PickMap, Leave
 }
+pub struct Approval { pub id: ApprovalId, pub action: ApprovalAction, pub peer: EndpointId, pub generation: Generation }
+pub enum ApprovalAction { AdmitBearer, InstallMap { map: MapId } }
 ```
 
 How the structure carries the rules:
@@ -46,7 +50,21 @@ How the structure carries the rules:
 - **Spend once (SI-20).** Every refusal that does not depend on the capability
   (revoked, version, already seated, session key taken, roster full) comes
   before `Invites::redeem`, which spends the capability whatever follows.
-- **Budgets before allocation (SI-23).** Seats, prompts, revocations, replies in
+- **One object per decision (SI-41).** A bearer join creates an `Approval`
+  in the admission owner and holds its seat in `Prompting`. `Decide` consumes
+  the object its id names, and admits only if that seat still waits on that
+  id at that generation. A kick, eviction or generation change retires the
+  peer's approvals, the sweep retires them at 60 s on the host clock, and the
+  end of the session retires all of them. The waiting join reads its answer
+  from the table (admitted, revoked or declined), so every path that retires
+  an approval answers the guest the same way. One bearer approval is pending
+  at a time: another bearer join is refused `Busy` before its capability is
+  redeemed, so the refusal does not spend it.
+- **Liveness (SI-23, PRIV-29).** A link must say `Hello` within 2 s of
+  arriving. The host then pings it every 5 s and closes it once 15 s pass on
+  the host clock without a `Pong`; the seat enters the reconnect window like
+  any lost link.
+- **Budgets before allocation (SI-23).** Seats, approvals, revocations, replies in
   flight and events have fixed capacities; the host's fan-out pays 16 MB/s per
   emitted copy before the copy is sent; the link and LAN budgets are charged in
   `net` and `vlan` before decode and delivery. A link `net` disconnects as
@@ -61,13 +79,20 @@ once, a host) are played with `kickoff-net` directly.
 | Test | Proves |
 |---|---|
 | `bound_ticket_admits_its_invitee` | a bound invite admits its invitee at slot 2; both rosters agree |
-| `si_20_bearer_ticket_admits_once` | the prompt names the authenticated identity; the same bearer ticket then fails for anyone |
-| `si_20_one_capability_on_many_connections_admits_once` | eight identities racing one bearer ticket: one prompt, one admission |
+| `si_20_bearer_ticket_admits_once` | the approval names the authenticated identity; the same bearer ticket then fails for anyone |
+| `si_20_one_capability_on_many_connections_admits_once` | eight identities racing one bearer ticket: one approval, one admission |
 | `si_20_bound_capability_raced_by_its_invitee_admits_once` | ten concurrent requests with one bound ticket: one admission |
 | `si_20_expired_bearer_ticket_refused` | 15 minutes on the host clock expires a bearer ticket, not a bound one |
 | `si_20_replayed_ticket_refused` | a used ticket is refused after its holder left and was evicted |
 | `si_20_wrong_invitee_refused_and_the_ticket_survives` | another identity is refused and the invitee still gets in |
 | `si_20_declined_prompt_spends_the_ticket` | a declined bearer join cannot retry with that ticket |
+| `si_41_kick_retires_the_approval_and_its_id` | a kick answers the waiting join `Revoked`; readmitted, the same identity asks again, and the old id decides nothing; the new one admits once |
+| `si_41_timed_out_approval_authorizes_nothing` | 60 s on the host clock declines the join; the old id cannot decide the identity's next request |
+| `si_41_session_end_retires_every_approval` | `Leave` empties the pending set; a later `Decide` gets `Ended` and the join is refused |
+| `si_41_second_bearer_join_refused_while_one_is_pending` | a second bearer join gets `Busy` and its ticket survives for after the first is decided |
+| `si_41_an_approval_dies_with_its_moment` | unit: single use, a newer map pick, a peer's generation change, the timeout and the end each retire an id, against the same peer asking again |
+| `si_41_one_pending_approval_per_kind` | unit: one bearer approval at a time; a map approval is independent |
+| `pending_approvals_are_held_not_streamed` | `Session::approvals` shows a pending approval to a reader that never drained its events, and drops it once decided |
 | `si_20_ticket_from_a_previous_host_session_refused` | same door key, new session: `WrongSession` |
 | `another_major_version_refused_before_the_ticket_is_spent` | a newer major version gets `Version`, and the bound ticket still admits afterwards |
 | `si_18_one_seat_per_identity_under_concurrent_joins` | twelve concurrent joins by one trusted identity: one seat |
@@ -81,17 +106,23 @@ once, a host) are played with `kickoff-net` directly.
 | `reconnect_inside_the_window_keeps_the_slot` | a dropped guest's slot stays reserved and its redial carries on |
 | `reconnect_after_the_window_is_refused_and_frees_the_slot` | past 30 s the seat is gone, the redial refused, the slot reused |
 | `guest_redials_after_a_drop_and_carries_on` | the guest side of §4.6 against a test-played host |
+| `guest_reports_host_lost_after_the_reconnect_window` | a guest whose redials are all refused keeps trying, then ends with `HostLost` once 30 s pass on its clock |
 | `broadcast_and_unicast_round_trip` | host beacon to both guests, guest beacon to the host, unicast to the addressed guest only |
 | `host_leaving_ends_every_guest` | `Leave` on the host ends each guest with `HostEnded`; later commands get `Ended` |
 | `si_21_guest_cannot_reach_another_guest` | A's beacon and unicast to B never reach B's link; another guest's dial to B's endpoint is refused |
 | `si_23_peer_over_budget_is_limited_and_another_keeps_its_latency` | a guest at ~7x its datagram budget gets at most the budget through while another guest's round trips stay fast |
 | `si_23_peer_far_over_budget_is_disconnected` | a guest far over budget loses its seat; the other keeps playing |
+| `si_23_link_without_hello_closed_at_the_deadline` | a link that never completes its `Hello` is closed within 4 s (deadline 2 s) |
+| `si_23_link_silent_for_15_s_closed` | a guest that never answers `Ping` is closed once 15 s pass on the host clock; a real guest, which answers, keeps its link |
 | `latency_p50_p99_over_10k_datagrams` | §7, game socket to game socket, one way |
 
 The mutants in `/mutants.toml` now automate this (`scripts/check.sh` runs them),
 including `si_18_link_up_needs_the_seat_generation_and_pass`, the session's
-layer under net's admission layers, and
-`si_23_link_without_hello_closed_at_the_deadline`. Before that, each `si_*`
+layer under net's admission layers, `si_23_link_without_hello_closed_at_the_deadline`,
+the idle close, and five SI-41 mutants: ids derived from the peer (draft 2's
+`Approve(id)`), two bearer approvals at once, approvals that survive a kick
+or generation change, approvals that never time out, and an end that leaves
+them pending. Before that, each `si_*`
 test was run by hand with its mitigation removed and failed: the
 session-key, revocation and one-seat checks in `Admission::join`; delivery
 outside the routing lock; the kick's unroute and publish; the LAN flow reset on
@@ -113,7 +144,8 @@ numbers.
 
 ## NOTES
 
-Deviations from design draft 2 and open questions.
+Deviations from the design (written against draft 2, updated for draft 3)
+and open questions.
 
 1. **`host` and `join` take an `Adapter`, not a `Lan`.** A guest learns its slot
    only from `Admitted`, and the LAN's address is its slot, so the session opens
@@ -123,11 +155,14 @@ Deviations from design draft 2 and open questions.
    expose. `host` refuses a key that is not the door's.
 3. **`join` takes `JoinOpts`** (name, platform, game build). `game_build` is
    sent but not compared; build mismatch handling is M6.
-4. **Interface additions:** `Command::{Readmit, Decline}`, `Session::{slot,
-   members}`, `HostOpts::{name, clock}`, `Clock`, `KICKOFF_VERSION`,
-   `JoinOpts`, `EndReason`, `SessionEvent::{Reconnecting, Ended(EndReason)}`,
-   `SessionEvent::Roster { epoch, members }`, `SessionEvent::JoinPrompt { id,
-   name }`, and `SessionError` variants for each failure.
+4. **Interface additions:** `Command::Readmit`, `Session::{slot, members,
+   approvals}`, `HostOpts::{name, clock}`, `JoinOpts::clock`, `Clock`,
+   `KICKOFF_VERSION`, `JoinOpts`, `EndReason`, `SessionEvent::{Reconnecting,
+   Ended(EndReason)}`, `SessionEvent::Roster { epoch, members }`,
+   `ApprovalId::{from_bytes, to_bytes}`, and `SessionError` variants for each
+   failure (`NoApproval` for a `Decide` naming no current approval). Draft
+   3's `Decide`, `ApprovalRequested`, `Approval`, `ApprovalId` and
+   `ApprovalAction` replace draft 2's `Approve`, `Decline` and `JoinPrompt`.
 5. **`net` hands out the control stream beside the link**
    (`dial`/`accept -> (Link, CtlStream)`), so datagrams and control run on
    separate tasks (§2.5). See `crates/net/README.md` NOTES.
@@ -143,9 +178,9 @@ Deviations from design draft 2 and open questions.
 8. **Reconnect bumps the generation when the host notices the drop**, not when
    the redial arrives (§4.4's wording). `net` refuses a second connection from
    a session key while the first is open, so a redial before the host notices
-   is refused as a duplicate and the guest retries within its 30 s window. If
-   the host only learns of a silent path loss from QUIC's idle timeout, that
-   timeout must stay well under the 30 s window; draft 3 should state it.
+   is refused as a duplicate and the guest retries within its 30 s window.
+   Draft 3's Ping/Pong settles how a silent path is noticed: the host closes
+   it after 15 s without a `Pong`, inside the window.
 9. **`Hello` must carry the generation in the guest's pass**, also on a redial;
    the host's current generation for the seat stays internal.
 10. **One seat per identity**: a second join from a seated identity (including
@@ -157,21 +192,43 @@ Deviations from design draft 2 and open questions.
     wait up to 500 ms for the guest to close, because QUIC discards unread
     stream data when a connection closes. Evictions for budget or protocol go
     at once, with no message.
-13. **Numbers the design leaves open:** bearer prompt timeout 60 s (then
-    declined), admission window 30 s for an admitted guest to connect, 1024
-    revocations (`RevokedFull` beyond), 16 join replies in flight, fan-out burst
-    2 MB.
+13. **Numbers the design leaves open:** admission window 30 s for an admitted
+    guest to connect, 1024 revocations (`RevokedFull` beyond), 16 join replies
+    in flight, fan-out burst 2 MB. (The 60 s approval timeout, 2 s `Hello`,
+    5 s `Ping` and 15 s idle close are draft 3's.)
 14. **`Status` is read and ignored**, as §3.4 allows; `MapPick` and
     `Command::PickMap` are M6 (`NotImplemented`).
-15. **The host sends no `Ping`.** iroh's 5 s keep-alive covers liveness; a guest
-    still answers `Ping` with `Pong`.
-16. **Kicking a guest waiting on a bearer prompt** answers it `Declined`, not
-    `Revoked`; the identity is revoked either way.
+15. **An idle link is treated as lost**, not evicted: the seat waits out the
+    30 s reconnect window under a new generation, as for any dropped path.
+    Draft 3 says only that the link is closed. Idle time is measured on the
+    host `Clock`, like the other session windows, so tests can advance it;
+    only a `Pong` resets it.
+16. **Kicking a guest waiting on approval** answers it `Revoked`.
+17. **`Approval.peer` is an `EndpointId`**, not a `Fingerprint`: no fingerprint
+    type exists yet; the dialog (M10) renders one from the key.
+18. **Lagging event receivers (development.md open question 5) are settled
+    for approvals:** `Session::approvals()` is a watch of the pending set,
+    which a slow reader cannot lose, and the join waits on that set rather
+    than on any event. `ApprovalRequested` is still sent on the lossy event
+    stream, as §2.3 lists it. Other events (`Roster`, `Reconnecting`) carry
+    state that `members()` and the end event already hold.
+19. **Refusals for approvals reuse existing codes** (wire has no change in
+    draft 3): a second bearer join while one is pending gets `Busy`; a
+    timed-out or session-ended approval answers `Declined`.
+20. **`ApprovalId::from_bytes`** exists for the local channel that carries an
+    id back from the native dialog (`ipc`'s `Decide`). Ids are 128-bit random,
+    so a constructed id authorizes nothing unless it was received. `ipc`
+    does not depend on `session`; whichever crate carries `Decide` needs a
+    16-byte id field and this conversion.
+21. **`InstallMap` approvals** are never created on the host and a guest
+    creates none until M6; the type and its replacement rule (a newer pick
+    retires the pending one) are unit-tested now. A guest's `Decide` gets
+    `NoApproval`.
 
 ### Not done
 
-- The guest's `HostLost` after 30 s of failed redials is untested (the guest
-  window runs on the runtime clock, so the test would take 30 s).
+- SI-41's dialog half (at most 6 native dialogs per minute, the
+  compromised-webview harness) is M10.
 - SI-23's full flood suite: pre-handshake floods, control saturation and
   stream churn are tested in `net`; map-request churn and disk are M6; no test
   asserts RSS, fd or task ceilings yet.

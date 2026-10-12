@@ -24,6 +24,12 @@ mutant-si19-kick-does-not-revoke = []
 mutant-si21-link-to-link = []
 mutant-si23-over-budget-is-a-drop = []
 mutant-si23-no-hello-deadline = []
+mutant-si23-no-idle-close = []
+mutant-si41-approve-by-peer = []
+mutant-si41-two-bearer-approvals = []
+mutant-si41-survives-peer-change = []
+mutant-si41-no-approval-timeout = []
+mutant-si41-end-keeps-approvals = []
 # Both ingress budgets at once: the link's (net) and the LAN's (vlan) each
 # hold the flooded guest alone.
 mutant-si23-unbudgeted-ingress = [
@@ -45,6 +51,7 @@ kickoff-net.workspace = true
 kickoff-secret.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 thiserror.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 iroh.workspace = true
