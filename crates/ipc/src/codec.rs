@@ -11,7 +11,7 @@ use kickoff_secret::diag::{
 use kickoff_wire::{MAX_TICKET_LEN, MapId};
 use zeroize::Zeroizing;
 
-use crate::command::{InviteFor, Op, Refusal, Reply, TicketText};
+use crate::command::{ApprovalId, InviteFor, Op, Refusal, Reply, TicketText};
 use crate::{ChannelRole, IpcError, MAX_REPLY_FRAME, MAX_REQUEST_FRAME, PROTOCOL_VERSION};
 
 // The hello and welcome layouts are frozen: they are the one format every
@@ -109,11 +109,12 @@ const OP_HOST: u8 = 2;
 const OP_JOIN: u8 = 3;
 const OP_INVITE: u8 = 4;
 const OP_KICK: u8 = 5;
-const OP_APPROVE: u8 = 6;
+// 6 was draft 2's `Approve(EndpointId)`, retired with protocol version 1.
 const OP_PICK_MAP: u8 = 7;
 const OP_LEAVE: u8 = 8;
 const OP_DOCTOR: u8 = 9;
 const OP_TOGGLE_OVERLAY: u8 = 10;
+const OP_DECIDE: u8 = 11;
 
 const INVITE_FRIEND: u8 = 1;
 const INVITE_BEARER: u8 = 2;
@@ -138,9 +139,10 @@ pub(crate) fn encode_op(op: &Op) -> Result<Zeroizing<Vec<u8>>, IpcError> {
             out.push(OP_KICK);
             out.extend_from_slice(id.as_bytes());
         }
-        Op::Approve(id) => {
-            out.push(OP_APPROVE);
-            out.extend_from_slice(id.as_bytes());
+        Op::Decide { approval, allow } => {
+            out.push(OP_DECIDE);
+            out.extend_from_slice(&approval.to_bytes());
+            out.push(u8::from(*allow));
         }
         Op::PickMap(map) => {
             out.push(OP_PICK_MAP);
@@ -165,7 +167,10 @@ pub(crate) fn decode_op(bytes: &[u8]) -> Result<Op, IpcError> {
             _ => return Err(IpcError::Malformed),
         },
         OP_KICK => Op::Kick(get_id(&mut r)?),
-        OP_APPROVE => Op::Approve(get_id(&mut r)?),
+        OP_DECIDE => Op::Decide {
+            approval: ApprovalId::from_bytes(r.array::<16>()?),
+            allow: get_bool(&mut r)?,
+        },
         OP_PICK_MAP => Op::PickMap(MapId(r.array::<32>()?)),
         OP_LEAVE => Op::Leave,
         OP_DOCTOR => Op::Doctor,
@@ -277,6 +282,15 @@ fn get_ticket(r: &mut Reader<'_>) -> Result<TicketText, IpcError> {
     TicketText::new(Secret::new(text.to_owned()))
 }
 
+/// Only 0 and 1: a second spelling of a boolean is a malformed message.
+fn get_bool(r: &mut Reader<'_>) -> Result<bool, IpcError> {
+    match r.u8()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(IpcError::Malformed),
+    }
+}
+
 fn get_id(r: &mut Reader<'_>) -> Result<EndpointId, IpcError> {
     EndpointId::from_bytes(&r.array::<32>()?).map_err(|_| IpcError::Malformed)
 }
@@ -311,12 +325,7 @@ fn get_field(r: &mut Reader<'_>) -> Result<Field, IpcError> {
         FIELD_COUNT => Field::Count(known(Counter::from_tag(r.u8()?))?, r.u64()?),
         FIELD_FLAG => {
             let key = known(Flag::from_tag(r.u8()?))?;
-            let value = match r.u8()? {
-                0 => false,
-                1 => true,
-                _ => return Err(IpcError::Malformed),
-            };
-            Field::Flag(key, value)
+            Field::Flag(key, get_bool(r)?)
         }
         FIELD_VERSION => Field::Version(
             known(Component::from_tag(r.u8()?))?,
@@ -405,7 +414,14 @@ mod tests {
             Op::Invite(InviteFor::Friend(id(1))),
             Op::Invite(InviteFor::Bearer),
             Op::Kick(id(2)),
-            Op::Approve(id(3)),
+            Op::Decide {
+                approval: ApprovalId::from_bytes([3; 16]),
+                allow: true,
+            },
+            Op::Decide {
+                approval: ApprovalId::from_bytes([4; 16]),
+                allow: false,
+            },
             Op::PickMap(MapId([9; 32])),
             Op::Leave,
             Op::Doctor,
@@ -455,11 +471,17 @@ mod tests {
             .map(|b| [b; 32])
             .find(|bytes| EndpointId::from_bytes(bytes).is_err())
             .expect("an invalid point encoding");
-        for tag in [OP_KICK, OP_APPROVE] {
-            let mut bytes = vec![tag];
-            bytes.extend_from_slice(&bad);
-            assert_eq!(decode_op(&bytes).err(), Some(IpcError::Malformed));
-        }
+        let mut bytes = vec![OP_KICK];
+        bytes.extend_from_slice(&bad);
+        assert_eq!(decode_op(&bytes).err(), Some(IpcError::Malformed));
+    }
+
+    #[test]
+    fn decide_takes_a_canonical_boolean() {
+        let mut bytes = vec![OP_DECIDE];
+        bytes.extend_from_slice(&[5; 16]);
+        bytes.push(2);
+        assert_eq!(decode_op(&bytes).err(), Some(IpcError::Malformed));
     }
 
     #[test]

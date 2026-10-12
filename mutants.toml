@@ -64,6 +64,14 @@ note = "the policy stops checking that rows have registered mutants"
 
 [[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-no-wipe", test = "si_30_secret_wiped_on_drop", note = "dropping a Secret does not wipe it"
 [[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-secret-debug", test = "si_30_secret_has_no_debug_display_serialize", note = "Secret gets a redacting Debug"
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-secret-clone", test = "si_30_secret_has_no_debug_display_serialize", note = "Secret implements Clone"
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-dumpable", test = "si_30_hardened_process_leaks_no_secret_to_a_core_dump_or_proc_mem", note = "harden_process leaves the process dumpable (RLIMIT_CORE is still 0)"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-world-readable", test = "si_22_identity_key_created_0600_in_a_0700_dir", note = "the state directory is created 0755 and the key file 0644"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-world-readable", test = "si_22_another_user_cannot_read_the_identity_key", note = "the state directory is created 0755 and the key file 0644"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-dir-unchecked", test = "si_22_state_dir_with_wrong_mode_type_or_link_refused", note = "an existing state directory is followed and accepted whatever its type, owner or mode"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-file-unchecked", test = "si_22_identity_key_with_wrong_mode_type_or_link_refused", note = "the key file is followed and read whatever its type, owner or mode"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-replace-damaged", test = "si_22_damaged_identity_file_is_refused_not_replaced", note = "a damaged key file is replaced by a new identity"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-reset-keeps-trust", test = "si_22_reset_revokes_every_trust_entry_for_the_old_key", note = "reset replaces the key without revoking the old key's trust entries"
 [[unmutated]] test = "si_30_diagnostics_render_only_schema_keys_and_typed_values", reason = "every diag field is a closed enum or a number; letting one carry text is a type change, not a flag"
 
 # kickoff-ipc
@@ -80,6 +88,10 @@ note = "the policy stops checking that rows have registered mutants"
 [[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-socket-mode", test = "si_7_socket_created_0600_and_removed_on_drop", note = "the socket keeps the umask's mode instead of 0600"
 [[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-reclaim-any", test = "si_7_squatted_socket_name_refused_without_touching_it", note = "bind removes whatever holds the socket name"
 [[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-client-any-socket", test = "si_7_client_refuses_a_socket_name_that_is_not_a_socket", note = "connect skips the socket type and owner check"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-pid-not-pidfd", test = "si_7_recycled_pid_refused", note = "the caller check reads /proc/<pid>/exe without pinning the process through SO_PEERPIDFD, so a recycled pid passes"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-accept-ancillary", test = "si_7_descriptors_from_a_caller_close_the_channel_and_are_closed", note = "a read that came with control data (MSG_CTRUNC) is accepted"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-accept-ancillary", test = "si_7_descriptors_close_the_channel_and_are_closed", note = "a read that came with control data (MSG_CTRUNC) is accepted"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-accept-ancillary", test = "si_7_credentials_close_the_channel", note = "a read that came with control data (MSG_CTRUNC) is accepted"
 [[unmutated]] test = "si_7_runtime_dir_created_private_and_reused", reason = "the directory is created 0700 and re-checked on open; with the usual umask no single flag changes the observed mode"
 [[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-skip-version", test = "si_10_version_mismatch_refused_before_any_command", note = "the server's hello check ignores the version"
 [[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-client-skips-version", test = "si_10_client_refuses_server_of_other_version", note = "the client's welcome check ignores the version"
@@ -165,13 +177,3 @@ note = "the policy stops checking that rows have registered mutants"
 [[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-no-approval-timeout", test = "si_41_an_approval_dies_with_its_moment", note = "approvals never time out"
 [[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-end-keeps-approvals", test = "si_41_session_end_retires_every_approval", note = "the end of the session leaves pending approvals in place"
 
-# Pending: M2 rows and named mutants whose code is not on this branch. Draft 3
-# assigns each to M2 (docs/reviews/r2-resolution.md, "M2 impact"); each entry
-# goes when its code and mutant land, and the policy test fails until then
-# if one is left behind.
-
-[[pending]] si = "SI-7", item = "mutant-si7-pid-not-pidfd", reason = "SO_PEERPIDFD caller check not implemented (ipc README NOTES 3: no safe rustix wrapper)"
-[[pending]] si = "SI-7", item = "mutant-si7-accept-ancillary", reason = "client channels do not yet refuse SCM_RIGHTS or credentials (r2 M2 impact, ipc item 2)"
-[[pending]] si = "SI-30", item = "mutant-si30-dumpable", reason = "secret::harden_process (PR_SET_DUMPABLE 0, RLIMIT_CORE 0) is not implemented (r2 M2 impact, secret item 1)"
-[[pending]] si = "SI-22", item = "test", reason = "no M2 crate stores the identity key or the trust list (store is M5); see the development.md NOTES question on SI-22's milestone"
-[[pending]] si = "SI-22", item = "mutant", reason = "no M2 crate stores the identity key or the trust list (store is M5)"

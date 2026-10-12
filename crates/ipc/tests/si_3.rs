@@ -27,6 +27,7 @@ enum Arg {
     Invitee,
     Identity,
     Map,
+    Approval,
 }
 
 // These matches have no wildcard arm on purpose: a new command variant does
@@ -49,7 +50,8 @@ fn ui_args(c: &UiCommand) -> Vec<Arg> {
         UiCommand::Status | UiCommand::Host | UiCommand::Leave | UiCommand::Doctor => vec![],
         UiCommand::Join(_) => vec![Arg::Ticket],
         UiCommand::Invite(_) => vec![Arg::Invitee],
-        UiCommand::Kick(_) | UiCommand::Approve(_) => vec![Arg::Identity],
+        UiCommand::Kick(_) => vec![Arg::Identity],
+        UiCommand::Decide { .. } => vec![Arg::Approval],
         UiCommand::PickMap(_) => vec![Arg::Map],
     }
 }
@@ -77,7 +79,13 @@ fn id() -> iroh_base::EndpointId {
 
 #[test]
 fn si_3_no_command_carries_a_path_url_eac_mode_or_launch_args() {
-    let allowed = [Arg::Ticket, Arg::Invitee, Arg::Identity, Arg::Map];
+    let allowed = [
+        Arg::Ticket,
+        Arg::Invitee,
+        Arg::Identity,
+        Arg::Map,
+        Arg::Approval,
+    ];
     let cli = [
         CliCommand::Status,
         CliCommand::Host,
@@ -93,7 +101,10 @@ fn si_3_no_command_carries_a_path_url_eac_mode_or_launch_args() {
         UiCommand::Join(ticket("kickoff1AB")),
         UiCommand::Invite(InviteFor::Friend(id())),
         UiCommand::Kick(id()),
-        UiCommand::Approve(id()),
+        UiCommand::Decide {
+            approval: kickoff_ipc::ApprovalId::from_bytes([1; 16]),
+            allow: true,
+        },
         UiCommand::PickMap(kickoff_wire::MapId([0; 32])),
         UiCommand::Leave,
         UiCommand::Doctor,

@@ -21,6 +21,8 @@ mutant-si7-dir-mode-unchecked = []
 mutant-si7-socket-mode = []
 mutant-si7-reclaim-any = []
 mutant-si7-client-any-socket = []
+mutant-si7-pid-not-pidfd = []
+mutant-si7-accept-ancillary = []
 mutant-si10-skip-version = []
 mutant-si10-client-skips-version = []
 mutant-si10-any-role = []
@@ -39,7 +41,9 @@ tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] 
 zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix.workspace = true
+nix.workspace = true
+rustix = { workspace = true, features = ["event", "net"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+rustix = { workspace = true, features = ["net", "pipe"] }

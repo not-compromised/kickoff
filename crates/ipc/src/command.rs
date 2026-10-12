@@ -51,6 +51,22 @@ impl fmt::Debug for TicketText {
     }
 }
 
+/// Names one approval object (§4.4, SI-41): 128 random bits minted by the
+/// admission owner in kickoffd. Opaque here; only the owner can tell whether
+/// it is still current, and a decision on a stale id authorizes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ApprovalId([u8; 16]);
+
+impl ApprovalId {
+    pub const fn from_bytes(bytes: [u8; 16]) -> ApprovalId {
+        ApprovalId(bytes)
+    }
+
+    pub const fn to_bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InviteFor {
     /// A bound invite for one identity.
@@ -70,8 +86,9 @@ pub enum CliCommand {
     ToggleOverlay,
 }
 
-/// The UI's Rust layer, never the webview: approvals arrive here only after
-/// the native dialog (§2.7).
+/// The UI main window's Rust layer, never the webview. `Decide` is sent only
+/// by the native dialog path, and names an approval object, not a peer
+/// (§2.7, §4.4).
 #[derive(Debug)]
 pub enum UiCommand {
     Status,
@@ -79,13 +96,13 @@ pub enum UiCommand {
     Join(TicketText),
     Invite(InviteFor),
     Kick(EndpointId),
-    Approve(EndpointId),
+    Decide { approval: ApprovalId, allow: bool },
     PickMap(MapId),
     Leave,
     Doctor,
 }
 
-/// The overlay can only read status (§2.7).
+/// The overlay can only read status (§2.7); it can never decide an approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayCommand {
     Status,
@@ -133,7 +150,7 @@ pub enum Op {
     Join(TicketText),
     Invite(InviteFor),
     Kick(EndpointId),
-    Approve(EndpointId),
+    Decide { approval: ApprovalId, allow: bool },
     PickMap(MapId),
     Leave,
     Doctor,
@@ -162,7 +179,7 @@ impl From<UiCommand> for Op {
             UiCommand::Join(t) => Op::Join(t),
             UiCommand::Invite(i) => Op::Invite(i),
             UiCommand::Kick(id) => Op::Kick(id),
-            UiCommand::Approve(id) => Op::Approve(id),
+            UiCommand::Decide { approval, allow } => Op::Decide { approval, allow },
             UiCommand::PickMap(m) => Op::PickMap(m),
             UiCommand::Leave => Op::Leave,
             UiCommand::Doctor => Op::Doctor,
@@ -191,7 +208,7 @@ impl Op {
                 Op::Leave => CliCommand::Leave,
                 Op::Doctor => CliCommand::Doctor,
                 Op::ToggleOverlay => CliCommand::ToggleOverlay,
-                Op::Kick(_) | Op::Approve(_) | Op::PickMap(_) => return None,
+                Op::Kick(_) | Op::Decide { .. } | Op::PickMap(_) => return None,
             })),
             ChannelRole::UiMain => Some(Request::UiMain(match self {
                 Op::Status => UiCommand::Status,
@@ -199,7 +216,7 @@ impl Op {
                 Op::Join(t) => UiCommand::Join(t),
                 Op::Invite(i) => UiCommand::Invite(i),
                 Op::Kick(id) => UiCommand::Kick(id),
-                Op::Approve(id) => UiCommand::Approve(id),
+                Op::Decide { approval, allow } => UiCommand::Decide { approval, allow },
                 Op::PickMap(m) => UiCommand::PickMap(m),
                 Op::Leave => UiCommand::Leave,
                 Op::Doctor => UiCommand::Doctor,

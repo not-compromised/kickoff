@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, timeout};
+use zeroize::Zeroizing;
 
+use super::stream::DataOnly;
 use super::{RuntimeDir, Trust};
 use crate::codec::{self, Welcome};
 use crate::command::{Refusal, Reply, Request};
@@ -111,18 +113,19 @@ impl Server {
 
     async fn admit(
         &self,
-        mut stream: UnixStream,
+        stream: UnixStream,
         slot: OwnedSemaphorePermit,
     ) -> Result<Channel, IpcError> {
         // Nothing has been read or written yet, so a refused caller learns
         // only that the connection closed.
-        let peer = match self.trust.check(stream.peer_cred()?) {
+        let peer = match self.trust.check(&stream) {
             Ok(peer) => peer,
             Err(e) => {
                 Counters::bump(&self.health.peers_rejected);
                 return Err(e);
             }
         };
+        let mut stream = DataOnly::new(stream);
         let role = timeout(HANDSHAKE_DEADLINE, async {
             let hello = read_frame(&mut stream, codec::HELLO_LEN).await?;
             let (welcome, role) = match codec::decode_hello(&hello) {
@@ -200,7 +203,7 @@ fn reclaim_dead_socket(path: &Path, uid: u32) -> Result<(), IpcError> {
 /// `recv` is not cancel-safe: dropping it mid-frame leaves the stream
 /// unaligned, and the next frame is then refused or closes the channel.
 pub struct Channel {
-    stream: UnixStream,
+    stream: DataOnly,
     role: ChannelRole,
     peer: PeerCred,
     budget: RateBudget,
@@ -272,18 +275,15 @@ impl Channel {
     }
 
     async fn next_request(&mut self) -> Result<Option<Request>, IpcError> {
-        let (len, deadline) = match read_header(&mut self.stream, MAX_REQUEST_FRAME).await {
-            Ok(header) => header,
+        let body = match self.next_frame().await {
+            Ok(body) => body,
             Err(e) => {
-                if matches!(e, IpcError::TooLarge { .. }) {
+                if matches!(e, IpcError::TooLarge { .. } | IpcError::Ancillary) {
                     Counters::bump(&self.health.frames_refused);
                 }
                 return Err(e);
             }
         };
-        // Charged on the header, before the body is allocated or read.
-        self.budget.charge()?;
-        let body = read_body(&mut self.stream, len, deadline).await?;
         match codec::decode_op(&body)
             .ok()
             .and_then(|op| op.for_role(self.role))
@@ -295,6 +295,13 @@ impl Channel {
                 Ok(None)
             }
         }
+    }
+
+    async fn next_frame(&mut self) -> Result<Zeroizing<Vec<u8>>, IpcError> {
+        let (len, deadline) = read_header(&mut self.stream, MAX_REQUEST_FRAME).await?;
+        // Charged on the header, before the body is allocated or read.
+        self.budget.charge()?;
+        read_body(&mut self.stream, len, deadline).await
     }
 
     async fn send(&mut self, reply: &Reply) -> Result<(), IpcError> {

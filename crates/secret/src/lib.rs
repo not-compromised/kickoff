@@ -2,6 +2,11 @@
 //! and the diagnostics schema that replaces free-form logs (design §6.4, SI-30).
 
 pub mod diag;
+mod harden;
+#[cfg(target_os = "linux")]
+pub mod identity;
+
+pub use harden::{HardenError, harden_process};
 
 use zeroize::Zeroize;
 
@@ -55,6 +60,16 @@ impl<T> Drop for Secret<T> {
     fn drop(&mut self) {
         if !cfg!(feature = "mutant-si30-no-wipe") {
             (self.wipe)(&mut self.value);
+        }
+    }
+}
+
+#[cfg(feature = "mutant-si30-secret-clone")]
+impl<T: Clone> Clone for Secret<T> {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            wipe: self.wipe,
         }
     }
 }
