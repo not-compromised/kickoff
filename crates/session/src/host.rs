@@ -17,7 +17,7 @@ use kickoff_wire::{
     AdmitPass, Admitted, BoundedVec, GuestMsg, HostMsg, JoinRefused, KickReason, LanDatagram,
     PeerRef, PeerSlot, Ticket,
 };
-use tokio::sync::{Semaphore, broadcast, oneshot, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 use crate::admission::{Admission, Joined};
@@ -37,6 +37,8 @@ const FAREWELL_WAIT: Duration = Duration::from_millis(750);
 /// Join requests being answered at once, including reserved priority replies.
 const REPLIES: usize = 16;
 const PRIORITY_REPLIES: usize = 8;
+/// Lifecycle operations waiting for the session-owned completion task.
+const OPERATIONS: usize = 16;
 /// How often the admission and reconnect windows are checked.
 const SWEEP: Duration = Duration::from_millis(250);
 /// Host fan-out (§6.3): 16 MB/s overall, charged per emitted copy.
@@ -45,6 +47,16 @@ const EGRESS_BURST: u64 = 2_000_000;
 
 /// The last message a removed link's task sends, and how it says it did.
 type Farewell = oneshot::Sender<(HostMsg, oneshot::Sender<()>)>;
+
+enum Operation {
+    Kick(EndpointId),
+    End(EndReason),
+}
+
+struct PendingOperation {
+    operation: Operation,
+    done: oneshot::Sender<Result<(), SessionError>>,
+}
 
 pub(crate) struct Host {
     door: Arc<Door>,
@@ -61,6 +73,7 @@ pub(crate) struct Host {
     events: broadcast::Sender<SessionEvent>,
     /// Follows the admission owner's ending transition after the goodbyes.
     ended: watch::Sender<bool>,
+    operations: mpsc::Sender<PendingOperation>,
 }
 
 pub(crate) fn start(
@@ -85,6 +98,7 @@ pub(crate) fn start(
     let admission = Admission::new(door_key, net.id(), opts.name, opts.trusted)
         .map_err(SessionError::Invite)?;
     let (roster, _) = watch::channel((0, HostMsg::End));
+    let (operations, pending) = mpsc::channel(OPERATIONS);
     let host = Arc::new(Host {
         door,
         key: door_key.clone(),
@@ -97,8 +111,10 @@ pub(crate) fn start(
         roster,
         events,
         ended: watch::channel(false).0,
+        operations,
     });
     host.publish(&host.admission());
+    tasks.spawn(complete_operations(Arc::clone(&host), pending));
     tasks.spawn(join_loop(Arc::clone(&host)));
     tasks.spawn(accept_loop(Arc::clone(&host)));
     tasks.spawn(pump(Arc::clone(&host)));
@@ -144,7 +160,7 @@ impl Host {
     pub(crate) async fn command(&self, command: Command) -> Result<(), SessionError> {
         self.live()?;
         match command {
-            Command::Kick(id) => self.kick(id).await,
+            Command::Kick(id) => self.operation(Operation::Kick(id)).await,
             Command::Readmit(id) => {
                 let mut adm = self.live_admission()?;
                 adm.readmit(id);
@@ -153,11 +169,26 @@ impl Host {
             }
             Command::Decide { approval, allow } => self.decide(approval, allow),
             Command::PickMap(_) => Err(SessionError::NotImplemented),
-            Command::Leave => {
-                self.end(EndReason::Left).await;
-                Ok(())
-            }
+            Command::Leave => self.operation(Operation::End(EndReason::Left)).await,
         }
+    }
+
+    async fn operation(&self, operation: Operation) -> Result<(), SessionError> {
+        if cfg!(feature = "mutant-si18-caller-owned-completion") {
+            return match operation {
+                Operation::Kick(id) => self.kick(id).await,
+                Operation::End(reason) => {
+                    self.end(reason).await;
+                    Ok(())
+                }
+            };
+        }
+        let (done, completed) = oneshot::channel();
+        self.operations
+            .send(PendingOperation { operation, done })
+            .await
+            .map_err(|_| SessionError::Ended)?;
+        completed.await.unwrap_or(Err(SessionError::Ended))
     }
 
     pub(crate) fn approvals(&self) -> watch::Receiver<Vec<Approval>> {
@@ -373,6 +404,37 @@ impl Host {
         self.admission
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Committed transitions belong to Session's task set. Dropping a caller's
+/// completion receiver cannot cancel farewell, publication or endpoint close.
+async fn complete_operations(host: Arc<Host>, mut pending: mpsc::Receiver<PendingOperation>) {
+    let mut ended = host.ended.subscribe();
+    loop {
+        let operation = tokio::select! {
+            biased;
+            _ = ended.wait_for(|ended| *ended) => break,
+            operation = pending.recv() => operation,
+        };
+        let Some(PendingOperation { operation, done }) = operation else {
+            break;
+        };
+        let result = match operation {
+            Operation::Kick(id) => host.kick(id).await,
+            Operation::End(reason) => {
+                // Recheck under the owner lock in end. Another session-owned
+                // path may have started teardown while this was queued.
+                match host.live() {
+                    Ok(()) => {
+                        host.end(reason).await;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        let _ = done.send(result);
     }
 }
 
