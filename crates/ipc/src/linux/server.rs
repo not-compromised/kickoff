@@ -190,8 +190,8 @@ impl Drop for Server {
 /// One authenticated caller. Requests and replies alternate: every request
 /// `recv` returns gets exactly one reply.
 ///
-/// `recv` is not cancel-safe: dropping it mid-frame leaves the stream
-/// unaligned, and the next frame is then refused or closes the channel.
+/// Dropping a polled `recv` or `reply` before completion permanently closes
+/// the channel. An interrupted frame or reply is never reused.
 pub struct Channel {
     stream: DataOnly,
     role: ChannelRole,
@@ -234,12 +234,18 @@ impl Channel {
             if self.dead {
                 return Err(IpcError::Closed);
             }
+            // Cancellation may consume a partial frame, so only completion
+            // permits another receive.
+            self.dead = !cfg!(feature = "mutant-si10-ipc-recv-cancel-reuse");
             match self.next_request().await {
                 Ok(Some(request)) => {
+                    self.dead = false;
                     self.pending = true;
                     return Ok(request);
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    self.dead = false;
+                }
                 Err(e) => {
                     self.dead = true;
                     return Err(e);
@@ -296,6 +302,8 @@ impl Channel {
     }
 
     async fn send(&mut self, reply: &Reply) -> Result<(), IpcError> {
+        // The peer may have read any prefix of a cancelled reply.
+        self.dead = !cfg!(feature = "mutant-si10-ipc-reply-cancel-reuse");
         let result = async {
             let bytes = codec::encode_reply(reply)?;
             if bytes.len() > MAX_REPLY_FRAME {
@@ -308,9 +316,7 @@ impl Channel {
                 .await
         }
         .await;
-        if result.is_err() {
-            self.dead = true;
-        }
+        self.dead = result.is_err();
         result
     }
 }
@@ -342,3 +348,6 @@ impl RateBudget {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

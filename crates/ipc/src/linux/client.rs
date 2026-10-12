@@ -69,15 +69,16 @@ impl<R: Role> Client<R> {
 
     /// Sends one command and waits for its reply. Waiting for the reply's
     /// first byte has no deadline (a command such as `Host` takes as long as
-    /// it takes); the rest of the frame must follow promptly.
+    /// it takes); the rest of the frame must follow promptly. Dropping a
+    /// polled call before completion permanently closes this client.
     pub async fn call(&mut self, command: R::Command) -> Result<Reply, IpcError> {
         if self.dead {
             return Err(IpcError::Closed);
         }
+        // A cancelled exchange cannot leave an unread reply for another call.
+        self.dead = !cfg!(feature = "mutant-si10-ipc-client-cancel-reuse");
         let result = self.exchange(command).await;
-        if result.is_err() {
-            self.dead = true;
-        }
+        self.dead = result.is_err();
         result
     }
 

@@ -159,8 +159,12 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
 9. **`Server::accept` does the handshake inline**, so a same-uid caller that
    connects and stalls delays the next accept by up to 1 s. Other uids are
    refused before anything is read.
-10. **`Channel::recv` is not cancel-safe**: dropping it mid-frame misaligns
-    the stream, and the channel then refuses or closes.
+10. **Cancelled I/O fails closed.** Dropping a polled `Client::call`,
+    `Channel::recv` or `Channel::reply` before completion permanently closes
+    that endpoint. Later operations return `Closed`, so a held reply cannot
+    answer another command and a partial frame cannot become a new request.
+    Dropping an unpolled future leaves the endpoint usable. Completed calls,
+    receives and replies preserve normal sequential use.
 11. **Ancillary data is refused by giving it no room.** Every read is a
     `recvmsg` with a zero-length control buffer, on both ends. The kernel
     then closes any `SCM_RIGHTS` descriptors itself (they never enter this
