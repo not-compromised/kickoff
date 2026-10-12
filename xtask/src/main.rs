@@ -82,7 +82,6 @@ fn mutants(filters: &[String]) -> Result<(), String> {
     if chosen.is_empty() {
         return Err("no registered mutant matches".to_owned());
     }
-    let mut bad = Vec::new();
     for (i, m) in chosen.iter().enumerate() {
         let started = Instant::now();
         let verdict = run_mutant(&ws, m);
@@ -100,21 +99,12 @@ fn mutants(filters: &[String]) -> Result<(), String> {
             Ok(note) => println!("killed   {label} ({secs}s{note})"),
             Err(why) => {
                 println!("FAILED   {label}: {why}");
-                bad.push(label);
+                return Err(format!("mutant not killed: {label}"));
             }
         }
     }
-    if bad.is_empty() {
-        println!("all {} mutants killed", chosen.len());
-        Ok(())
-    } else {
-        Err(format!(
-            "{} of {} mutants not killed:\n  {}",
-            bad.len(),
-            chosen.len(),
-            bad.join("\n  ")
-        ))
-    }
+    println!("all {} mutants killed", chosen.len());
+    Ok(())
 }
 
 /// `Ok` when the test passes on the plain build and fails on the mutant.

@@ -74,6 +74,9 @@ cargo run -p kickoff-xtask -- release-guard         # release builds refuse muta
 cargo run -p kickoff-xtask -- policy                # the SI-33 report
 ```
 
+The mutation run stops at the first failed row, including a passing mutated
+test or a build/discovery failure. Later rows receive no verdict.
+
 `xtask/tests/si_33_policy.rs` parses `docs/SECURITY-INVARIANTS.md` and fails
 if a row held in M2 has no `si_<n>_` test or no registered mutant, if a
 mutant named in its Mutant column is not registered, if a registered mutant's
