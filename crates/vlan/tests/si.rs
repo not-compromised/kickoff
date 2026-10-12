@@ -39,6 +39,74 @@ async fn si_18_flows_do_not_survive_a_generation_change() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn si_18_broadcast_reply_flows_follow_each_peers_generation() {
+    let (host, game) = node(1);
+    let beacon = Udp::broadcast(1, 40000, DISCOVERY_PORT).frame();
+    game_sends(&host, &game, beacon.clone()).await.unwrap();
+    for guest in [3, 4] {
+        host.deliver(datagram(guest, DISCOVERY_PORT, 40000));
+        assert!(game_receives(&game).await.is_some());
+    }
+
+    host.reset_peer(slot(3));
+    host.deliver(datagram(3, DISCOVERY_PORT, 40000));
+    assert!(
+        game_receives(&game).await.is_none(),
+        "a new generation inherited the previous broadcast's return permission"
+    );
+    host.deliver(datagram(4, DISCOVERY_PORT, 40000));
+    assert!(
+        game_receives(&game).await.is_some(),
+        "resetting one recipient erased an unaffected guest's flow"
+    );
+    game_sends(&host, &game, beacon).await.unwrap();
+    host.deliver(datagram(3, DISCOVERY_PORT, 40000));
+    assert!(
+        game_receives(&game).await.is_some(),
+        "a fresh beacon reopens the flow"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn si_23_broadcast_and_unicast_share_the_per_peer_flow_limit() {
+    let (host, game) = node(1);
+    for port in 40000..40064 {
+        game_sends(&host, &game, Udp::unicast(1, 3, port, GAME_PORT).frame())
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
+    for port in 45000..45016 {
+        game_sends(
+            &host,
+            &game,
+            Udp::broadcast(1, port, DISCOVERY_PORT).frame(),
+        )
+        .await
+        .unwrap();
+        tokio::time::advance(Duration::from_millis(100)).await;
+    }
+    let mut replies = 0;
+    for port in 40000..40064 {
+        host.deliver(datagram(3, GAME_PORT, port));
+        replies += usize::from(game_receives(&game).await.is_some());
+    }
+    for port in 45000..45016 {
+        host.deliver(datagram(3, DISCOVERY_PORT, port));
+        replies += usize::from(game_receives(&game).await.is_some());
+    }
+    assert_eq!(
+        replies, 64,
+        "broadcast permissions exceeded the peer's combined flow limit"
+    );
+    host.deliver(datagram(3, DISCOVERY_PORT, 45015));
+    assert!(
+        game_receives(&game).await.is_some(),
+        "the newest broadcast flow is retained"
+    );
+}
+
 /// SI-21: a guest's LAN has one peer, the host. Whatever its game sends or a
 /// misrouted datagram claims, it neither reaches nor hears another guest.
 #[tokio::test(start_paused = true)]

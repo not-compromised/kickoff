@@ -38,22 +38,20 @@ Tests: `src/tests.rs` (every forbidden case with its reason), `tests/lan.rs`
 
 ## NOTES (spec questions and deviations from draft 2)
 
-1. **`Lan::reset_peer(slot)` is new.** §3.1 keys flows by (identity,
-   generation, 5-tuple), but `LanDatagram` carries no generation, so the
-   filter cannot see one. Flows are keyed by slot and ports, and the admission
-   owner must call `reset_peer(slot)` whenever that slot's generation changes
-   (reconnect, kick, eviction, slot reuse), before delivering the new
-   generation's datagrams. `si_18_flows_do_not_survive_a_generation_change`
-   covers the vlan side. The weakness: a forgotten call fails open. A
-   fail-closed alternative for draft 3 is `Lan::admit(PeerRef)`, with
-   `deliver` dropping datagrams from slots holding no current admission. I
-   did not adopt it because session is being written against the stub
-   `deliver` signature in parallel.
+1. **Generation ownership stays in session.** §3.1 keys flows by identity,
+   generation and tuple. The LAN uses slot and ports; session authenticates
+   the current link generation and calls `reset_peer(slot)` on route removal
+   and activation before the replacement route can deliver. This call clears
+   every return permission for that slot. Public VLAN reset tests and real
+   session reconnect tests cover unicast and broadcast flows independently.
 2. **Per-peer buckets survive `reset_peer`** on purpose. Otherwise a
    reconnect would refill a flooding peer's budget.
-3. **Flows opened by the host's broadcasts** can be answered by any guest
-   (that is how beacon replies work). `reset_peer` leaves them in place. They
-   expire after 30 s idle like other flows.
+3. **Broadcast return permissions belong to each guest.** A host beacon
+   records its tuple in every guest's existing flow table. A reset clears
+   only that guest's permission, leaving other generations' replies intact.
+   Broadcast and unicast share the same 64-entry limit and 30 s idle expiry.
+   Admission resets a new or reused slot before installing its route, so a
+   later guest cannot inherit a beacon emitted before its admission.
 4. **Broadcast `peer`.** `recv` returns every broadcast with
    `peer = PeerSlot::HOST`. On the host that is the host's own slot, and the
    pump fans it out to every guest. On a guest it goes to the host only.

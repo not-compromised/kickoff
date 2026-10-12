@@ -35,10 +35,9 @@ pub(crate) const BROADCASTS: Rate = Rate {
     burst: 10,
 };
 
-/// Indexed by slot number; index 0 is "any guest", the scope of the host's
-/// broadcast flows, which every guest may answer.
+/// Indexed by slot number. Broadcast and unicast permissions share each
+/// peer's table so both die at its next generation reset.
 const SCOPES: usize = MAX_ROSTER as usize + 1;
-const ANY_GUEST: usize = 0;
 
 pub(crate) struct Filter {
     node: Node,
@@ -71,18 +70,20 @@ impl Filter {
         check_ports(d)?;
         let scope = if d.bcast {
             check_broadcast(d, &mut self.broadcast_out, now)?;
+            let host = index(PeerSlot::HOST);
             if self.node.is_host() {
-                ANY_GUEST
+                host.saturating_add(1)..SCOPES
             } else {
-                index(PeerSlot::HOST)
+                host..host.saturating_add(1)
             }
         } else {
             if !ports::game(d.src_port) && !ports::game(d.dst_port) {
                 return Err(Reject::NotGamePort);
             }
-            index(d.peer)
+            let peer = index(d.peer);
+            peer..peer.saturating_add(1)
         };
-        if let Some(table) = self.flows.get_mut(scope) {
+        for table in self.flows.get_mut(scope).into_iter().flatten() {
             table.record(d.src_port, d.dst_port, now);
         }
         Ok(())
@@ -134,12 +135,9 @@ impl Filter {
     }
 
     fn flow_open(&self, d: &LanDatagram, now: Instant) -> bool {
-        let open = |scope: usize| {
-            self.flows
-                .get(scope)
-                .is_some_and(|t| t.live(d.dst_port, d.src_port, now))
-        };
-        open(index(d.peer)) || (self.node.is_host() && open(ANY_GUEST))
+        self.flows
+            .get(index(d.peer))
+            .is_some_and(|t| t.live(d.dst_port, d.src_port, now))
     }
 }
 

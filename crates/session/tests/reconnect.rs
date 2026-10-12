@@ -121,6 +121,48 @@ async fn si_18_reconnect_forgets_the_old_generations_flows() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn si_18_reconnect_forgets_broadcast_return_flows() {
+    let host = host().await;
+    let alice = Identity::new().await;
+    let ticket = host.bound(alice.id());
+    let alice = RawGuest::join(alice, &ticket).await.unwrap();
+    let (link, ctl) = alice.connect().await.unwrap();
+    let beacon = udp(1, None, 30_000, BEACON_PORT, b"open");
+    host.game.send_frame(beacon.clone()).unwrap();
+    let opened = tokio::time::timeout(WAIT, link.recv_lan())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(opened.bcast);
+    link.send_lan(&to_host(BEACON_PORT, 30_000, 1));
+    assert_eq!(
+        next_udp(&host.game, WAIT).await.unwrap().payload,
+        vec![1; 16]
+    );
+
+    link.close();
+    drop((link, ctl));
+    let (link, _ctl) = redial(&alice).await;
+    link.send_lan(&to_host(BEACON_PORT, 30_000, 2));
+    assert_eq!(
+        next_udp(&host.game, QUIET).await,
+        None,
+        "the replacement generation inherited a broadcast return flow"
+    );
+    host.game.send_frame(beacon).unwrap();
+    let opened = tokio::time::timeout(WAIT, link.recv_lan())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(opened.bcast);
+    link.send_lan(&to_host(BEACON_PORT, 30_000, 3));
+    assert_eq!(
+        next_udp(&host.game, WAIT).await.unwrap().payload,
+        vec![3; 16]
+    );
+}
+
 /// The guest side of §4.6, against a host the test plays with `kickoff-net`
 /// directly: when its link drops, the guest redials with the same pass and
 /// carries on once the host's roster arrives.
