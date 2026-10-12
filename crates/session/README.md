@@ -8,7 +8,7 @@ reconnect, budgets and the pump between the local game's LAN and the links.
 | `admission` | the admission owner (§4.4): seats keyed by identity and generation, the session-wide generation counter, revocation, trusted ids, the invite ledger, the approvals, and the admitted set and roster it publishes. Pure state, no I/O |
 | `approval` | approval objects (§4.4, SI-41): random ids, one pending per kind, consumed once, retired by a kick, a generation change, a newer map pick, the session's end or 60 s. Pure state, owned by `admission` |
 | `host` | applies each decision in one critical section (route removal, LAN flow reset, published set, roster and pending approvals), the join loop, the accept loop, one task per link (Hello deadline, Ping and idle close), the pump, the window and approval sweep |
-| `guest` | join, the first-roster check, the guest pump, redial with backoff |
+| `guest` | join, the first-roster check, the guest pump, host-flow retirement before every dial, redial with backoff |
 | `routes` | the pump's only shared state: slot → (generation, link). Deliveries run under its read lock, changes take the write lock |
 | `budget`, `clock` | the host fan-out bucket; the session's forward-only monotonic clock |
 
@@ -43,7 +43,9 @@ How the structure carries the rules:
   lock; kicks, drops and evictions remove the route under the write lock first,
   then reset the LAN's flows for the slot, then publish the admitted set (which
   closes the connection in `net`). Generations come from one counter, so a slot
-  reused by another identity never sees an old generation again.
+  reused by another identity never sees an old generation again. The guest's
+  connection owner clears HOST's return flows before every dial, so replacement
+  links cannot answer old unicast or broadcast flows. It retains spent LAN credit.
 - **Revocation first (SI-19).** `Admission::join` refuses a revoked identity
   before it looks at trust or the capability, so a kick overrides both, and a
   refusal never spends a ticket. `Readmit` is the explicit host action.
@@ -72,9 +74,9 @@ How the structure carries the rules:
 
 ## Tests
 
-In-process nodes on loopback with relays disabled and `vlan::Mem` games. Each
-test plays every game with raw Ethernet frames; hostile or precise guests (and,
-once, a host) are played with `kickoff-net` directly.
+In-process nodes with loopback session links, local TLS relays for identity
+doors and `vlan::Mem` games. Each test plays the game with raw Ethernet frames;
+hostile or precise peers are played with `kickoff-net` directly.
 
 | Test | Proves |
 |---|---|
@@ -103,6 +105,8 @@ once, a host) are played with `kickoff-net` directly.
 | `si_19_kicked_peer_datagrams_dropped` | a guest still sending after its kick reaches the game no more; its redial and a fresh ticket are refused |
 | `si_19_kick_overrides_trust_and_every_ticket` | after a kick, a trusted rejoin and every earlier ticket get `Revoked`; after `Readmit`, trust applies again |
 | `si_18_reconnect_forgets_the_old_generations_flows` | a flow the host's game opened before a drop does not answer the redialed link |
+| `si_18_guest_reconnect_forgets_unicast_return_flows` | the actual guest refuses a replacement host's reply through an old unicast flow, then accepts a reply after a fresh request |
+| `si_18_guest_reconnect_forgets_broadcast_return_flows` | the actual guest refuses a replacement host's reply through an old beacon flow, then accepts a reply after a fresh beacon |
 | `reconnect_inside_the_window_keeps_the_slot` | a dropped guest's slot stays reserved and its redial carries on |
 | `reconnect_after_the_window_is_refused_and_frees_the_slot` | past 30 s the seat is gone, the redial refused, the slot reused |
 | `guest_redials_after_a_drop_and_carries_on` | the guest side of §4.6 against a test-played host |

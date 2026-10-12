@@ -90,7 +90,7 @@ pub(crate) async fn start(
     let slot = admitted.pass.slot;
     let lan = kickoff_vlan::open(adapter, LanConfig { slot }).map_err(SessionError::Lan)?;
     let me = door.id();
-    let (link, ctl, (epoch, members)) = connect(&net, &admitted, me).await?;
+    let (link, ctl, (epoch, members)) = connect(&net, &admitted, me, &lan).await?;
     let (members_tx, members_rx) = watch::channel(members.clone());
     let (ended_tx, ended_rx) = watch::channel(false);
     let _ = events.send(SessionEvent::Roster { epoch, members });
@@ -144,7 +144,11 @@ async fn connect(
     net: &SessionNet,
     admitted: &Admitted,
     me: EndpointId,
+    lan: &Lan,
 ) -> Result<(Arc<Link>, CtlStream, (u64, Vec<Member>)), SessionError> {
+    if !cfg!(feature = "mutant-si18-no-flow-reset") {
+        lan.reset_peer(PeerSlot::HOST);
+    }
     let (link, mut ctl) = net
         .dial(admitted.session_addr.clone(), admitted.pass)
         .await
@@ -278,7 +282,7 @@ async fn reconnect(
             biased;
             _ = &mut *leave => return Err(EndReason::Left),
             () = ctx.clock.until(deadline) => return Err(EndReason::HostLost),
-            connected = connect(&ctx.net, &ctx.admitted, ctx.me) => {
+            connected = connect(&ctx.net, &ctx.admitted, ctx.me, &ctx.lan) => {
                 if let Ok(connected) = connected {
                     return Ok(connected);
                 }

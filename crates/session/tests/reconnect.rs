@@ -282,6 +282,193 @@ async fn guest_redials_after_a_drop_and_carries_on() {
     assert_eq!((got.from, got.payload.as_slice()), (1, &b"still here"[..]));
 }
 
+async fn guest_reconnect_retires_return_flow(broadcast: bool) {
+    use kickoff_net::{AdmittedSet, Role};
+    use kickoff_secret::Secret;
+    use kickoff_session::SessionEvent;
+    use kickoff_wire::{
+        AdmitPass, Admitted, BoundedVec, Generation, GuestMsg, HostMsg, Invites, Member, PeerRef,
+        Ticket,
+    };
+
+    let host_identity = Identity::new().await;
+    let host_net = session_net(Role::Host).await;
+    let alice = Identity::new().await;
+    let alice_id = alice.id();
+    let mut invites = Invites::new(&host_identity.key).unwrap();
+    let ticket = Secret::new(Ticket {
+        door: host_identity.door.addr(),
+        cap: invites
+            .issue(
+                &host_identity.key,
+                Some(alice_id),
+                std::time::Instant::now(),
+            )
+            .unwrap(),
+    });
+    let slot = PeerSlot::new(2).unwrap();
+    let pass = AdmitPass {
+        slot,
+        generation: Generation::new(1),
+    };
+    let roster = |epoch| HostMsg::Roster {
+        epoch,
+        members: BoundedVec::new(vec![
+            Member {
+                slot: PeerSlot::HOST,
+                id: host_identity.id(),
+                name: name("host"),
+            },
+            Member {
+                slot,
+                id: alice_id,
+                name: name("guest"),
+            },
+        ])
+        .unwrap(),
+    };
+    let admit = |generation, key| {
+        [(
+            key,
+            PeerRef {
+                id: alice_id,
+                slot,
+                generation: Generation::new(generation),
+            },
+        )]
+        .into_iter()
+        .collect::<AdmittedSet>()
+    };
+    let joining = tokio::spawn(join(alice, ticket));
+    let attempt = tokio::time::timeout(WAIT, host_identity.door.next_join())
+        .await
+        .unwrap()
+        .unwrap();
+    let key = attempt.request().session_key;
+    host_net.set_admitted(admit(1, key));
+    attempt
+        .answer(Ok(Admitted {
+            session_addr: host_net.addr(),
+            pass,
+        }))
+        .await
+        .unwrap();
+    let (old_link, mut old_ctl) = tokio::time::timeout(WAIT, host_net.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        old_ctl.recv::<GuestMsg>().await.unwrap(),
+        GuestMsg::Hello {
+            generation: Generation::new(1)
+        }
+    );
+    old_ctl.send(&roster(1)).await.unwrap();
+    let mut alice = joining.await.unwrap().unwrap();
+    let local_port = if broadcast { 41_000 } else { 40_000 };
+    let remote_port = if broadcast { BEACON_PORT } else { GAME_PORT };
+    let request = udp(
+        2,
+        if broadcast { None } else { Some(1) },
+        local_port,
+        remote_port,
+        b"open",
+    );
+    alice.game.send_frame(request.clone()).unwrap();
+    let opened = tokio::time::timeout(WAIT, old_link.recv_lan())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            opened.bcast,
+            opened.src_port,
+            opened.dst_port,
+            opened.payload.as_ref()
+        ),
+        (broadcast, local_port, remote_port, &b"open"[..])
+    );
+    let reply = |payload: &[u8]| LanDatagram {
+        peer: PeerSlot::HOST,
+        bcast: false,
+        src_port: remote_port,
+        dst_port: local_port,
+        payload: payload.to_vec().into(),
+    };
+    old_link.send_lan(&reply(b"old reply"));
+    assert_eq!(
+        next_udp(&alice.game, WAIT).await.unwrap().payload,
+        b"old reply"
+    );
+
+    host_net.set_admitted(admit(2, key));
+    event(&mut alice.events, |e| {
+        matches!(e, SessionEvent::Reconnecting).then_some(())
+    })
+    .await;
+    let (link, mut ctl) = tokio::time::timeout(WAIT, host_net.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ctl.recv::<GuestMsg>().await.unwrap(),
+        GuestMsg::Hello {
+            generation: Generation::new(1)
+        }
+    );
+    ctl.send(&roster(2)).await.unwrap();
+    assert_eq!(
+        event(&mut alice.events, |e| match e {
+            SessionEvent::Roster { epoch, .. } => Some(*epoch),
+            _ => None,
+        })
+        .await,
+        2
+    );
+    link.send_lan(&reply(b"stale permission"));
+    assert_eq!(
+        next_udp(&alice.game, QUIET).await,
+        None,
+        "the guest's replacement connection inherited an old return flow"
+    );
+    link.send_lan(&LanDatagram {
+        peer: PeerSlot::HOST,
+        bcast: false,
+        src_port: remote_port,
+        dst_port: GAME_PORT,
+        payload: b"live connection".to_vec().into(),
+    });
+    assert_eq!(
+        next_udp(&alice.game, WAIT).await.unwrap().payload,
+        b"live connection"
+    );
+    alice.game.send_frame(request).unwrap();
+    let opened = tokio::time::timeout(WAIT, link.recv_lan())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (opened.bcast, opened.src_port, opened.dst_port),
+        (broadcast, local_port, remote_port)
+    );
+    link.send_lan(&reply(b"fresh reply"));
+    assert_eq!(
+        next_udp(&alice.game, WAIT).await.unwrap().payload,
+        b"fresh reply"
+    );
+    drop((link, ctl, old_link, old_ctl));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn si_18_guest_reconnect_forgets_unicast_return_flows() {
+    guest_reconnect_retires_return_flow(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn si_18_guest_reconnect_forgets_broadcast_return_flows() {
+    guest_reconnect_retires_return_flow(true).await;
+}
+
 /// §4.6: a guest whose host stays unreachable for the 30 s reconnect window,
 /// on the guest's clock, ends with `HostLost`, and not before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
