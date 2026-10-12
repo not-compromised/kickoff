@@ -12,6 +12,7 @@ Spec: [design.md](design.md). Standing security rules: [SECURITY-INVARIANTS.md](
 | `crates/session` | admission owner, roster, pump, budgets | M2 |
 | `crates/ipc` | authenticated, versioned local channels | M2 (Linux), M7 (Windows) |
 | `crates/secret` | `Secret<T>`, process hardening, Linux identity storage | M2 |
+| `crates/budget` | shared saturating token arithmetic; rates and charging order stay local | M2 |
 | `crates/send-guard` | the registry called by vendored iroh before IP sends | M2 |
 | `bins/kickoffd` | Linux listener facade and hardened IPC worker; commands refuse until adapters exist | M2 startup, M6 adapters |
 | `crates/{store,parse,maps,game}`, `bins/kickoff` | placeholders | M5, M6 |

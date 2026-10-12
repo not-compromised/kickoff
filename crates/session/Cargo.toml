@@ -52,6 +52,7 @@ mutant-si20-reusable-cap-and-seat = [
 ]
 
 [dependencies]
+kickoff-budget.workspace = true
 iroh-base.workspace = true
 kickoff-wire.workspace = true
 kickoff-vlan.workspace = true

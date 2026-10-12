@@ -428,3 +428,10 @@ test_crate = "kickoff-session"
 feature = "mutant-si23-fresh-hello-deadline"
 test = "si_23_partial_hello_does_not_restart_tls_deadline"
 note = "a first byte near the deadline restarts Hello decoding"
+
+# All three budget callers use the same saturation arithmetic. Existing flags
+# still remove only their own layer's charge or charging order.
+[[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test = "si_23_full_bucket_never_banks_idle_credit", note = "fractional tokens earned while full survive saturation"
+[[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-session", test = "si_23_full_fanout_bucket_discards_idle_fractional_credit", note = "fanout's shared bucket retains idle credit"
+[[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-net", test = "si_23_full_ingress_bucket_discards_idle_fractional_credit", note = "ingress's shared bucket retains idle credit"
+[[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-vlan", test = "si_23_full_lan_bucket_discards_idle_fractional_credit", note = "LAN's shared bucket retains idle credit"

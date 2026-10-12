@@ -53,6 +53,7 @@ mutant-si31-unbound = []
 mutant-si31-relay-only-binds = []
 
 [dependencies]
+kickoff-budget.workspace = true
 kickoff-wire.workspace = true
 kickoff-secret.workspace = true
 kickoff-send-guard.workspace = true

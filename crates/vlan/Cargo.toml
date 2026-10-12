@@ -24,6 +24,7 @@ mutant-si23-flow-table-grows = []
 mutant-si23-reset-refills-budget = []
 
 [dependencies]
+kickoff-budget.workspace = true
 kickoff-wire.workspace = true
 bytes.workspace = true
 thiserror.workspace = true

@@ -6,52 +6,46 @@ pub(crate) struct Rate {
     pub burst: u64,
 }
 
-const NANOS: u128 = 1_000_000_000;
-
-/// A token bucket kept in token-nanoseconds so integer refill loses nothing.
-/// Starts full.
-pub(crate) struct Bucket {
-    rate: Rate,
-    level: u128,
-    last: Instant,
-}
+pub(crate) struct Bucket(kickoff_budget::Bucket);
 
 impl Bucket {
     pub fn new(rate: Rate, now: Instant) -> Bucket {
-        Bucket {
-            rate,
-            level: capacity(rate),
-            last: now,
-        }
+        Bucket(kickoff_budget::Bucket::new(
+            now.into_std(),
+            rate.per_sec,
+            rate.burst,
+        ))
     }
 
-    /// Takes `cost` tokens if the bucket holds them; otherwise takes nothing.
+    #[inline]
     pub fn take(&mut self, cost: u64, now: Instant) -> bool {
-        self.refill(now);
-        let cost = u128::from(cost).saturating_mul(NANOS);
-        match self.level.checked_sub(cost) {
-            Some(rest) => {
-                self.level = rest;
-                true
-            }
-            None => false,
-        }
+        self.0.charge(now.into_std(), cost)
     }
 
-    /// Whether `cost` would fit now, without taking it.
+    #[inline]
     pub fn has(&mut self, cost: u64, now: Instant) -> bool {
-        self.refill(now);
-        self.level >= u128::from(cost).saturating_mul(NANOS)
-    }
-
-    fn refill(&mut self, now: Instant) {
-        let elapsed = now.saturating_duration_since(self.last).as_nanos();
-        let gained = elapsed.saturating_mul(u128::from(self.rate.per_sec));
-        self.level = self.level.saturating_add(gained).min(capacity(self.rate));
-        self.last = now.max(self.last);
+        self.0.ready(now.into_std(), cost)
     }
 }
 
-fn capacity(rate: Rate) -> u128 {
-    u128::from(rate.burst).saturating_mul(NANOS)
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn si_23_full_lan_bucket_discards_idle_fractional_credit() {
+        let t = Instant::now();
+        let mut b = Bucket::new(
+            Rate {
+                per_sec: 1,
+                burst: 1,
+            },
+            t,
+        );
+        assert!(b.take(1, t + Duration::from_millis(900)));
+        assert!(!b.take(1, t + Duration::from_secs(1)));
+        assert!(b.take(1, t + Duration::from_millis(1900)));
+    }
 }

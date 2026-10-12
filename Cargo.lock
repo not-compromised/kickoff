@@ -1593,6 +1593,10 @@ name = "kickoff"
 version = "0.0.0"
 
 [[package]]
+name = "kickoff-budget"
+version = "0.0.0"
+
+[[package]]
 name = "kickoff-game"
 version = "0.0.0"
 
@@ -1621,6 +1625,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "iroh",
+ "kickoff-budget",
  "kickoff-secret",
  "kickoff-send-guard",
  "kickoff-wire",
@@ -1658,6 +1663,7 @@ dependencies = [
  "iroh",
  "iroh-base",
  "iroh-relay",
+ "kickoff-budget",
  "kickoff-net",
  "kickoff-secret",
  "kickoff-send-guard",
@@ -1677,6 +1683,7 @@ name = "kickoff-vlan"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "kickoff-budget",
  "kickoff-wire",
  "proptest",
  "thiserror 2.0.21",
