@@ -16,6 +16,7 @@ use kickoff_wire::{
 };
 
 use crate::KICKOFF_VERSION;
+use crate::approval::{Approval, ApprovalAction, ApprovalId, Approvals, Refused};
 
 /// Guest seats: slots 2..=8.
 const SEATS: usize = MAX_ROSTER as usize - 1;
@@ -28,9 +29,12 @@ pub(crate) const MAX_REVOKED: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    /// A bearer-invite guest waiting on the owner's native prompt. Holds the
-    /// seat so the answer cannot find the roster full, but is not admitted.
-    Prompting,
+    /// A bearer-invite guest waiting on the owner's decision of `approval`.
+    /// Holds the seat so the answer cannot find the roster full, but is not
+    /// admitted.
+    Prompting {
+        approval: ApprovalId,
+    },
     Admitted {
         since: Instant,
     },
@@ -54,7 +58,7 @@ struct Seat {
 
 impl Seat {
     fn admitted(&self) -> bool {
-        self.state != State::Prompting
+        !matches!(self.state, State::Prompting { .. })
     }
 
     fn holds(&self, peer: &PeerRef) -> bool {
@@ -64,9 +68,13 @@ impl Seat {
 
 pub(crate) enum Joined {
     Admitted(PeerRef),
-    /// Bearer invite: admitted only after `approve`.
-    Prompt,
+    /// Bearer invite: admitted only once the owner decides this approval.
+    Prompt(Approval),
 }
+
+/// `Decide` named no current approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NoApproval;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RevokedFull;
@@ -81,6 +89,7 @@ pub(crate) struct Admission {
     /// queue (§6.3, NET-18).
     bound: HashSet<EndpointId>,
     invites: Invites,
+    approvals: Approvals,
     seats: [Option<Seat>; SEATS],
     last_generation: u64,
     epoch: u64,
@@ -105,6 +114,7 @@ impl Admission {
             revoked: HashSet::new(),
             bound: HashSet::new(),
             invites: Invites::new(door_key)?,
+            approvals: Approvals::default(),
             seats: Default::default(),
             last_generation: 0,
             epoch: 1,
@@ -161,16 +171,32 @@ impl Admission {
             .iter()
             .position(Option::is_none)
             .ok_or(JoinRefused::Full)?;
-        let redeemed = if self.trusted.contains(&id) {
+        // One bearer admission waits on the owner at a time (§4.4); a bearer
+        // capability shows itself without being redeemed, so this refusal
+        // does not spend it.
+        let trusted = self.trusted.contains(&id);
+        if !trusted && request.cap.invitee.is_none() && self.approvals.bearer_pending() {
+            return Err(JoinRefused::Busy);
+        }
+        let redeemed = if trusted {
             Redeemed::Bound
         } else {
             self.invites.redeem(&request.cap, id, now)?
         };
         let generation = self.next_generation().ok_or(JoinRefused::Busy)?;
         let slot = slot_of(index).ok_or(JoinRefused::Full)?;
-        let state = match redeemed {
-            Redeemed::Bound => State::Admitted { since: now },
-            Redeemed::Bearer => State::Prompting,
+        let (state, approval) = match redeemed {
+            Redeemed::Bound => (State::Admitted { since: now }, None),
+            Redeemed::Bearer => {
+                let approval = self
+                    .approvals
+                    .request(ApprovalAction::AdmitBearer, id, generation, now)
+                    .map_err(|(Refused::Busy | Refused::Entropy)| JoinRefused::Busy)?;
+                let state = State::Prompting {
+                    approval: approval.id,
+                };
+                (state, Some(approval))
+            }
         };
         let seat = self.seats.get_mut(index).ok_or(JoinRefused::Full)?;
         *seat = Some(Seat {
@@ -182,8 +208,8 @@ impl Admission {
             state,
         });
         self.bound.remove(&id);
-        Ok(match redeemed {
-            Redeemed::Bound => {
+        Ok(match approval {
+            None => {
                 self.bump_epoch();
                 Joined::Admitted(PeerRef {
                     id,
@@ -191,33 +217,63 @@ impl Admission {
                     generation,
                 })
             }
-            Redeemed::Bearer => Joined::Prompt,
+            Some(approval) => Joined::Prompt(approval),
         })
     }
 
-    /// The owner approved `id`'s prompt. `None` if it is no longer prompting
-    /// (kicked meanwhile).
-    pub(crate) fn approve(&mut self, id: EndpointId, now: Instant) -> Option<PeerRef> {
-        let (index, seat) = self.seat_mut(id)?;
-        if seat.state != State::Prompting {
-            return None;
+    /// The owner's decision on `id`, which it consumes: it authorizes only
+    /// the object it names, while that object is current (SI-41).
+    pub(crate) fn decide(
+        &mut self,
+        id: ApprovalId,
+        allow: bool,
+        now: Instant,
+    ) -> Result<(), NoApproval> {
+        let approval = self.approvals.take(id, now).ok_or(NoApproval)?;
+        match approval.action {
+            ApprovalAction::AdmitBearer => {
+                let index = self.seat_of(approval.peer).ok_or(NoApproval)?;
+                let entry = self.seats.get_mut(index).ok_or(NoApproval)?;
+                let waiting = entry.as_ref().is_some_and(|s| {
+                    s.generation == approval.generation
+                        && s.state == State::Prompting { approval: id }
+                });
+                if !waiting {
+                    return Err(NoApproval);
+                }
+                if allow {
+                    if let Some(seat) = entry {
+                        seat.state = State::Admitted { since: now };
+                    }
+                    self.bump_epoch();
+                } else {
+                    *entry = None;
+                }
+                Ok(())
+            }
+            // Map installs are the guest's (M6); the host creates none.
+            ApprovalAction::InstallMap { .. } => Ok(()),
         }
-        seat.state = State::Admitted { since: now };
-        let peer = peer_of(index, seat)?;
-        self.bump_epoch();
-        Some(peer)
     }
 
-    /// Frees a seat still waiting on its prompt.
-    pub(crate) fn decline(&mut self, id: EndpointId) {
-        for seat in &mut self.seats {
-            if seat
-                .as_ref()
-                .is_some_and(|s| s.id == id && s.state == State::Prompting)
-            {
-                *seat = None;
-            }
+    /// How `approval` ended for the guest waiting on it, or `None` while it
+    /// is still pending. Read from the table, so every path that retires an
+    /// approval (decision, kick, timeout, end) answers the same way.
+    pub(crate) fn outcome(&self, approval: &Approval) -> Option<Result<PeerRef, JoinRefused>> {
+        if self.approvals.contains(approval.id) {
+            return None;
         }
+        let admitted = self.seat_of(approval.peer).and_then(|index| {
+            let seat = self.seats.get(index)?.as_ref()?;
+            (seat.generation == approval.generation && seat.admitted())
+                .then(|| peer_of(index, seat))
+                .flatten()
+        });
+        Some(match admitted {
+            Some(peer) => Ok(peer),
+            None if self.revoked.contains(&approval.peer) => Err(JoinRefused::Revoked),
+            None => Err(JoinRefused::Declined),
+        })
     }
 
     /// A link arrived for `peer` and its first message was `Hello { pass }`.
@@ -234,7 +290,7 @@ impl Admission {
                     seat.state = State::Live;
                     true
                 }
-                State::Prompting | State::Live => false,
+                State::Prompting { .. } | State::Live => false,
             },
             _ => false,
         }
@@ -251,6 +307,7 @@ impl Admission {
         let seat = self.seat_at_mut(peer)?;
         seat.generation = generation;
         seat.state = State::Reconnecting { since: now };
+        self.approvals.retire_peer(peer.id);
         Some(PeerRef { generation, ..peer })
     }
 
@@ -264,6 +321,7 @@ impl Admission {
             self.revoked.insert(id);
         }
         self.bound.remove(&id);
+        self.approvals.retire_peer(id);
         Ok(self.remove(id))
     }
 
@@ -281,7 +339,23 @@ impl Admission {
         self.remove(peer.id).is_some()
     }
 
-    /// Seats whose admission or reconnect window ran out.
+    /// Drops approvals past their timeout; true if any went.
+    pub(crate) fn expire_approvals(&mut self, now: Instant) -> bool {
+        self.approvals.expire(now)
+    }
+
+    /// The session is ending: no approval may be decided from here on.
+    pub(crate) fn end(&mut self) {
+        if !cfg!(feature = "mutant-si41-end-keeps-approvals") {
+            self.approvals.clear();
+        }
+    }
+
+    pub(crate) fn pending_approvals(&self) -> Vec<Approval> {
+        self.approvals.pending()
+    }
+
+    /// Seats whose admission or reconnect window, or approval, ran out.
     pub(crate) fn expired(&self, now: Instant) -> Vec<PeerRef> {
         let late =
             |since: Instant, window: Duration| now.saturating_duration_since(since) >= window;
@@ -293,7 +367,8 @@ impl Admission {
                 let due = match seat.state {
                     State::Admitted { since } => late(since, ADMIT_WINDOW),
                     State::Reconnecting { since } => late(since, RECONNECT_WINDOW),
-                    State::Prompting | State::Live => false,
+                    State::Prompting { approval } => !self.approvals.current(approval, now),
+                    State::Live => false,
                 };
                 due.then(|| peer_of(index, seat)).flatten()
             })
@@ -339,6 +414,7 @@ impl Admission {
     fn remove(&mut self, id: EndpointId) -> Option<PeerRef> {
         let (index, _) = self.seat_mut(id)?;
         let seat = self.seats.get_mut(index)?.take()?;
+        self.approvals.retire_peer(id);
         if seat.admitted() {
             self.bump_epoch();
         }

@@ -12,7 +12,7 @@ mod common;
 
 use common::*;
 use kickoff_net::{NetError, Role};
-use kickoff_session::{Command, SessionError, SessionEvent};
+use kickoff_session::{ApprovalAction, Command, SessionError, SessionEvent};
 use kickoff_wire::{BEARER_TTL, JoinRefused};
 
 fn refused(result: Result<GuestNode, SessionError>) -> JoinRefused {
@@ -57,17 +57,17 @@ async fn si_20_bearer_ticket_admits_once() {
     let copy = duplicate(&ticket);
 
     let joining = tokio::spawn(join(alice, ticket));
-    let prompted = event(&mut host.events, |e| match e {
-        SessionEvent::JoinPrompt { id, .. } => Some(*id),
-        _ => None,
-    })
-    .await;
+    let prompted = approval(&mut host).await;
     assert_eq!(
-        prompted, alice_id,
-        "the prompt shows the authenticated identity"
+        (prompted.peer, prompted.action),
+        (alice_id, ApprovalAction::AdmitBearer),
+        "the approval shows the authenticated identity"
     );
     host.session
-        .command(Command::Approve(alice_id))
+        .command(Command::Decide {
+            approval: prompted.id,
+            allow: true,
+        })
         .await
         .unwrap();
     let alice = joining.await.unwrap().unwrap();
@@ -90,27 +90,28 @@ async fn si_20_one_capability_on_many_connections_admits_once() {
             request_join(&identity, &net, &copy).await
         });
     }
-    let prompted = event(&mut host.events, |e| match e {
-        SessionEvent::JoinPrompt { id, .. } => Some(*id),
-        _ => None,
-    })
-    .await;
+    let prompted = approval(&mut host).await;
     host.session
-        .command(Command::Approve(prompted))
+        .command(Command::Decide {
+            approval: prompted.id,
+            allow: true,
+        })
         .await
         .unwrap();
     let mut admitted = 0;
     while let Some(result) = tries.join_next().await {
         match result.unwrap() {
             Ok(_) => admitted += 1,
-            Err(NetError::Refused(JoinRefused::InvalidCap)) => {}
+            // Busy while the first holder's approval is pending (one bearer
+            // approval at a time), spent after.
+            Err(NetError::Refused(JoinRefused::Busy | JoinRefused::InvalidCap)) => {}
             Err(other) => panic!("unexpected {other:?}"),
         }
     }
     assert_eq!(admitted, 1);
     let more = tokio::time::timeout(QUIET, async {
         loop {
-            if let Ok(SessionEvent::JoinPrompt { .. }) = host.events.recv().await {
+            if let Ok(SessionEvent::ApprovalRequested(_)) = host.events.recv().await {
                 return;
             }
         }
@@ -223,12 +224,13 @@ async fn si_20_declined_prompt_spends_the_ticket() {
         let r = request_join(&alice, &net, &ticket).await;
         (alice, r)
     });
-    event(&mut host.events, |e| {
-        matches!(e, SessionEvent::JoinPrompt { .. }).then_some(())
-    })
-    .await;
+    let prompted = approval(&mut host).await;
+    assert_eq!(prompted.peer, alice_id);
     host.session
-        .command(Command::Decline(alice_id))
+        .command(Command::Decide {
+            approval: prompted.id,
+            allow: false,
+        })
         .await
         .unwrap();
     let (alice, declined) = asking.await.unwrap();
@@ -421,7 +423,9 @@ async fn si_23_link_without_hello_closed_at_the_deadline() {
     let (mut send, _recv) = conn.open_bi().await.unwrap();
     // One byte of a length prefix: the host gets the link, never a message.
     send.write_all(&[0]).await.unwrap();
-    let closed = tokio::time::timeout(std::time::Duration::from_secs(9), conn.closed()).await;
+    // The deadline is 2 s; 4 s allows for the close to arrive, and fails a
+    // deadline as long as the door's 5 s.
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(4), conn.closed()).await;
     assert!(
         closed.is_ok(),
         "a link that never said Hello outlived the deadline"

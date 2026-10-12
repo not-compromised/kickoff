@@ -8,6 +8,7 @@
 //! arrived on, never anything in the packet.
 
 mod admission;
+mod approval;
 mod budget;
 mod clock;
 mod guest;
@@ -24,9 +25,10 @@ use kickoff_wire::{
     BuildId, InviteError, JoinRefused, KickReason, KickoffVersion, MapId, Member, Name, PeerSlot,
     Platform, Ticket,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 
+pub use approval::{Approval, ApprovalAction, ApprovalId};
 pub use clock::Clock;
 
 /// What this build announces in `JoinRequest`. A host admits a guest of the
@@ -72,8 +74,8 @@ pub enum SessionError {
     Refused(JoinRefused),
     #[error("the host did not confirm admission")]
     NotAdmitted,
-    #[error("no join prompt is waiting for that identity")]
-    NoPrompt,
+    #[error("that approval is not pending: decided, retired or timed out")]
+    NoApproval,
     #[error("too many revoked identities")]
     RevokedFull,
     #[error("invite: {0}")]
@@ -111,6 +113,8 @@ pub struct JoinOpts {
     pub name: Name,
     pub platform: Platform,
     pub game_build: BuildId,
+    /// The reconnect window runs on it.
+    pub clock: Clock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,7 +123,7 @@ pub enum InviteKind {
     /// without a prompt.
     Bound(EndpointId),
     /// Single use, 15 minutes by the host's monotonic clock, admitted only
-    /// after `Command::Approve`.
+    /// once the owner allows its `ApprovalAction::AdmitBearer` approval.
     Bearer,
 }
 
@@ -130,9 +134,12 @@ pub enum Command {
     Kick(EndpointId),
     /// Host: lift a kick's revocation. Admits nothing by itself.
     Readmit(EndpointId),
-    /// Host: answer a `SessionEvent::JoinPrompt`.
-    Approve(EndpointId),
-    Decline(EndpointId),
+    /// Decide one approval object, which the decision consumes. Only the
+    /// native dialog path may send it (§2.7, SI-41).
+    Decide {
+        approval: ApprovalId,
+        allow: bool,
+    },
     PickMap(MapId),
     Leave,
 }
@@ -158,12 +165,9 @@ pub enum SessionEvent {
         epoch: u64,
         members: Vec<Member>,
     },
-    /// A bearer-invite join waits for the owner's native approval. `id` is
-    /// the identity the door authenticated; `name` is what it claims.
-    JoinPrompt {
-        id: EndpointId,
-        name: Name,
-    },
+    /// An approval waits for the owner's native dialog. A slow receiver can
+    /// lose this event; `Session::approvals` cannot lose a pending approval.
+    ApprovalRequested(Approval),
     /// A guest's link to the host dropped; it is redialing.
     Reconnecting,
     Ended(EndReason),
@@ -244,6 +248,16 @@ impl Session {
         self.events.subscribe()
     }
 
+    /// The approvals pending now, at most one per kind. A watch holds the
+    /// current set, so however far a reader falls behind, it misses only
+    /// approvals that can no longer be decided. Empty on a guest until M6.
+    pub fn approvals(&self) -> watch::Receiver<Vec<Approval>> {
+        match &self.role {
+            Role::Host(host) => host.approvals(),
+            Role::Guest(_) => watch::channel(Vec::new()).1,
+        }
+    }
+
     /// This node's slot: 1 on the host, the admitted slot on a guest.
     pub fn slot(&self) -> PeerSlot {
         match &self.role {
@@ -264,6 +278,8 @@ impl Session {
         match (&self.role, command) {
             (Role::Host(host), command) => host.command(command).await,
             (Role::Guest(guest), Command::Leave) => guest.leave().await,
+            // A guest creates no approvals until map installs (M6).
+            (Role::Guest(_), Command::Decide { .. }) => Err(SessionError::NoApproval),
             (Role::Guest(_), _) => Err(SessionError::NotHost),
         }
     }

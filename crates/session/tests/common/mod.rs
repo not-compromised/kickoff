@@ -20,7 +20,8 @@ use iroh::{EndpointId, RelayMap, SecretKey};
 use kickoff_net::{CtlStream, Door, IfaceAddr, Link, NetError, Role, SessionNet, door_loopback};
 use kickoff_secret::Secret;
 use kickoff_session::{
-    Clock, HostOpts, InviteKind, JoinOpts, KICKOFF_VERSION, Session, SessionError, SessionEvent,
+    Approval, Clock, HostOpts, InviteKind, JoinOpts, KICKOFF_VERSION, Session, SessionError,
+    SessionEvent,
 };
 use kickoff_vlan::{MemGame, mem_tap};
 use kickoff_wire::{
@@ -127,17 +128,26 @@ pub fn join_opts(label: &str) -> JoinOpts {
         name: name(label),
         platform: Platform::Linux,
         game_build: kickoff_wire::BuildId::new("test-build").unwrap(),
+        clock: Clock::system(),
     }
 }
 
 pub async fn join(identity: Identity, ticket: Secret<Ticket>) -> Result<GuestNode, SessionError> {
+    join_with(identity, ticket, join_opts("guest")).await
+}
+
+pub async fn join_with(
+    identity: Identity,
+    ticket: Secret<Ticket>,
+    opts: JoinOpts,
+) -> Result<GuestNode, SessionError> {
     let (adapter, game) = mem_tap();
     let session = kickoff_session::join(
         &identity.door,
         session_net(Role::Guest).await,
         adapter,
         ticket,
-        join_opts("guest"),
+        opts,
     )
     .await?;
     let events = session.events();
@@ -222,6 +232,15 @@ impl RawGuest {
             _ => Err(NetError::Closed),
         }
     }
+}
+
+/// Waits for the host's next approval request.
+pub async fn approval(host: &mut HostNode) -> Approval {
+    event(&mut host.events, |e| match e {
+        SessionEvent::ApprovalRequested(a) => Some(a.clone()),
+        _ => None,
+    })
+    .await
 }
 
 /// Waits for the first event `pick` accepts.
