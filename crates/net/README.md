@@ -40,7 +40,15 @@ seam); hostile peers are bare iroh endpoints. Nothing leaves the host.
 | `datagram_latency_p50_p99_over_10k` | §7 measurement, printed with `--nocapture` |
 
 Each `si_*` test, and the `VERSION` test, was run against a build with its
-mitigation removed and failed.
+mitigation removed and failed; `/mutants.toml` now automates that for the
+`si_*` tests. SI-18's admission is layered (handshake hook, re-check after the
+handshake, `Link::accept`, every datagram, `set_admitted`'s close), so each
+layer has a mutant and a test that drives it alone: the four in
+`session::tests` and `si_18_republished_generation_closes_an_idle_link`.
+Likewise `si_29_connect_guard_refuses_what_scope_would_drop` for the
+`before_connect` guard under `scope`, `si_21_guest_refuses_even_a_key_it_was_told_to_admit`
+for the guest's own refusal, and `si_23_silent_connection_closed_at_the_handshake_deadline`.
+The latency test asserts §7 in release builds.
 
 Latency, one-way `send_lan` to `recv_lan`, release build on the reference Linux machine, loopback:
 128-byte datagrams p50 15 µs, p99 60-63 µs over 10,000; 4212-byte datagrams

@@ -79,6 +79,7 @@ Tests: `src/tests.rs` (every forbidden case with its reason), `tests/lan.rs`
    `0.0.0.0`), a request for the node's own address, gratuitous ARP and ARP
    replies from the game are dropped and counted.
 10. **Not done in M2:** the `NsTap` adapter (M3; `open` returns
-    `Unsupported`), the §7 criterion bench for the ≤ 2 µs hot path, and a
-    nightly cargo-fuzz target for the codec (the property test feeds it raw
-    and mutated frames in the meantime).
+    `Unsupported`) and a nightly cargo-fuzz target for the codec (the
+    property test feeds it raw and mutated frames in the meantime). The §7
+    ≤ 2 µs hot path is a release-mode timing test, `tests/hot_path.rs`, not a
+    criterion bench (docs/development.md, harness note 6).
