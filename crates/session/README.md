@@ -277,10 +277,16 @@ publication or endpoint closure. The worker rechecks admission state when it
 executes a queued request. Queue waits and farewell I/O hold no owner lock.
 Dropping the whole Session still aborts its task set.
 
-The lifecycle tests observe `End`, retain the public `Leave` future at that
-boundary, and submit a late bearer join or an already-admitted delayed Hello.
-This prevents endpoint closure from masking post-clear approvals or post-drain
-frames. The door and liveness fixtures advertise zero QUIC receive credit and
+[Lifecycle tests](src/lifecycle_tests.rs) use a private per-session `cfg(test)`
+rendezvous after actual admission clear, route drain and publication, with all
+owner locks released. It holds teardown before farewell and endpoint closure
+while a late bearer join or already-admitted delayed Hello reaches processing.
+The Hello test requires a successful write and a targeted decoded-Hello witness
+before observing refusal. Identical plain and mutated schedules distinguish
+admission rejection from endpoint shutdown. Dropping the fixture's hold releases
+its own worker; a separate session can finish while that worker is held.
+
+The door and liveness fixtures advertise zero QUIC receive credit and
 keep the transport alive, rather than approximating backpressure by merely
 avoiding application reads. Dedicated mutants remove each boundary.
 
