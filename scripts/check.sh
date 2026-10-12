@@ -9,6 +9,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 step() { printf '\n== %s\n' "$*"; }
 
+step "dated advisory exceptions (design §8.3)"
+deny_config=$(mktemp)
+trap 'rm -f "$deny_config"' EXIT
+python3 scripts/advisory-exceptions.py --output "$deny_config"
+python3 -m unittest discover -s scripts/tests -v
+
 step "unsafe guard"
 # unsafe_code is forbidden in the workspace lints; this catches the ways around
 # that: an unsafe block or item anywhere, a crate attribute re-allowing it, and
@@ -57,7 +63,8 @@ cargo test --release --locked -p kickoff-net --lib send_guard_on_an_approved_des
 cargo test --release --locked -p kickoff-vlan --test hot_path
 
 step "cargo deny"
-cargo deny check --hide-inclusion-graph
+python3 scripts/advisory-exceptions.py --output "$deny_config"
+cargo deny check --config "$deny_config" --hide-inclusion-graph
 scripts/check-upstream-advisories.sh
 
 step "mutants (SI-33)"

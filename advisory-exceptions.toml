@@ -1,0 +1,7 @@
+# Design §8.3: this is the sole source of advisory rationale and dates.
+# Expiry is exclusive in UTC. Revisit the dependency on every iroh bump.
+[[exception]]
+id = "RUSTSEC-2024-0436"
+reason = "unmaintained compile-time proc-macro through iroh 1.3.0 -> netwatch -> netdev -> netlink-packet-core; no runtime input"
+issued = "2026-10-12"
+expires = "2027-01-10"

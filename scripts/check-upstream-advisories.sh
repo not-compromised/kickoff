@@ -6,7 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cp Cargo.lock "$work/Cargo.lock"
-cp deny.toml "$work/deny.toml"
+python3 scripts/advisory-exceptions.py --output "$work/deny.toml"
 mkdir "$work/src"
 touch "$work/src/lib.rs"
 cat > "$work/Cargo.toml" <<'MANIFEST'

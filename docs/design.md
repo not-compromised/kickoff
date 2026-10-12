@@ -821,7 +821,8 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
   - a watch of tap-windows6 advisories;
   - the vendored iroh and noq diff checks and registry advisory checks (§3.4);
   - the Windows import audit (§3.3).
-- **Response deadlines**: critical advisories fixed or mitigated within 7 days, high within 30. Exceptions are entries in `deny.toml` with an expiry date that CI enforces; none lasts more than 90 days.
+- **Response deadlines**: critical advisories fixed or mitigated within 7 days, high within 30. Exceptions are dated entries in `advisory-exceptions.toml`, used to generate
+  `deny.toml` ignores after both advisory gates validate them; none lasts more than 90 days.
 - Third-party notices: MIT and Apache crates, iroh's `LICENSE-BSD3`, and tap-windows6 (GPLv2) shipped byte-identical with COPYING and its source tarball, as a separate program aggregated with Kickoff (GPL-3.0).
 
 ### 8.4 Release trust, distribution and updates

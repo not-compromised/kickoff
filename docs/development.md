@@ -28,7 +28,7 @@ that it is not implemented yet.
 scripts/check.sh
 ```
 
-Runs the unsafe guard, the upstream-plus-patch vendor comparison, `cargo fmt --check`, clippy with `-D warnings`, the whole
+Runs the dated advisory exception policy and its Python tests, the unsafe guard, the upstream-plus-patch vendor comparison, `cargo fmt --check`, clippy with `-D warnings`, the whole
 test suite (every `si_n_*` test and the SI-33 policy test), the design §7
 latency tests in a release build, `cargo deny check`, and then every mutant.
 Run cargo through `mise exec --` so the pinned toolchain
@@ -162,7 +162,10 @@ scaffolding M2.
   can recover it even if they missed `ApprovalRequested` on the event stream.
 - `paste` (RUSTSEC-2024-0436, unmaintained) arrives through iroh 1.3.0 →
   netwatch → netdev → netlink-packet-core. It is a compile-time proc-macro, so
-  `deny.toml` ignores it with that reason. Revisit on each iroh bump.
+  `advisory-exceptions.toml` owns its rationale and dates. Both advisory gates
+  generate cargo-deny ignores only after checking UTC expiry, issue date and
+  the 90-day cap. `deny.toml` has no active ignores by itself. Revisit on each
+  iroh bump.
 - Linux identity storage is implemented in `secret::identity` for M2. Its
   handle-relative writes and staged publication can move behind `store` in M5.
   Daemon startup and session wiring still belong to the application milestones.

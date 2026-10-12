@@ -6,19 +6,14 @@ all-features = false
 
 [advisories]
 # Vulnerabilities always fail. Unmaintained, unsound and yanked crates fail too;
-# an exception goes in `ignore` with its reason.
+# dated exceptions are generated from advisory-exceptions.toml.
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
-ignore = [
-    # Compile-time proc-macro, reached only through iroh 1.3.0 -> netwatch ->
-    # netdev -> netlink-packet-core; it never sees runtime input. Revisit on
-    # each iroh bump.
-    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled in by iroh 1.3.0; no runtime input" },
-]
+ignore = [] # generated dated exceptions
 
 [licenses]
-# Permissive licences compatible with shipping MIT OR Apache-2.0 binaries. Each
+# Dependency licences permitted for GPL-3.0-only Kickoff. Each
 # is needed by at least one crate in the lock today (`cargo deny list -l crate`):
 # BSD-2-Clause (spez), BSD-3-Clause (curve25519-dalek, ed25519-dalek), ISC (rustls-webpki, untrusted),
 # Zlib (foldhash), Unicode-3.0 (icu, via url). No MPL-2.0 crate is present.
