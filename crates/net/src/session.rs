@@ -263,6 +263,11 @@ pub struct SessionNet {
 }
 
 impl SessionNet {
+    /// Whether this endpoint has no IP transport.
+    pub fn is_relay_only(&self) -> bool {
+        self.guarded.is_none()
+    }
+
     /// This session's fresh key: what a guest puts in `JoinRequest::session_key`.
     pub fn id(&self) -> EndpointId {
         self.ep.id()
