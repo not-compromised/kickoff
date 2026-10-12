@@ -349,3 +349,221 @@ async fn si_7_second_uid_refused() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// Sends `bytes` with one descriptor attached as `SCM_RIGHTS`.
+fn send_with_fd(stream: &tokio::net::UnixStream, bytes: &[u8], fd: std::os::fd::BorrowedFd<'_>) {
+    let mut space = [std::mem::MaybeUninit::uninit(); 64];
+    let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
+    let fds = [fd];
+    assert!(control.push(rustix::net::SendAncillaryMessage::ScmRights(&fds)));
+    let sent = rustix::net::sendmsg(
+        stream,
+        &[std::io::IoSlice::new(bytes)],
+        &mut control,
+        rustix::net::SendFlags::empty(),
+    )
+    .unwrap();
+    assert_eq!(sent, bytes.len());
+}
+
+/// A trusted caller attaches a descriptor, once to its hello and once to a
+/// command after a clean hello. Either way the channel closes, the daemon
+/// sees nothing, and the descriptor is closed: once the caller drops its own
+/// copy, the pipe has no writer left anywhere.
+#[tokio::test]
+async fn si_7_descriptors_from_a_caller_close_the_channel_and_are_closed() {
+    for after_hello in [false, true] {
+        let base = TempBase::new();
+        let dir = base.dir();
+        let server = Arc::new(Server::bind(&dir, trust_me()).unwrap());
+        let (_task, mut seen) = serve(Arc::clone(&server));
+        let (mut stream, bytes) = if after_hello {
+            (raw_channel(&dir, CLI).await, frame(&[1]))
+        } else {
+            (
+                tokio::net::UnixStream::connect(dir.socket_path())
+                    .await
+                    .unwrap(),
+                hello(kickoff_ipc::PROTOCOL_VERSION, CLI),
+            )
+        };
+        let (pipe_r, pipe_w) = rustix::pipe::pipe().unwrap();
+        send_with_fd(&stream, &bytes, std::os::fd::AsFd::as_fd(&pipe_w));
+        drop(pipe_w);
+
+        assert!(
+            closed_within(&mut stream, Duration::from_secs(2)).await,
+            "after_hello={after_hello}: the channel must close, unanswered"
+        );
+        assert!(seen.try_recv().is_err(), "the daemon saw a request");
+        assert_eq!(server.health().frames_refused, 1);
+        rustix::io::ioctl_fionbio(&pipe_r, true).unwrap();
+        let mut sink = [0u8; 1];
+        assert_eq!(
+            rustix::io::read(&pipe_r, &mut sink).unwrap(),
+            0,
+            "a copy of the descriptor is still open"
+        );
+    }
+}
+
+const RECYCLE_ENV: &str = "KIPC_RECYCLE_BASE";
+const ROLE_ENV: &str = "KIPC_RECYCLE_ROLE";
+const SOCKET_ENV: &str = "KIPC_RECYCLE_SOCKET";
+
+fn run_role(exe: &Path, role: &str, socket: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["--exact", "pid_recycle_role", "--test-threads=1"])
+        .env(ROLE_ENV, role)
+        .env(SOCKET_ENV, socket)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd
+}
+
+/// The processes `pid_recycle_helper` starts. `connect`: an untrusted
+/// executable connects, hands the connection to a `hold` child, and exits.
+/// `hold`: speaks on the inherited connection. `sleep`: a trusted executable
+/// that only exists to occupy the recycled pid.
+#[test]
+fn pid_recycle_role() {
+    let (Some(role), Some(socket)) = (std::env::var(ROLE_ENV).ok(), std::env::var_os(SOCKET_ENV))
+    else {
+        return;
+    };
+    match role.as_str() {
+        "connect" => {
+            let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            // Not waited for: this process must exit while the child lives
+            // on with the connection; the namespace's init reaps it.
+            #[allow(clippy::zombie_processes)]
+            let _holder = run_role(&me(), "hold", Path::new(&socket))
+                .stdin(std::os::fd::OwnedFd::from(stream))
+                .spawn()
+                .unwrap();
+        }
+        "hold" => {
+            let fd = std::os::fd::AsFd::as_fd(&std::io::stdin())
+                .try_clone_to_owned()
+                .unwrap();
+            let mut stream = std::os::unix::net::UnixStream::from(fd);
+            let _ = stream.write_all(&hello(kickoff_ipc::PROTOCOL_VERSION, CLI));
+            let _ = stream.write_all(&frame(&[1]));
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink);
+        }
+        "sleep" => {
+            let mut sink = Vec::new();
+            let _ = std::io::stdin().read_to_end(&mut sink);
+        }
+        _ => {}
+    }
+}
+
+/// Runs only inside `si_7_recycled_pid_refused`, as pid 1 of a fresh pid
+/// namespace where it may choose the next pid (`ns_last_pid`).
+#[test]
+fn pid_recycle_helper() {
+    let Some(base) = std::env::var_os(RECYCLE_ENV) else {
+        return;
+    };
+    let base = Path::new(&base).to_path_buf();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let report = rt.block_on(async move {
+        let dir = RuntimeDir::open_in(&base).unwrap();
+        let server = Server::bind(&dir, trust_me()).unwrap();
+
+        // Control: a live trusted caller is admitted here, so SO_PEERPIDFD
+        // works in this namespace and a refusal below is the recycle.
+        let trust = trust_me();
+        let (client, accepted) = tokio::join!(connect::<Cli>(&dir, &trust), server.accept());
+        let control = client.is_ok() && accepted.is_ok();
+        drop((client, accepted));
+
+        // An untrusted executable: a copy of this binary, another inode.
+        let untrusted = base.join("untrusted");
+        std::fs::copy(me(), &untrusted).unwrap();
+        let mut connector = run_role(&untrusted, "connect", dir.socket_path())
+            .spawn()
+            .unwrap();
+        let old_pid = connector.id();
+        assert!(connector.wait().unwrap().success());
+
+        // The connection now lives in the `hold` child; its connecting pid
+        // is free. Hand it to a trusted process.
+        std::fs::write(
+            "/proc/sys/kernel/ns_last_pid",
+            old_pid.checked_sub(1).unwrap().to_string(),
+        )
+        .unwrap();
+        let mut squatter = run_role(&me(), "sleep", dir.socket_path())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let recycled = squatter.id() == old_pid;
+
+        let admitted = tokio::time::timeout(Duration::from_secs(2), server.accept())
+            .await
+            .is_ok_and(|r| r.is_ok());
+        let _ = squatter.kill();
+        let _ = squatter.wait();
+        format!(
+            "control={control} recycled={recycled} admitted={admitted} rejected={}",
+            server.health().peers_rejected
+        )
+    });
+    println!("KIPC {report}");
+}
+
+/// The caller connects and exits, and its pid is reused by a process
+/// running a trusted Kickoff executable before the server looks. Reading
+/// `/proc/<pid>/exe` alone would admit it; the pidfd taken from the socket
+/// still names the exited caller, so the check refuses. Runs in a user and
+/// pid namespace (`unshare --map-root-user`; no root, no subordinate ids),
+/// the only place an unprivileged process can choose the next pid.
+#[tokio::test(flavor = "multi_thread")]
+async fn si_7_recycled_pid_refused() {
+    let base = TempBase::new();
+    let path = base.path().to_path_buf();
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("unshare")
+            .args([
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+            ])
+            .arg(me())
+            .args([
+                "--exact",
+                "pid_recycle_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(RECYCLE_ENV, &path)
+            .output()
+            .expect("unshare must run")
+    })
+    .await
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report = stdout
+        .lines()
+        .find_map(|l| l.split_once("KIPC ").map(|(_, r)| r.trim().to_owned()))
+        .unwrap_or_else(|| {
+            panic!(
+                "the pid-recycle helper did not run; this test needs util-linux \
+                 unshare and unprivileged user namespaces. stdout: {stdout} \
+                 stderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+    assert_eq!(
+        report, "control=true recycled=true admitted=false rejected=1",
+        "a caller whose pid was recycled by a trusted binary was admitted"
+    );
+}

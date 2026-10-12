@@ -7,8 +7,9 @@ Windows pipes in M7.
 client (kickoff, kickoff-ui)                 kickoffd
 RuntimeDir::open   $XDG_RUNTIME_DIR/kickoff  RuntimeDir::open
                    0700, ours, no symlink
-connect::<Role>  ─ SO_PEERCRED uid + exe ─►  Server::bind   bind() exclusive, 0600
-  (nothing sent until the server passes)     accept  ─ slot ─ SO_PEERCRED uid + exe
+connect::<Role>  ─ uid + pidfd-pinned exe ►  Server::bind   bind() exclusive, 0600
+  (nothing sent until the server passes)     accept  ─ slot ─ uid + pidfd-pinned exe
+  every read: recvmsg, no control room;      every read: MSG_CTRUNC closes the channel
   Hello{KO, version, role}  ───────────────►         version and role served?
   ◄─────────────────────────  Welcome{version, ok | version | role}
 call(R::Command) ─ frame ≤ 4 KiB ─────────►  recv: rate ─ length ─ body ─ decode for role
@@ -19,12 +20,17 @@ call(R::Command) ─ frame ≤ 4 KiB ─────────►  recv: rate 
 
 - `RuntimeDir::{open, open_in, socket_path}`.
 - `Trust::{kickoffd, clients, same_user, for_uid}`: who may be at the other
-  end (one uid plus a set of executables, compared by inode).
+  end (one uid plus a set of executables, compared by inode). The check
+  takes the peer's uid and pid from `SO_PEERCRED`, pins the process with
+  `SO_PEERPIDFD`, reads `/proc/<pid>/exe`, and counts the answer only if the
+  pidfd still names a running process.
 - `Server::{bind(&dir, trust), accept, health}`; `Channel::{role, peer, recv, reply}`.
 - `connect::<R>(&dir, &trust) -> Client<R>`; `Client::{call, server}`. `R` is
   `role::{Cli, UiMain, Overlay}`, and `Client<R>::call` takes only
   `R::Command`, so CLI code cannot build a UI command.
-- Commands: `CliCommand`, `UiCommand`, `OverlayCommand`. Replies: `Done`,
+- Commands: `CliCommand`, `UiCommand`, `OverlayCommand`. Only `UiCommand`
+  has `Decide { approval: ApprovalId, allow }` (the native dialog path);
+  draft 2's `Approve(EndpointId)` is gone and its tag retired. Replies: `Done`,
   `Refused(Refusal)`, `Invite(TicketText)` (never to the overlay),
   `Report(diag::Report)`.
 - `TicketText` is a `Secret<String>` restricted to 1..=2048 ASCII letters
@@ -34,7 +40,7 @@ call(R::Command) ─ frame ≤ 4 KiB ─────────►  recv: rate 
 
 | SI | Test |
 |---|---|
-| SI-7 (Linux) | `tests/si_7.rs`: private directory (mode, owner, symlink, file, public or relative base), exclusive socket (file, symlink, live fake server), caller with another uid, caller running another executable, fake server started first (gets zero bytes), and `si_7_second_uid_refused` with a real second uid |
+| SI-7 (Linux) | `tests/si_7.rs`: private directory (mode, owner, symlink, file, public or relative base), exclusive socket (file, symlink, live fake server), caller with another uid, caller running another executable, fake server started first (gets zero bytes), `si_7_second_uid_refused` with a real second uid, `si_7_recycled_pid_refused` (the caller exits and a trusted binary takes its pid before the check), and `si_7_descriptors_from_a_caller_close_the_channel_and_are_closed` (with the hello and after it). `src/linux/stream.rs`: descriptors and credentials close the channel at the read |
 | SI-10 | `tests/si_10.rs`: version mismatch refused before a pipelined command reaches the daemon; client refuses a server of another version and sends nothing more |
 | SI-3 | `tests/si_3.rs`: every command variant classified (exhaustive match) against a denylist; the one text argument refuses paths, URLs, options and escapes, on the wire too |
 | SI-23 (pipe) | `tests/channel.rs` and `src/frame.rs`: oversize frame refused from its header before the body is read or allocated, stalled frame, request rate, channel slots |
@@ -61,12 +67,15 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
    leaves a socket that blocks every later start. `bind` removes only a
    socket that we own, inside our 0700 directory, that refuses connections;
    a live server, a file, a symlink or another owner's socket is `Squatted`.
-3. **The executable check uses `/proc/<pid>/exe` from `SO_PEERCRED`, not a
-   pidfd.** `SO_PEERPIDFD` has no safe wrapper in rustix 1.1.5, and `unsafe`
-   is forbidden. Residual: if the caller exits and its pid is reused by one of
-   our own Kickoff binaries between connect and check, the check passes. Only
-   a same-uid process can arrange that, which §6.1 puts outside the boundary.
-   A caller whose pid is not visible (another pid namespace) is refused.
+3. **`SO_PEERPIDFD` comes from `nix`, liveness from `poll`.** rustix 1.1.5
+   has no `SO_PEERPIDFD` wrapper; `nix` 0.31.3 (`socket` feature only) has a
+   safe one, so it is a new dependency of this crate. The design names
+   `pidfd_send_signal(pidfd, 0)` for the liveness check, but rustix's
+   `Signal` cannot be 0 without `unsafe`; a pidfd polls readable once its
+   process has exited, so "not readable" answers the same question (and also
+   refuses a zombie). Kernels before 6.5 have no `SO_PEERPIDFD`: every peer
+   is refused there. A caller whose pid is not visible (another pid
+   namespace) is refused.
 4. **Hand-written codec instead of postcard.** Keeps `Serialize` off every
    type that holds a `Secret` (SI-30), and gives strict decoding (no trailing
    bytes, canonical booleans, counts checked before reading) in one file.
@@ -88,6 +97,24 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
    refused before anything is read.
 10. **`Channel::recv` is not cancel-safe**: dropping it mid-frame misaligns
     the stream, and the channel then refuses or closes.
+11. **Ancillary data is refused by giving it no room.** Every read is a
+    `recvmsg` with a zero-length control buffer, on both ends. The kernel
+    then closes any `SCM_RIGHTS` descriptors itself (they never enter this
+    process) and sets `MSG_CTRUNC`, which closes the channel. Credentials
+    (`SCM_CREDENTIALS`, `SCM_PIDFD`) reach a reader only if it enables
+    `SO_PASSCRED` or `SO_PASSPIDFD`; these sockets never do, so a caller's
+    credential message is dropped by the kernel and cannot be refused or
+    observed on the real socket. `si_7_credentials_close_the_channel` turns
+    `SO_PASSCRED` on to prove that, if credentials ever arrived, the read
+    would refuse them.
+12. **`ApprovalId` is defined here, 16 opaque bytes.** The session crate owns
+    approval objects (r2 M2 impact, session item 1) and is being changed in
+    parallel; `ipc` does not depend on it. kickoffd converts with
+    `ApprovalId::{from_bytes, to_bytes}`. Once session's type lands, one of
+    the two should become the only definition (for example, session
+    re-exports or wraps this one).
+13. **`PROTOCOL_VERSION` is 2**: `UiCommand` changed (`Approve` out,
+    `Decide` in). Tag 6 is retired, `Decide` is tag 11.
 
 Questions for the design:
 

@@ -22,7 +22,8 @@ mod linux;
 use std::time::Duration;
 
 pub use command::{
-    CliCommand, InviteFor, OverlayCommand, Refusal, Reply, Request, TicketText, UiCommand,
+    ApprovalId, CliCommand, InviteFor, OverlayCommand, Refusal, Reply, Request, TicketText,
+    UiCommand,
 };
 #[cfg(target_os = "linux")]
 pub use linux::{Channel, Client, RuntimeDir, Server, Trust, connect};
@@ -54,13 +55,15 @@ pub enum IpcError {
     Closed,
     #[error("reply without a pending request")]
     Unrequested,
+    #[error("descriptors, credentials or other control data on a local channel")]
+    Ancillary,
     #[error("i/o error: {0:?}")]
     Io(std::io::ErrorKind),
 }
 
 /// Bumped on any change to a role's command enum; a mismatch closes the
 /// channel before any side effect (SI-10).
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Each role has its own fixed command enum, and none carries a path, URL,
 /// shell string, launch command or EAC mode (SI-3). Only `Cli`, `UiMain` and
@@ -144,6 +147,12 @@ pub struct IpcHealth {
 
 impl From<std::io::Error> for IpcError {
     fn from(e: std::io::Error) -> Self {
+        #[cfg(target_os = "linux")]
+        if e.get_ref()
+            .is_some_and(|inner| inner.is::<linux::AncillaryRefused>())
+        {
+            return IpcError::Ancillary;
+        }
         match e.kind() {
             std::io::ErrorKind::UnexpectedEof
             | std::io::ErrorKind::BrokenPipe

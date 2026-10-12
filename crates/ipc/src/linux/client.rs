@@ -4,6 +4,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
+use super::stream::DataOnly;
 use super::{RuntimeDir, Trust};
 use crate::codec::{self, WELCOME_LEN};
 use crate::command::Reply;
@@ -13,7 +14,7 @@ use crate::{HANDSHAKE_DEADLINE, IpcError, MAX_REPLY_FRAME, MAX_REQUEST_FRAME, Pe
 
 /// A channel to kickoffd in role `R`; it can only send `R::Command`.
 pub struct Client<R: Role> {
-    stream: UnixStream,
+    stream: DataOnly,
     server: PeerCred,
     dead: bool,
     role: PhantomData<R>,
@@ -39,8 +40,9 @@ pub async fn connect<R: Role>(dir: &RuntimeDir, trust: &Trust) -> Result<Client<
     {
         return Err(IpcError::Squatted);
     }
-    let mut stream = UnixStream::connect(path).await?;
-    let server = trust.check(stream.peer_cred()?)?;
+    let stream = UnixStream::connect(path).await?;
+    let server = trust.check(&stream)?;
+    let mut stream = DataOnly::new(stream);
     timeout(HANDSHAKE_DEADLINE, async {
         write_frame(
             &mut stream,

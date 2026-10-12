@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use kickoff_ipc::role::{Cli, Overlay, UiMain};
 use kickoff_ipc::{
-    CliCommand, FRAME_DEADLINE, InviteFor, IpcError, MAX_CHANNELS, MAX_REQUEST_FRAME,
+    ApprovalId, CliCommand, FRAME_DEADLINE, InviteFor, IpcError, MAX_CHANNELS, MAX_REQUEST_FRAME,
     OverlayCommand, REQUEST_RATE, Refusal, Reply, Request, Server, UiCommand, connect,
 };
 use tokio::io::AsyncWriteExt;
@@ -24,10 +24,18 @@ use tokio::net::UnixStream;
 
 const STATUS: u8 = 1;
 const KICK: u8 = 5;
-const APPROVE: u8 = 6;
+const RETIRED_APPROVE: u8 = 6;
 const PICK_MAP: u8 = 7;
+const DECIDE: u8 = 11;
 const DONE: [u8; 1] = [1];
 const REFUSED_UNKNOWN: [u8; 2] = [2, 1];
+
+fn decide(allow: bool) -> Vec<u8> {
+    let mut out = vec![DECIDE];
+    out.extend_from_slice(&[9; 16]);
+    out.push(u8::from(allow));
+    out
+}
 
 fn with_32(tag: u8) -> Vec<u8> {
     let mut out = vec![tag];
@@ -67,6 +75,16 @@ async fn each_role_calls_its_own_commands() {
         ui.call(UiCommand::Kick(id)).await.unwrap(),
         Reply::Done
     ));
+    let approval = ApprovalId::from_bytes([7; 16]);
+    assert!(matches!(
+        ui.call(UiCommand::Decide {
+            approval,
+            allow: true
+        })
+        .await
+        .unwrap(),
+        Reply::Done
+    ));
     let mut overlay = connect::<Overlay>(&dir, &trust_me()).await.unwrap();
     assert!(matches!(
         overlay.call(OverlayCommand::Status).await.unwrap(),
@@ -76,9 +94,13 @@ async fn each_role_calls_its_own_commands() {
     while let Ok(s) = seen.try_recv() {
         got.push(s);
     }
-    assert_eq!(got.len(), 4, "{got:?}");
+    assert_eq!(got.len(), 5, "{got:?}");
     assert!(got[2].starts_with("UiMain(Kick("));
-    assert_eq!(got[3], "Overlay(Status)");
+    assert_eq!(
+        got[3],
+        format!("UiMain(Decide {{ approval: {approval:?}, allow: true }})")
+    );
+    assert_eq!(got[4], "Overlay(Status)");
 }
 
 /// A command another role owns is as unknown as a tag nobody defined: it is
@@ -91,7 +113,9 @@ async fn commands_outside_the_role_and_unknown_tags_refused() {
             OVERLAY,
             vec![
                 with_32(KICK),
-                with_32(APPROVE),
+                decide(true),
+                decide(false),
+                with_32(RETIRED_APPROVE),
                 vec![8],
                 vec![2],
                 vec![0xee],
@@ -99,9 +123,23 @@ async fn commands_outside_the_role_and_unknown_tags_refused() {
         ),
         (
             CLI,
-            vec![with_32(KICK), with_32(APPROVE), with_32(PICK_MAP), vec![0]],
+            vec![
+                with_32(KICK),
+                decide(true),
+                with_32(RETIRED_APPROVE),
+                with_32(PICK_MAP),
+                vec![0],
+            ],
         ),
-        (UI_MAIN, vec![vec![10], vec![0xff], vec![STATUS, 0]]),
+        (
+            UI_MAIN,
+            vec![
+                vec![10],
+                vec![0xff],
+                vec![STATUS, 0],
+                with_32(RETIRED_APPROVE),
+            ],
+        ),
     ];
     let mut refused = 0;
     for (role, frames) in cases {

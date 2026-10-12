@@ -1,7 +1,12 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use tokio::net::unix::UCred;
+use std::os::fd::OwnedFd;
+
+use nix::sys::socket::getsockopt;
+use nix::sys::socket::sockopt::PeerPidfd;
+use rustix::event::{PollFd, PollFlags, Timespec};
+use tokio::net::UnixStream;
 
 use crate::{IpcError, PeerCred};
 
@@ -10,7 +15,8 @@ const CLIENT_BINARIES: &[&str] = &["kickoff", "kickoff-ui"];
 
 /// Who may sit at the other end of a channel: one uid, and a process whose
 /// executable is one of a fixed set of files. Both come from the kernel
-/// (`SO_PEERCRED` and `/proc/<pid>/exe`), never from anything the peer sends.
+/// (`SO_PEERCRED`, `SO_PEERPIDFD` and `/proc/<pid>/exe`), never from anything
+/// the peer sends.
 #[derive(Debug, Clone)]
 pub struct Trust {
     uid: u32,
@@ -83,11 +89,13 @@ impl Trust {
     /// executable check narrows our own uid to Kickoff's binaries. A peer
     /// whose pid we cannot see (another pid namespace) is refused.
     ///
-    /// Residual: the pid is read when the peer connected. If that process
-    /// has exited and the pid was reused by one of our own Kickoff binaries,
-    /// the check passes; only a same-uid process can arrange that, and
-    /// same-user malware is outside Kickoff's boundary (§6.1).
-    pub(super) fn check(&self, cred: UCred) -> Result<PeerCred, IpcError> {
+    /// The executable is read through `/proc/<pid>`, and a pid can be reused
+    /// once its process is gone. So the process itself is pinned first with
+    /// `SO_PEERPIDFD`, taken from the socket like the credentials, and the
+    /// answer counts only if that process is still running after the read:
+    /// if it is, the pid cannot have been recycled in between.
+    pub(super) fn check(&self, socket: &UnixStream) -> Result<PeerCred, IpcError> {
+        let cred = socket.peer_cred()?;
         if !cfg!(feature = "mutant-si7-no-uid-check") && cred.uid() != self.uid {
             return Err(IpcError::PeerRejected);
         }
@@ -95,8 +103,19 @@ impl Trust {
             .pid()
             .filter(|pid| *pid > 0)
             .ok_or(IpcError::PeerRejected)?;
+        let pinned = if cfg!(feature = "mutant-si7-pid-not-pidfd") {
+            None
+        } else {
+            // Kernels before 6.5 have no SO_PEERPIDFD: every peer is refused.
+            Some(getsockopt(socket, PeerPidfd).map_err(|_| IpcError::PeerRejected)?)
+        };
         let exe = FileId::of(&proc_exe(pid)).map_err(|_| IpcError::PeerRejected)?;
         if !cfg!(feature = "mutant-si7-no-exe-check") && !self.exes.contains(&exe) {
+            return Err(IpcError::PeerRejected);
+        }
+        if let Some(pidfd) = pinned
+            && !still_running(&pidfd)
+        {
             return Err(IpcError::PeerRejected);
         }
         Ok(PeerCred {
@@ -104,6 +123,19 @@ impl Trust {
             pid,
         })
     }
+}
+
+/// A pidfd polls readable once its process has exited, zombie or reaped, so
+/// "not readable" means the pid still names that process. (The design names
+/// `pidfd_send_signal(pidfd, 0)`; rustix cannot express signal 0 without
+/// `unsafe`, and this answers the same question, refusing zombies as well.)
+fn still_running(pidfd: &OwnedFd) -> bool {
+    let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    matches!(rustix::event::poll(&mut fds, Some(&now)), Ok(0))
 }
 
 fn proc_exe(pid: i32) -> PathBuf {
