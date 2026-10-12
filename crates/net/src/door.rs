@@ -34,6 +34,7 @@ const INVALID_TRACKED: usize = 256;
 /// Authenticated connections that have not sent their `JoinRequest` yet,
 /// overall and per identity (§6.3).
 const AWAITING: usize = 16;
+const GENERAL_AWAITING: usize = 8;
 const AWAITING_PER_ID: usize = 2;
 /// Authenticated requests waiting for the admission owner.
 const PRIORITY_QUEUE: usize = 8;
@@ -72,6 +73,9 @@ pub async fn door_loopback(id: &IdentityKey) -> Result<Door, NetError> {
     Ok(Door::serve(ep, egress, Some(guarded)))
 }
 
+#[cfg(test)]
+type AwaitingObserver = Arc<Mutex<Option<mpsc::Sender<(EndpointId, bool)>>>>;
+
 pub struct Door {
     ep: KeyEndpoint,
     egress: Egress,
@@ -80,6 +84,8 @@ pub struct Door {
     _accept: AbortOnDrop,
     /// The loopback adapter's send guard; the relay-only door has none.
     guarded: Option<Guarded>,
+    #[cfg(test)]
+    awaiting_observer: AwaitingObserver,
 }
 
 struct Queues {
@@ -100,6 +106,8 @@ impl Door {
         let (general_tx, general) = mpsc::channel(GENERAL_QUEUE);
         let priority_ids = Arc::new(ArcSwap::from_pointee(HashSet::new()));
         let guard = guarded.as_ref().map(|g| Arc::clone(&g.guard));
+        #[cfg(test)]
+        let awaiting_observer = Arc::new(Mutex::new(None));
         let accept = Acceptor {
             gate: Gate::new(guard.clone()),
             guard,
@@ -108,6 +116,8 @@ impl Door {
             priority_ids: Arc::clone(&priority_ids),
             priority_tx,
             general_tx,
+            #[cfg(test)]
+            awaiting_observer: Arc::clone(&awaiting_observer),
         };
         let task = tokio::spawn(accept.run(ep.clone()));
         Door {
@@ -117,6 +127,8 @@ impl Door {
             priority: priority_ids,
             _accept: AbortOnDrop(task),
             guarded,
+            #[cfg(test)]
+            awaiting_observer,
         }
     }
 
@@ -301,6 +313,8 @@ struct Acceptor {
     priority_ids: Arc<ArcSwap<HashSet<EndpointId>>>,
     priority_tx: mpsc::Sender<JoinAttempt>,
     general_tx: mpsc::Sender<JoinAttempt>,
+    #[cfg(test)]
+    awaiting_observer: AwaitingObserver,
 }
 
 impl Acceptor {
@@ -333,14 +347,19 @@ impl Acceptor {
         let conn = incoming.accept().ok()?.await.ok()?;
         drop(pending);
         let id = conn.remote_id();
-        let Some(_waiting) = Awaiting::enter(&self.awaiting, id) else {
+        let priority = self.priority_ids.load().contains(&id);
+        let waiting = Awaiting::enter(&self.awaiting, id, priority);
+        #[cfg(test)]
+        if let Some(observer) = &*lock(&self.awaiting_observer) {
+            let _ = observer.try_send((id, waiting.is_some()));
+        }
+        let Some(_waiting) = waiting else {
             conn.close(close::BUSY, b"");
             return None;
         };
         if let Some(guard) = &self.guard {
             guard.track(&conn);
         }
-        let priority = self.priority_ids.load().contains(&id);
         if lock(&self.limiter).blocked(Instant::now(), id, priority) {
             conn.close(close::BUSY, b"");
             return None;
@@ -391,31 +410,51 @@ impl Acceptor {
 /// Connections past their handshake that have not sent a `JoinRequest` yet.
 #[derive(Debug, Default)]
 struct Awaiting {
-    counts: Mutex<(usize, HashMap<EndpointId, usize>)>,
+    counts: Mutex<AwaitingCounts>,
+}
+
+#[derive(Debug, Default)]
+struct AwaitingCounts {
+    total: usize,
+    general: usize,
+    per_id: HashMap<EndpointId, usize>,
 }
 
 /// One awaiting connection's place; dropping it frees the place.
 struct Waiting {
     awaiting: Arc<Awaiting>,
     id: EndpointId,
+    /// Publication can change while this connection waits; its charge cannot.
+    priority: bool,
 }
 
 impl Awaiting {
-    fn enter(this: &Arc<Awaiting>, id: EndpointId) -> Option<Waiting> {
+    fn enter(this: &Arc<Awaiting>, id: EndpointId, priority: bool) -> Option<Waiting> {
         let mut counts = lock(&this.counts);
-        let (total, per_id) = &mut *counts;
+        let AwaitingCounts {
+            total,
+            general,
+            per_id,
+        } = &mut *counts;
         let mine = per_id.get(&id).copied().unwrap_or(0);
         let full = !cfg!(feature = "mutant-si23-door-no-awaiting-cap") && *total >= AWAITING;
         let own_full =
             !cfg!(feature = "mutant-si23-door-no-identity-cap") && mine >= AWAITING_PER_ID;
-        if full || own_full {
+        let general_full = !priority
+            && !cfg!(feature = "mutant-si23-door-no-priority-awaiting")
+            && *general >= GENERAL_AWAITING;
+        if full || own_full || general_full {
             return None;
         }
         *total = total.saturating_add(1);
+        if !priority {
+            *general = general.saturating_add(1);
+        }
         per_id.insert(id, mine.saturating_add(1));
         Some(Waiting {
             awaiting: Arc::clone(this),
             id,
+            priority,
         })
     }
 }
@@ -423,8 +462,15 @@ impl Awaiting {
 impl Drop for Waiting {
     fn drop(&mut self) {
         let mut counts = lock(&self.awaiting.counts);
-        let (total, per_id) = &mut *counts;
+        let AwaitingCounts {
+            total,
+            general,
+            per_id,
+        } = &mut *counts;
         *total = total.saturating_sub(1);
+        if !self.priority {
+            *general = general.saturating_sub(1);
+        }
         if let Some(mine) = per_id.get_mut(&self.id) {
             *mine = mine.saturating_sub(1);
             if *mine == 0 {
@@ -529,6 +575,10 @@ mod tests {
     }
 
     async fn blocked_client(ip: std::net::Ipv4Addr) -> Endpoint {
+        raw_client(ip, 0).await
+    }
+
+    async fn raw_client(ip: std::net::Ipv4Addr, window: u32) -> Endpoint {
         let bind = std::net::UdpSocket::bind((ip, 0))
             .unwrap()
             .local_addr()
@@ -544,14 +594,142 @@ mod tests {
             .relay_mode(RelayMode::Disabled)
             .transport_config(
                 iroh::endpoint::QuicTransportConfig::builder()
-                    .stream_receive_window(iroh::endpoint::VarInt::from_u32(0))
-                    .receive_window(iroh::endpoint::VarInt::from_u32(0))
+                    .stream_receive_window(iroh::endpoint::VarInt::from_u32(window))
+                    .receive_window(iroh::endpoint::VarInt::from_u32(window))
                     .keep_alive_interval(Duration::from_millis(100))
                     .build(),
             )
             .bind()
             .await
             .unwrap()
+    }
+
+    struct HeldOutsider {
+        _endpoint: Endpoint,
+        conn: Connection,
+        _partial: Option<(SendStream, RecvStream)>,
+        accepted: bool,
+    }
+
+    impl Drop for HeldOutsider {
+        fn drop(&mut self) {
+            self.conn.close(close::DONE, b"");
+        }
+    }
+
+    async fn outsiders_preserve_priority_awaiting(partial: bool) {
+        use kickoff_wire::{
+            AdmitPass, BuildId, Generation, Invites, KickoffVersion, Name, PeerSlot, Platform,
+            Redeemed,
+        };
+
+        let identity = IdentityKey::new(SecretKey::generate());
+        let host = door_loopback(&identity).await.unwrap();
+        let friend = door_loopback(&IdentityKey::new(SecretKey::generate()))
+            .await
+            .unwrap();
+        let host_session =
+            crate::session(&RelayMap::empty(), IfaceAddr::loopback(), crate::Role::Host)
+                .await
+                .unwrap();
+        let guest_session = crate::session(
+            &RelayMap::empty(),
+            IfaceAddr::loopback(),
+            crate::Role::Guest,
+        )
+        .await
+        .unwrap();
+        let mut invites = Invites::new(&identity).unwrap();
+        let ticket = Secret::new(Ticket {
+            door: host.addr(),
+            cap: invites
+                .issue(&identity, Some(friend.id()), Instant::now())
+                .unwrap(),
+        });
+        let request = JoinRequest {
+            cap: Ticket::join_cap(&ticket),
+            session_key: guest_session.id(),
+            name: Name::new("friend").unwrap(),
+            platform: Platform::Linux,
+            game_build: BuildId::new("build-1").unwrap(),
+            kickoff_version: KickoffVersion {
+                major: 0,
+                minor: 1,
+                patch: 0,
+            },
+        };
+        let admitted = Admitted {
+            session_addr: host_session.addr(),
+            pass: AdmitPass {
+                slot: PeerSlot::new(2).unwrap(),
+                generation: Generation::new(1),
+            },
+        };
+        host.set_priority([friend.id()]);
+        let (observer, mut allocations) = mpsc::channel(32);
+        *lock(&host.awaiting_observer) = Some(observer);
+        let deadline = tokio::time::Instant::now()
+            .checked_add(HANDSHAKE_DEADLINE)
+            .unwrap();
+        tokio::time::timeout_at(deadline, async {
+            let mut held = Vec::new();
+            for n in 1..=16u8 {
+                let endpoint = raw_client(std::net::Ipv4Addr::new(127, 0, 5, n), 512 * 1024).await;
+                let conn = endpoint.connect(host.addr(), JOIN_ALPN).await.unwrap();
+                let (id, accepted) = allocations.recv().await.unwrap();
+                assert_eq!(id, endpoint.id(), "server authenticated the outsider");
+                if n <= 8 {
+                    assert!(accepted, "the fixture did not hold its first eight outsiders");
+                }
+                let streams = if accepted && partial {
+                    let (mut send, recv) = conn.open_bi().await.unwrap();
+                    // A complete length prefix and only one of three body bytes.
+                    send.write_all(&[0, 0, 0, 3, 0xff]).await.unwrap();
+                    Some((send, recv))
+                } else {
+                    None
+                };
+                if !accepted {
+                    assert!(matches!(conn.closed().await, ConnectionError::ApplicationClosed(app) if app.error_code == close::BUSY));
+                }
+                held.push(HeldOutsider { _endpoint: endpoint, conn, _partial: streams, accepted });
+            }
+            let active = || held.iter().filter(|outsider| outsider.accepted).all(|outsider| outsider.conn.close_reason().is_none());
+            assert!(active(), "awaiting occupants expired before the priority join");
+            let guest = friend.request_join(&ticket, request);
+            let answer = async {
+                let (id, accepted) = allocations.recv().await.unwrap();
+                assert_eq!(id, friend.id(), "server authenticated the priority identity");
+                if accepted {
+                    let attempt = host.next_join().await.unwrap();
+                    assert_eq!(attempt.id(), friend.id());
+                    assert!(attempt.is_priority());
+                    assert_eq!(attempt.request().session_key, guest_session.id());
+                    assert_eq!(invites.redeem(&attempt.request().cap, attempt.id(), Instant::now()), Ok(Redeemed::Bound));
+                    attempt.answer(Ok(admitted.clone())).await.unwrap();
+                }
+                accepted
+            };
+            let (got, accepted) = tokio::join!(guest, answer);
+            assert!(active(), "priority progress relied on the outsiders' deadline");
+            assert!(tokio::time::Instant::now() < deadline);
+            let occupants = held.iter().filter(|outsider| outsider.accepted).count();
+            assert_eq!(got, Ok(admitted), "priority join with {occupants} live awaiting outsiders; authenticated allocation accepted={accepted}, partial={partial}");
+        }).await.expect("the composed priority join exceeded the original five-second budget");
+        host.close().await;
+        friend.close().await;
+        host_session.close().await;
+        guest_session.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn si_23_silent_outsiders_cannot_fill_priority_awaiting_capacity() {
+        outsiders_preserve_priority_awaiting(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn si_23_partial_outsiders_cannot_fill_priority_awaiting_capacity() {
+        outsiders_preserve_priority_awaiting(true).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

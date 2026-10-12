@@ -7,7 +7,7 @@ guard. iroh and noq come from pinned upstream archives plus audited patches;
 
 | Module | Owns |
 |---|---|
-| `door` | the persistent-identity, relay-only endpoint on `kickoff/join/1`; at most 16 connections awaiting a `JoinRequest` and 2 per identity, 5 s to send it; invalid-request limits (10/min per id, 60/min overall, priority ids exempt from the global limit), two join queues |
+| `door` | the persistent-identity, relay-only endpoint on `kickoff/join/1`; at most 16 connections awaiting a `JoinRequest` and 2 per identity, only 8 general occupants so 8 places remain reserved for bound/trusted identities after TLS, 5 s to send it; invalid-request limits (10/min per id, 60/min overall, priority ids exempt from the global limit), two join queues |
 | `session` | the fresh-key endpoint, `SessionBind::Direct` (one IPv4 interface address) or `SessionBind::RelayOnly` (no IP transport, no QAD, no UDP socket); the `after_handshake` admission hook reading the `ArcSwap` admitted set; one live connection per session key; guests refuse every `Incoming` |
 | `incoming` | the pre-handshake gate both endpoints share: 16 pending `Incoming`s, `retry` for unvalidated addresses, 8 handshakes/s per source and 64/s overall, `refuse` beyond |
 | `guarded` | the only way an endpoint gets an IP transport: registers the send guard for the exact bind address before iroh binds, then keeps the guard's view and validated paths current |
@@ -68,6 +68,7 @@ Nothing leaves the host.
 | `si_31_leaked_endpoint_shows_only_the_bound_address` | an admitted peer and an outsider it leaked the endpoint to (rejected after TLS) record only the bound address, before and after the endpoint moves to a new address; a relay-only endpoint shows none |
 | `si_31_relay_only_endpoint_owns_no_socket_and_publishes_no_address` | `RelayOnly` binds no UDP socket, publishes no IP and dials no IP |
 | `si_23_handshakes_are_rate_limited_per_source_and_overall`, `si_23_leaked_endpoint_flood_with_fresh_identities` | 8/s per source and 64/s overall before TLS; 40 fresh identities from one source get at most 10 handshakes and the established link keeps delivering |
+| `si_23_silent_outsiders_cannot_fill_priority_awaiting_capacity`, `si_23_partial_outsiders_cannot_fill_priority_awaiting_capacity` | a valid signed bound join is admitted while eight silent or partial outsiders still hold authenticated awaiting places; a per-Door test-only observer witnesses server TLS and the real allocation result before stream reads |
 | `si_23_door_holds_two_silent_connections_per_identity`, `si_23_door_caps_connections_awaiting_a_join_request`, `si_23_door_closes_silent_connections_at_the_join_deadline` | handshakes that never send `JoinRequest`: 2 per identity, 16 overall, closed at 5 s |
 | `unknown_control_variant_closes_the_link_with_version` | a message from a newer protocol closes the link with `VERSION` (§4.5) |
 | `fragmentation_round_trip_at_the_size_boundary` | payloads at, below and above the one-datagram and four-fragment limits |
@@ -176,6 +177,13 @@ fixture does with its generated CA. Peer messages cannot provide roots, and
 the wire decoder still accepts only canonical HTTPS relay URLs.
 
 ## Admission lifetime bounds
+
+The door classifies the authenticated identity before acquiring an awaiting
+place. General occupants can use eight of the sixteen places; priority
+identities can use any remaining place. Every waiting guard retains its
+allocation class, so a later priority publication cannot change the charge
+it releases. The total cap, two-per-identity cap and whole five-second join
+deadline apply to both classes.
 
 A door answer's five-second lifetime includes its write, stream finish and
 close acknowledgement. Cancellation and timeout close the connection. Full

@@ -228,18 +228,24 @@ async fn si_23_door_holds_two_silent_connections_per_identity() {
 
 /// SI-23: at most 16 connections await a `JoinRequest` at once, whoever
 /// holds them. Each silent connection here comes from its own address and
-/// identity, so only that cap can turn the seventeenth away.
+/// identity. All are published as priority before dialing, so the general
+/// reservation cannot turn the seventeenth away.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn si_23_door_caps_connections_awaiting_a_join_request() {
     let host_door = door().await;
     let mut held = Vec::new();
+    let mut priority = Vec::new();
     for n in 0..16u8 {
         let ep = raw_endpoint_at(Ipv4Addr::new(127, 0, 1, n.wrapping_add(1))).await;
+        priority.push(ep.id());
+        host_door.set_priority(priority.iter().copied());
         let conn = ep.connect(host_door.addr(), JOIN_ALPN).await.unwrap();
         held.push((ep, conn));
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     let late = raw_endpoint_at(Ipv4Addr::new(127, 0, 1, 100)).await;
+    priority.push(late.id());
+    host_door.set_priority(priority);
     let conn = late.connect(host_door.addr(), JOIN_ALPN).await.unwrap();
     assert_eq!(
         close_code(&conn).await,

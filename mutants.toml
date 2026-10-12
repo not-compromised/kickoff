@@ -513,3 +513,6 @@ note = "the public Kick future owns publication after removing the peer"
 
 [[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-identity-read-growth", test = "si_30_overlong_persisted_identity_never_releases_an_unwiped_allocation", note = "the ordinary growing identity reader can release a key-bearing allocation without wiping it"
 [[unmutated]] test = "si_30_identity_read_wipes_after_partial_io_failure", reason = "positive error-path ownership composition; the dedicated identity-read-growth mutant tests early allocation release, while Secret's wipe and nested Zeroizing independently protect the final allocation"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-door-no-priority-awaiting", test = "si_23_silent_outsiders_cannot_fill_priority_awaiting_capacity", note = "silent outsiders can occupy every post-TLS awaiting place before a bound join"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-door-no-priority-awaiting", test = "si_23_partial_outsiders_cannot_fill_priority_awaiting_capacity", note = "partial JoinRequest outsiders can occupy every post-TLS awaiting place before a bound join"
