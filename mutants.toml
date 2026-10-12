@@ -473,3 +473,19 @@ note = "normal startup defers the facade core policy until listener construction
 
 [[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-reclaim-any", test = "si_7_dead_socket_collision_is_refused_without_touching_it", note = "bind replaces an existing dead socket instead of failing closed"
 [[unmutated]] test = "si_10_role_commands_use_postcard", reason = "independent postcard command/reply fixtures prove positive role-format composition; authentication and version protections have separate mutants"
+
+[[mutant]]
+si = "SI-18"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si18-caller-owned-completion"
+test = "si_18_cancelled_host_leave_finishes_cleanup"
+note = "the public Leave future owns cleanup after the lifecycle transition commits"
+
+[[mutant]]
+si = "SI-18"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si18-caller-owned-completion"
+test = "si_18_cancelled_host_kick_publishes_removed_peer"
+note = "the public Kick future owns publication after removing the peer"
