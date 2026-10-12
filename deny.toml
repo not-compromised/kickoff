@@ -1,0 +1,54 @@
+# cargo deny check: advisories, bans, licenses, sources (design §8.3, SI-27).
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+all-features = false
+
+[advisories]
+# Vulnerabilities always fail. Unmaintained, unsound and yanked crates fail too;
+# an exception goes in `ignore` with its reason.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    # Compile-time proc-macro, reached only through iroh 1.3.0 -> netwatch ->
+    # netdev -> netlink-packet-core; it never sees runtime input. Revisit on
+    # each iroh bump.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled in by iroh 1.3.0; no runtime input" },
+]
+
+[licenses]
+# Permissive licences compatible with shipping MIT OR Apache-2.0 binaries. Each
+# is needed by at least one crate in the lock today (`cargo deny list -l crate`):
+# BSD-2-Clause (spez), BSD-3-Clause (curve25519-dalek, ed25519-dalek), ISC (rustls-webpki, untrusted),
+# Zlib (foldhash), Unicode-3.0 (icu, via url). No MPL-2.0 crate is present.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = [
+    # Mozilla's root certificate data, used by iroh-relay and iroh-dns for relay
+    # and DNS TLS. Data licence, permissive; scoped to this crate only.
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

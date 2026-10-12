@@ -1,0 +1,351 @@
+//! SI-7 (Linux): the endpoint is created exclusively in a place only its user
+//! can write, a caller is accepted only after kernel credentials (same uid,
+//! a Kickoff executable) check out, and the client checks its server the
+//! same way. Every refusal leaves no side effect.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::string_slice
+)]
+
+mod common;
+
+use std::io::{Read, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use common::*;
+use kickoff_ipc::role::Cli;
+use kickoff_ipc::{CliCommand, IpcError, Reply, RuntimeDir, Server, Trust, connect};
+use tokio::io::AsyncReadExt;
+
+fn mode(path: &Path) -> u32 {
+    std::fs::symlink_metadata(path).unwrap().mode() & 0o7777
+}
+
+fn chmod(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn si_7_runtime_dir_created_private_and_reused() {
+    let base = TempBase::new();
+    let dir = RuntimeDir::open_in(base.path()).unwrap();
+    assert_eq!(mode(&base.kickoff()), 0o700);
+    assert_eq!(dir.socket_path().parent().unwrap(), base.kickoff());
+    RuntimeDir::open_in(base.path()).unwrap();
+    assert_eq!(mode(&base.kickoff()), 0o700);
+}
+
+#[test]
+fn si_7_runtime_dir_with_wrong_mode_type_or_link_refused() {
+    let base = TempBase::new();
+    std::fs::create_dir(base.kickoff()).unwrap();
+    chmod(&base.kickoff(), 0o755);
+    assert_eq!(
+        RuntimeDir::open_in(base.path()).unwrap_err(),
+        IpcError::UnsafeDir
+    );
+    assert_eq!(mode(&base.kickoff()), 0o755, "refusal must not touch it");
+
+    let base = TempBase::new();
+    let elsewhere = TempBase::new();
+    std::os::unix::fs::symlink(elsewhere.path(), base.kickoff()).unwrap();
+    assert_eq!(
+        RuntimeDir::open_in(base.path()).unwrap_err(),
+        IpcError::UnsafeDir
+    );
+    assert!(!elsewhere.kickoff().exists());
+
+    let base = TempBase::new();
+    std::fs::write(base.kickoff(), b"squatter").unwrap();
+    assert_eq!(
+        RuntimeDir::open_in(base.path()).unwrap_err(),
+        IpcError::UnsafeDir
+    );
+    assert_eq!(std::fs::read(base.kickoff()).unwrap(), b"squatter");
+}
+
+#[test]
+fn si_7_runtime_base_must_be_private_absolute_and_real() {
+    let base = TempBase::new();
+    chmod(base.path(), 0o755);
+    assert_eq!(
+        RuntimeDir::open_in(base.path()).unwrap_err(),
+        IpcError::UnsafeDir
+    );
+    assert!(
+        !base.kickoff().exists(),
+        "nothing created under a public base"
+    );
+
+    assert_eq!(
+        RuntimeDir::open_in(Path::new("relative/run")).unwrap_err(),
+        IpcError::UnsafeDir
+    );
+
+    let real = TempBase::new();
+    let link = TempBase::new();
+    let link_path = link.path().join("run");
+    std::os::unix::fs::symlink(real.path(), &link_path).unwrap();
+    assert_eq!(
+        RuntimeDir::open_in(&link_path).unwrap_err(),
+        IpcError::UnsafeDir
+    );
+}
+
+#[tokio::test]
+async fn si_7_socket_created_0600_and_removed_on_drop() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    let server = Server::bind(&dir, trust_me()).unwrap();
+    let meta = std::fs::symlink_metadata(dir.socket_path()).unwrap();
+    assert!(meta.file_type().is_socket());
+    assert_eq!(meta.mode() & 0o7777, 0o600);
+    drop(server);
+    assert!(!dir.socket_path().exists());
+}
+
+#[tokio::test]
+async fn si_7_squatted_socket_name_refused_without_touching_it() {
+    // A file.
+    let base = TempBase::new();
+    let dir = base.dir();
+    std::fs::write(dir.socket_path(), b"squatter").unwrap();
+    assert_eq!(
+        Server::bind(&dir, trust_me()).err(),
+        Some(IpcError::Squatted)
+    );
+    assert_eq!(std::fs::read(dir.socket_path()).unwrap(), b"squatter");
+
+    // A symlink to where a squatter wants the socket to go.
+    let base = TempBase::new();
+    let dir = base.dir();
+    let target = base.path().join("target");
+    std::os::unix::fs::symlink(&target, dir.socket_path()).unwrap();
+    assert_eq!(
+        Server::bind(&dir, trust_me()).err(),
+        Some(IpcError::Squatted)
+    );
+    assert!(!target.exists());
+
+    // A live server (a fake started first).
+    let base = TempBase::new();
+    let dir = base.dir();
+    let fake = std::os::unix::net::UnixListener::bind(dir.socket_path()).unwrap();
+    assert_eq!(
+        Server::bind(&dir, trust_me()).err(),
+        Some(IpcError::Squatted)
+    );
+    // The probe connection is the only trace; the fake still listens.
+    fake.set_nonblocking(true).unwrap();
+    std::os::unix::net::UnixStream::connect(dir.socket_path()).unwrap();
+}
+
+#[tokio::test]
+async fn dead_socket_of_ours_is_reclaimed() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    drop(std::os::unix::net::UnixListener::bind(dir.socket_path()).unwrap());
+    assert!(
+        dir.socket_path().exists(),
+        "a killed daemon leaves its socket"
+    );
+    let server = Arc::new(Server::bind(&dir, trust_me()).unwrap());
+    let (_task, _seen) = serve(server);
+    let mut client = connect::<Cli>(&dir, &trust_me()).await.unwrap();
+    assert!(matches!(
+        client.call(CliCommand::Status).await.unwrap(),
+        Reply::Done
+    ));
+}
+
+/// The server believes its user is another uid, so this process is, to it,
+/// a caller from a second uid. Only the uid check can refuse it: the exe
+/// is trusted.
+#[tokio::test]
+async fn si_7_caller_with_another_uid_refused() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    let as_other_user = Trust::for_uid(euid().wrapping_add(1), &[&me()]).unwrap();
+    let server = Arc::new(Server::bind(&dir, as_other_user).unwrap());
+    let (_task, mut seen) = serve(Arc::clone(&server));
+
+    let got = connect::<Cli>(&dir, &trust_me()).await;
+    assert_eq!(got.err(), Some(IpcError::Closed));
+    assert_eq!(server.health().peers_rejected, 1);
+    assert_eq!(server.health().frames_refused, 0, "hello never read");
+    assert!(seen.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn si_7_caller_running_another_executable_refused() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    let only_other = Trust::same_user(&[&other_exe()]).unwrap();
+    let server = Arc::new(Server::bind(&dir, only_other).unwrap());
+    let (_task, mut seen) = serve(Arc::clone(&server));
+
+    let got = connect::<Cli>(&dir, &trust_me()).await;
+    assert_eq!(got.err(), Some(IpcError::Closed));
+    assert_eq!(server.health().peers_rejected, 1);
+    assert!(seen.try_recv().is_err());
+}
+
+/// A fake server (this binary, so same uid) started before the real one: a
+/// client that does not trust it as kickoffd sends it nothing at all.
+#[tokio::test]
+async fn si_7_client_refuses_fake_server_before_sending() {
+    for trust in [
+        Trust::same_user(&[&other_exe()]).unwrap(),
+        Trust::for_uid(euid().wrapping_add(1), &[&me()]).unwrap(),
+    ] {
+        let base = TempBase::new();
+        let dir = base.dir();
+        let fake = tokio::net::UnixListener::bind(dir.socket_path()).unwrap();
+        let recorder = tokio::spawn(async move {
+            let (mut stream, _) = fake.accept().await.unwrap();
+            let mut got = Vec::new();
+            stream.read_to_end(&mut got).await.unwrap();
+            got
+        });
+        assert_eq!(
+            connect::<Cli>(&dir, &trust).await.err(),
+            Some(IpcError::PeerRejected)
+        );
+        assert!(recorder.await.unwrap().is_empty(), "fake server got bytes");
+    }
+}
+
+#[tokio::test]
+async fn si_7_client_refuses_a_socket_name_that_is_not_a_socket() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    std::fs::write(dir.socket_path(), b"squatter").unwrap();
+    assert_eq!(
+        connect::<Cli>(&dir, &trust_me()).await.err(),
+        Some(IpcError::Squatted)
+    );
+}
+
+const HELPER_ENV: &str = "KIPC_OTHER_UID_SOCKET";
+
+/// Runs only inside `si_7_second_uid_refused`, as a subordinate uid: connect
+/// to the socket, send a valid hello, and report what came back.
+#[test]
+fn other_uid_helper() {
+    let Some(path) = std::env::var_os(HELPER_ENV) else {
+        return;
+    };
+    let report = match std::os::unix::net::UnixStream::connect(&path) {
+        Err(e) => format!("connect-error:{:?}", e.kind()),
+        Ok(mut stream) => {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = stream.write_all(&hello(kickoff_ipc::PROTOCOL_VERSION, CLI));
+            let mut got = Vec::new();
+            match stream.read_to_end(&mut got) {
+                Ok(_) => format!("closed-after:{}", got.len()),
+                Err(e) => format!("read-error:{:?}:{}", e.kind(), got.len()),
+            }
+        }
+    };
+    println!("KIPC {report}");
+}
+
+/// Runs `other_uid_helper` from a copy of this binary as the first
+/// subordinate uid (`unshare --map-auto`, newuidmap and /etc/subuid; no
+/// root), and returns its report.
+async fn as_second_uid(helper: &Path, socket: &Path) -> String {
+    let helper = helper.to_path_buf();
+    let socket = socket.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let out = std::process::Command::new("unshare")
+            .args(["--map-auto", "--setuid", "0", "--setgid", "0"])
+            .arg(&helper)
+            .args([
+                "--exact",
+                "other_uid_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HELPER_ENV, &socket)
+            .output()
+            .expect("unshare must run");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        stdout
+            .lines()
+            .find_map(|l| l.split_once("KIPC ").map(|(_, r)| r.trim().to_owned()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the second-uid helper did not run; this test needs util-linux \
+                     unshare, newuidmap and a /etc/subuid entry for this user. \
+                     stdout: {stdout} stderr: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                )
+            })
+    })
+    .await
+    .unwrap()
+}
+
+/// A real second uid. With the directory as Kickoff creates it, the kernel
+/// refuses the connect outright. With the directory and socket opened up on
+/// purpose, the connect succeeds and the `SO_PEERCRED` check alone must
+/// refuse it: the helper's executable is trusted, so only the uid differs.
+#[tokio::test(flavor = "multi_thread")]
+async fn si_7_second_uid_refused() {
+    let base = TempBase::new();
+    let dir = base.dir();
+
+    let shared = TempBase::new();
+    chmod(shared.path(), 0o755);
+    let helper = shared.path().join("helper");
+    std::fs::copy(me(), &helper).unwrap();
+    chmod(&helper, 0o755);
+
+    let server =
+        Arc::new(Server::bind(&dir, Trust::same_user(&[&me(), &helper]).unwrap()).unwrap());
+    let (_task, mut seen) = serve(Arc::clone(&server));
+
+    let report = as_second_uid(&helper, dir.socket_path()).await;
+    assert_eq!(report, "connect-error:PermissionDenied");
+    assert_eq!(server.health().peers_rejected, 0);
+
+    chmod(base.path(), 0o711);
+    chmod(&base.kickoff(), 0o711);
+    chmod(dir.socket_path(), 0o666);
+    let report = as_second_uid(&helper, dir.socket_path()).await;
+    // Closed unread, so the kernel may report a reset instead of EOF.
+    assert!(
+        matches!(
+            report.as_str(),
+            "closed-after:0" | "read-error:ConnectionReset:0"
+        ),
+        "another uid got a reply: {report}"
+    );
+    assert_eq!(server.health().peers_rejected, 1);
+    assert_eq!(server.health().frames_refused, 0, "hello never read");
+    assert!(seen.try_recv().is_err());
+
+    // The same helper as our own uid is admitted, so the refusal above was
+    // the uid and nothing else.
+    let mut ok = std::process::Command::new(&helper);
+    ok.args(["--exact", "other_uid_helper", "--nocapture"])
+        .env(HELPER_ENV, dir.socket_path());
+    let out = tokio::task::spawn_blocking(move || ok.output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("KIPC read-error:WouldBlock:7")
+            || String::from_utf8_lossy(&out.stdout).contains("KIPC read-error:TimedOut:7"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

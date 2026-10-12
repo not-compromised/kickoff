@@ -1,0 +1,47 @@
+# cargo-fuzz targets (nightly): `cargo +nightly fuzz run <target>` from
+# crates/wire. Each target calls the same harness the stable proptest suites
+# run (`../tests/harness`), so CI exercises every property the fuzzer checks.
+# Outside the main workspace on purpose: libFuzzer needs nightly and
+# sanitizer flags, and must not enter the release lockfile or cargo-deny's graph.
+
+[package]
+name = "kickoff-wire-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+kickoff-wire = { path = ".." }
+bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
+data-encoding = { version = "=2.11.1", default-features = false, features = ["alloc"] }
+
+[[bin]]
+name = "lan"
+path = "fuzz_targets/lan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control"
+path = "fuzz_targets/control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ticket"
+path = "fuzz_targets/ticket.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,83 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "bins/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+kickoff-wire = { path = "crates/wire" }
+kickoff-vlan = { path = "crates/vlan" }
+kickoff-net = { path = "crates/net" }
+kickoff-session = { path = "crates/session" }
+kickoff-ipc = { path = "crates/ipc" }
+kickoff-secret = { path = "crates/secret" }
+
+# Default features off: `portmapper` would map router ports (UPnP/PCP/NAT-PMP) and
+# publish them as extra candidates, which design §3.4 and SI-31 forbid.
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
+iroh-base = { version = "=1.3.0", default-features = false, features = ["key"] }
+bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
+tokio = { version = "=1.53.2", default-features = false }
+thiserror = { version = "=2.0.21", default-features = false, features = ["std"] }
+serde = { version = "=1.0.229", default-features = false }
+postcard = { version = "=1.1.3", default-features = false, features = ["alloc"] }
+data-encoding = { version = "=2.11.1", default-features = false, features = ["alloc"] }
+getrandom = { version = "=0.4.3", default-features = false }
+proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
+serde-reflection = { version = "=0.6.0", default-features = false }
+# Default-route interface lookup for the session bind (§3.4); already in iroh's tree.
+netwatch = { version = "=0.19.3", default-features = false }
+# The admitted-set snapshot read on every handshake and datagram (§2.5); already in iroh's tree.
+arc-swap = { version = "=1.9.2", default-features = false }
+# kickoff-secret: volatile wipes that the optimizer cannot elide, and
+# constant-time comparison. Both were already in the lock through iroh.
+zeroize = { version = "=1.9.1", default-features = false, features = ["alloc"] }
+subtle = { version = "=2.6.1", default-features = false }
+# kickoff-ipc (Linux): safe wrappers for geteuid, no-follow directory opens
+# and fstat, so the local-channel checks need no `unsafe`.
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "process"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+# Peer-supplied bytes reach every crate below the daemon, so the panic family is
+# denied workspace-wide; tests opt out through clippy.toml and per-file allows.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+panic_in_result_fn = "deny"
+unwrap_in_result = "deny"
+get_unwrap = "deny"
+exit = "deny"
+mem_forget = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# A panic must take the whole daemon down: the peer-facing network dies with its
+# owner (SI-12), so abort fails closed where unwinding would leave a half-updated
+# admission table serving traffic.
+panic = "abort"
+# Defence in depth for arithmetic the lint missed: an abort beats a wrapped length
+# slipping past a budget.
+overflow-checks = true
