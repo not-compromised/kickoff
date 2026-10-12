@@ -57,9 +57,14 @@ impl Server {
             }
             Err(e) => return Err(e.into()),
         };
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        let private = !cfg!(feature = "mutant-si7-socket-mode");
+        if private {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
         let meta = std::fs::symlink_metadata(path)?;
-        if !meta.file_type().is_socket() || meta.uid() != dir.uid() || meta.mode() & 0o7777 != 0o600
+        if !meta.file_type().is_socket()
+            || meta.uid() != dir.uid()
+            || (private && meta.mode() & 0o7777 != 0o600)
         {
             return Err(IpcError::Squatted);
         }
@@ -67,7 +72,13 @@ impl Server {
         Ok(Server {
             listener: UnixListener::from_std(std_listener)?,
             trust,
-            slots: Arc::new(Semaphore::new(MAX_CHANNELS)),
+            slots: Arc::new(Semaphore::new(
+                if cfg!(feature = "mutant-si23-ipc-unbounded-channels") {
+                    Semaphore::MAX_PERMITS
+                } else {
+                    MAX_CHANNELS
+                },
+            )),
             health: Arc::default(),
             path: path.to_path_buf(),
             inode: (meta.dev(), meta.ino()),
@@ -167,6 +178,10 @@ impl Drop for Server {
 /// socket we own that nobody is listening on.
 fn reclaim_dead_socket(path: &Path, uid: u32) -> Result<(), IpcError> {
     let meta = std::fs::symlink_metadata(path).map_err(|_| IpcError::Squatted)?;
+    if cfg!(feature = "mutant-si7-reclaim-any") {
+        std::fs::remove_file(path)?;
+        return Ok(());
+    }
     if !meta.file_type().is_socket() || meta.uid() != uid {
         return Err(IpcError::Squatted);
     }
@@ -320,7 +335,7 @@ impl RateBudget {
             self.window = now;
             self.used = 0;
         }
-        if self.used >= REQUEST_RATE {
+        if !cfg!(feature = "mutant-si23-ipc-no-rate-limit") && self.used >= REQUEST_RATE {
             return Err(IpcError::OverBudget);
         }
         self.used = self.used.saturating_add(1);

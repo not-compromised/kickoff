@@ -1,9 +1,9 @@
 //! In-process datagram latency (design §7): one-way, `send_lan` on one node
 //! to `recv_lan` returning on the other, over loopback with relays disabled.
 //! The budget's p50 <= 100 us / p99 <= 500 us covers the whole game-to-game
-//! path; this measures net's share. Debug builds only assert a loose ceiling;
-//! `cargo test --release -p kickoff-net --test latency -- --nocapture` prints
-//! the numbers the report quotes.
+//! path; this measures net's share, so net alone must fit inside it. Release
+//! builds assert that budget (scripts/check.sh runs this with `--release`);
+//! debug builds only a loose ceiling. `-- --nocapture` prints the numbers.
 #![allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,
@@ -64,7 +64,18 @@ async fn datagram_latency_p50_p99_over_10k() {
             "{label} ({len} B): p50 {p50:?}, p99 {p99:?}, max {:?} over {count}",
             samples[count - 1]
         );
-        assert!(p99 < Duration::from_millis(20), "{label}: p99 {p99:?}");
+        if cfg!(debug_assertions) {
+            assert!(p99 < Duration::from_millis(20), "{label}: p99 {p99:?}");
+        } else {
+            assert!(
+                p50 <= Duration::from_micros(100),
+                "{label}: p50 {p50:?} over §7"
+            );
+            assert!(
+                p99 <= Duration::from_micros(500),
+                "{label}: p99 {p99:?} over §7"
+            );
+        }
         let h = host_link.health();
         assert_eq!(
             h.dropped_budget + h.dropped_reassembly + h.dropped_malformed,

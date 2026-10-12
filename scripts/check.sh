@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The proving gate: every step must pass, and the script exits non-zero on the
-# first failure. Runs every SI-n test by running the whole workspace suite.
+# first failure. Runs every SI-n test by running the whole workspace suite,
+# the design §7 latency tests in a release build, and then every mutant in
+# mutants.toml, each of which must fail its test (SI-33).
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -18,7 +20,7 @@ if hits=$(grep -rnE --include='*.rs' --include='*.toml' "$pattern" \
     echo "unsafe guard: unsafe code or an unsafe_code override found" >&2
     exit 1
 fi
-for manifest in crates/*/Cargo.toml bins/*/Cargo.toml; do
+for manifest in crates/*/Cargo.toml bins/*/Cargo.toml xtask/Cargo.toml; do
     if ! awk '/^\[lints\]/{in_lints=1; next} /^\[/{in_lints=0} in_lints && /^workspace[[:space:]]*=[[:space:]]*true/{found=1} END{exit !found}' "$manifest"; then
         echo "unsafe guard: $manifest does not inherit [workspace.lints]" >&2
         exit 1
@@ -35,7 +37,20 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 step "cargo test"
 cargo test --workspace --locked
 
+step "release latency (design §7)"
+# Debug builds assert only loose ceilings; these assert the §7 budgets
+# (p50 <= 100 us, p99 <= 500 us game to game; <= 2 us codec plus filter).
+cargo test --release --locked -p kickoff-session --test budget
+cargo test --release --locked -p kickoff-net --test latency
+cargo test --release --locked -p kickoff-vlan --test hot_path
+
 step "cargo deny"
 cargo deny check --hide-inclusion-graph
+
+step "mutants (SI-33)"
+# Each registered mutant's test must pass on the plain build and fail with the
+# mutant; then a release build with a mutant enabled must be refused.
+cargo run --locked -q -p kickoff-xtask -- mutants
+cargo run --locked -q -p kickoff-xtask -- release-guard
 
 printf '\nall checks passed\n'

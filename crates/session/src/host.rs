@@ -215,7 +215,9 @@ impl Host {
     /// land after the reset (SI-18).
     fn unroute(&self, peer: PeerRef) -> Option<Route<Arc<Link>, Farewell>> {
         let route = self.routes.remove(peer.slot, peer.generation);
-        self.lan.reset_peer(peer.slot);
+        if !cfg!(feature = "mutant-si18-no-flow-reset") {
+            self.lan.reset_peer(peer.slot);
+        }
         route
     }
 
@@ -377,7 +379,12 @@ async fn accept_loop(host: Arc<Host>) {
 async fn serve(host: Arc<Host>, link: Link, mut ctl: CtlStream) {
     let peer = link.peer();
     let link = Arc::new(link);
-    let hello = tokio::time::timeout(HELLO_DEADLINE, ctl.recv::<GuestMsg>()).await;
+    let deadline = if cfg!(feature = "mutant-si23-no-hello-deadline") {
+        Duration::from_secs(86_400)
+    } else {
+        HELLO_DEADLINE
+    };
+    let hello = tokio::time::timeout(deadline, ctl.recv::<GuestMsg>()).await;
     let Ok(Ok(GuestMsg::Hello { generation: pass })) = hello else {
         link.close();
         return;
@@ -390,7 +397,9 @@ async fn serve(host: Arc<Host>, link: Link, mut ctl: CtlStream) {
             link.close();
             return;
         }
-        host.lan.reset_peer(peer.slot);
+        if !cfg!(feature = "mutant-si18-no-flow-reset") {
+            host.lan.reset_peer(peer.slot);
+        }
         let route = Route {
             generation: peer.generation,
             link: Arc::clone(&link),
@@ -444,13 +453,23 @@ async fn carry(host: &Host, link: &Link, peer: PeerRef) -> Ended {
     loop {
         let datagram = match link.recv_lan().await {
             Ok(datagram) => datagram,
-            Err(NetError::OverBudget) => return Ended::Evict,
+            Err(NetError::OverBudget) if !cfg!(feature = "mutant-si23-over-budget-is-a-drop") => {
+                return Ended::Evict;
+            }
             Err(_) => return Ended::Lost,
         };
         let datagram = LanDatagram {
             peer: peer.slot,
             ..datagram
         };
+        #[cfg(feature = "mutant-si21-link-to-link")]
+        if datagram.bcast {
+            host.routes.to_all(|other| {
+                if other.peer().slot != peer.slot {
+                    other.send_lan(&datagram);
+                }
+            });
+        }
         if !host
             .routes
             .deliver(peer.slot, peer.generation, || host.lan.deliver(datagram))

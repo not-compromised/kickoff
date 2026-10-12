@@ -112,19 +112,23 @@ impl Invites {
         if !cap.verify(&self.door) {
             return Err(JoinRefused::InvalidCap);
         }
-        if cap.session_id != self.session_id {
+        if !cfg!(feature = "mutant-si20-any-session") && cap.session_id != self.session_id {
             return Err(JoinRefused::WrongSession);
         }
         let entry = self
             .outstanding
             .get(&cap.nonce)
             .ok_or(JoinRefused::InvalidCap)?;
-        if entry.invitee != cap.invitee || entry.invitee.is_some_and(|id| id != requester) {
+        let wrong_requester = !cfg!(feature = "mutant-si20-bound-any-requester")
+            && entry.invitee.is_some_and(|id| id != requester);
+        if entry.invitee != cap.invitee || wrong_requester {
             return Err(JoinRefused::InvalidCap);
         }
         let invitee = entry.invitee;
         let issued = entry.issued;
-        self.outstanding.remove(&cap.nonce);
+        if !cfg!(feature = "mutant-si20-nonatomic-nonce") {
+            self.outstanding.remove(&cap.nonce);
+        }
         if expired(invitee, issued, now) {
             return Err(JoinRefused::Expired);
         }
@@ -137,5 +141,7 @@ impl Invites {
 
 /// Bound invites last as long as the session; bearer invites `BEARER_TTL`.
 fn expired(invitee: Option<EndpointId>, issued: Instant, now: Instant) -> bool {
-    invitee.is_none() && now.saturating_duration_since(issued) >= BEARER_TTL
+    !cfg!(feature = "mutant-si20-bearer-never-expires")
+        && invitee.is_none()
+        && now.saturating_duration_since(issued) >= BEARER_TTL
 }

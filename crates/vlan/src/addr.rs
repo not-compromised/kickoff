@@ -46,7 +46,10 @@ impl Node {
     pub fn check_peer(self, peer: PeerSlot) -> Result<(), Reject> {
         if peer == self.own {
             Err(Reject::OwnSlot)
-        } else if self.is_host() || peer == PeerSlot::HOST {
+        } else if self.is_host()
+            || peer == PeerSlot::HOST
+            || cfg!(feature = "mutant-si21-star-open")
+        {
             Ok(())
         } else {
             Err(Reject::NotInStar)

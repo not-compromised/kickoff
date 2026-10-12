@@ -34,7 +34,9 @@ impl<R: Role> std::fmt::Debug for Client<R> {
 pub async fn connect<R: Role>(dir: &RuntimeDir, trust: &Trust) -> Result<Client<R>, IpcError> {
     let path = dir.socket_path();
     let meta = std::fs::symlink_metadata(path)?;
-    if !meta.file_type().is_socket() || meta.uid() != dir.uid() {
+    if !cfg!(feature = "mutant-si7-client-any-socket")
+        && (!meta.file_type().is_socket() || meta.uid() != dir.uid())
+    {
         return Err(IpcError::Squatted);
     }
     let mut stream = UnixStream::connect(path).await?;

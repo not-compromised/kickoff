@@ -8,7 +8,11 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use crate::{Adapter, LanError};
 
 /// Frames queued in each direction. A tap's kernel queue is bounded too.
-const QUEUE: usize = 256;
+const QUEUE: usize = if cfg!(feature = "mutant-si23-unbounded-game-queue") {
+    1 << 20
+} else {
+    256
+};
 
 /// Kickoff's end of an in-memory tap.
 pub struct MemTap {

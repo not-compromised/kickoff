@@ -36,10 +36,14 @@ impl<L, F> Routes<L, F> {
         deliver: impl FnOnce(),
     ) -> bool {
         let table = self.read();
-        let current = table
-            .get(index(slot))
-            .and_then(Option::as_ref)
-            .is_some_and(|r| r.generation == generation);
+        let current = cfg!(feature = "mutant-si18-no-gen-check")
+            || table
+                .get(index(slot))
+                .and_then(Option::as_ref)
+                .is_some_and(|r| r.generation == generation);
+        if cfg!(feature = "mutant-si18-deliver-outside-lock") {
+            drop(table);
+        }
         if current {
             deliver();
         }

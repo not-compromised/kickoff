@@ -88,7 +88,11 @@ once, a host) are played with `kickoff-net` directly.
 | `si_23_peer_far_over_budget_is_disconnected` | a guest far over budget loses its seat; the other keeps playing |
 | `latency_p50_p99_over_10k_datagrams` | §7, game socket to game socket, one way |
 
-Each `si_*` test was run with its mitigation removed and failed: the
+The mutants in `/mutants.toml` now automate this (`scripts/check.sh` runs them),
+including `si_18_link_up_needs_the_seat_generation_and_pass`, the session's
+layer under net's admission layers, and
+`si_23_link_without_hello_closed_at_the_deadline`. Before that, each `si_*`
+test was run by hand with its mitigation removed and failed: the
 session-key, revocation and one-seat checks in `Admission::join`; delivery
 outside the routing lock; the kick's unroute and publish; the LAN flow reset on
 a generation change; a host pump that forwards guest broadcasts; an over-budget
@@ -171,5 +175,6 @@ Deviations from design draft 2 and open questions.
 - SI-23's full flood suite: pre-handshake floods, control saturation and
   stream churn are tested in `net`; map-request churn and disk are M6; no test
   asserts RSS, fd or task ceilings yet.
-- The §7 criterion bench for the hot path (≤ 2 µs) is not written.
+- The §7 hot path (≤ 2 µs) is timed in `kickoff-vlan`'s `tests/hot_path.rs`,
+  release build, not a criterion bench.
 - Recreating the session endpoint on a default-route change (kickoffd's job).

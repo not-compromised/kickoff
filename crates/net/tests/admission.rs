@@ -146,3 +146,63 @@ async fn si_21_guest_session_endpoint_accepts_nothing() {
     );
     assert_eq!(guest.accept().await.err(), Some(NetError::WrongRole));
 }
+
+/// SI-18, the publishing half: a set that bumps a key's generation closes its
+/// live connection at once, with no traffic needed to notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_18_republished_generation_closes_an_idle_link() {
+    let host = node(Role::Host).await;
+    let guest = node(Role::Guest).await;
+    let p = peer(4, 1);
+    let (_host_link, guest_link) = pair(&host, &guest, p).await;
+    let bumped = kickoff_wire::PeerRef {
+        generation: Generation::new(2),
+        ..p
+    };
+    host.set_admitted([(guest.id(), bumped)].into_iter().collect::<AdmittedSet>());
+    assert!(
+        tokio::time::timeout(WAIT, guest_link.closed())
+            .await
+            .is_ok(),
+        "the stale link stayed open"
+    );
+}
+
+/// SI-21: a guest's session endpoint refuses even a key it was told to admit,
+/// so no admitted-set mistake can make a guest reachable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_21_guest_refuses_even_a_key_it_was_told_to_admit() {
+    let guest = node(Role::Guest).await;
+    let attacker = raw_endpoint().await;
+    guest.set_admitted(
+        [(attacker.id(), peer(2, 1))]
+            .into_iter()
+            .collect::<AdmittedSet>(),
+    );
+    assert!(
+        raw_dial(&attacker, guest.addr(), SESSION_ALPN)
+            .await
+            .is_err(),
+        "a guest accepted a session connection"
+    );
+}
+
+/// SI-23: an admitted key that completes the handshake and never opens its
+/// control stream is dropped at the handshake deadline (5 s), so silent
+/// connections cannot hold the 16 pending slots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_silent_connection_closed_at_the_handshake_deadline() {
+    let host = node(Role::Host).await;
+    let silent = raw_endpoint().await;
+    host.set_admitted(
+        [(silent.id(), peer(2, 1))]
+            .into_iter()
+            .collect::<AdmittedSet>(),
+    );
+    let conn = tokio::time::timeout(WAIT, silent.connect(host.addr(), SESSION_ALPN))
+        .await
+        .unwrap()
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(8), conn.closed()).await;
+    assert!(closed.is_ok(), "a silent connection outlived the deadline");
+}

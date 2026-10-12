@@ -5,9 +5,30 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
 
 [lints]
 workspace = true
+
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si3-ticket-text-any = []
+mutant-si7-no-uid-check = []
+mutant-si7-no-exe-check = []
+mutant-si7-base-unchecked = []
+mutant-si7-dir-mode-unchecked = []
+mutant-si7-socket-mode = []
+mutant-si7-reclaim-any = []
+mutant-si7-client-any-socket = []
+mutant-si10-skip-version = []
+mutant-si10-client-skips-version = []
+mutant-si10-any-role = []
+mutant-si23-ipc-frame-unbounded = []
+mutant-si23-ipc-no-frame-deadline = []
+mutant-si23-ipc-no-rate-limit = []
+mutant-si23-ipc-unbounded-channels = []
+mutant-si30-ticket-text-debug = []
 
 [dependencies]
 iroh-base.workspace = true

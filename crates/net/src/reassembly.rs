@@ -10,7 +10,11 @@ use std::time::{Duration, Instant};
 use bytes::{BufMut, Bytes, BytesMut};
 use kickoff_wire::{FragmentHeader, LanHeader, MAX_FRAGMENTS};
 
-pub(crate) const PER_LINK: usize = 8;
+pub(crate) const PER_LINK: usize = if cfg!(feature = "mutant-si23-no-per-link-reassembly-cap") {
+    GLOBAL
+} else {
+    8
+};
 pub(crate) const GLOBAL: usize = 32;
 pub(crate) const DEADLINE: Duration = Duration::from_millis(50);
 const PARTS: usize = MAX_FRAGMENTS as usize;
@@ -23,7 +27,8 @@ impl GlobalBudget {
     fn acquire(self: &Arc<Self>) -> Option<GlobalSlot> {
         self.0
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < GLOBAL).then(|| n.saturating_add(1))
+                (cfg!(feature = "mutant-si23-no-global-reassembly-cap") || n < GLOBAL)
+                    .then(|| n.saturating_add(1))
             })
             .ok()
             .map(|_| GlobalSlot(Arc::clone(self)))

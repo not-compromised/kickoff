@@ -62,13 +62,16 @@ pub(crate) fn decode_hello(bytes: &[u8]) -> Result<ChannelRole, Welcome> {
     let mut r = Reader::new(bytes);
     let magic = r.array::<2>().map_err(|_| Welcome::Version)?;
     let version = r.u16().map_err(|_| Welcome::Version)?;
-    if magic != HELLO_MAGIC || version != PROTOCOL_VERSION {
+    let version_ok = cfg!(feature = "mutant-si10-skip-version") || version == PROTOCOL_VERSION;
+    if magic != HELLO_MAGIC || !version_ok {
         return Err(Welcome::Version);
     }
     let role = r.u8().map_err(|_| Welcome::Version)?;
     r.finish().map_err(|_| Welcome::Version)?;
     match role_from_tag(role) {
         Some(role @ (ChannelRole::Cli | ChannelRole::UiMain | ChannelRole::Overlay)) => Ok(role),
+        #[cfg(feature = "mutant-si10-any-role")]
+        Some(role) => Ok(role),
         Some(ChannelRole::Gamebox | ChannelRole::ServiceClient) | None => Err(Welcome::Role),
     }
 }
@@ -88,7 +91,7 @@ pub(crate) fn decode_welcome(bytes: &[u8]) -> Result<(), IpcError> {
     let version = r.u16()?;
     let status = r.u8()?;
     r.finish()?;
-    if version != PROTOCOL_VERSION {
+    if !cfg!(feature = "mutant-si10-client-skips-version") && version != PROTOCOL_VERSION {
         return Err(IpcError::Version);
     }
     match status {

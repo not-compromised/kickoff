@@ -127,7 +127,8 @@ impl DoorRepr {
     /// Refuses a door with a direct address or with no relay to reach it by.
     pub(crate) fn from_addr(addr: &EndpointAddr) -> Result<DoorRepr, WireError> {
         let (relays, ips) = split(addr)?;
-        if !ips.is_empty() || relays.is_empty() {
+        let direct = !cfg!(feature = "mutant-si29-door-with-ip") && !ips.is_empty();
+        if direct || relays.is_empty() {
             return Err(WireError::Malformed);
         }
         Ok(DoorRepr {

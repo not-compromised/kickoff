@@ -14,7 +14,11 @@ use crate::ports;
 use crate::verdict::Reject;
 
 pub(crate) const FLOW_IDLE: Duration = Duration::from_secs(30);
-pub(crate) const FLOWS_PER_PEER: usize = 64;
+pub(crate) const FLOWS_PER_PEER: usize = if cfg!(feature = "mutant-si23-flow-table-grows") {
+    128
+} else {
+    64
+};
 pub(crate) const MAX_BROADCAST_PAYLOAD: usize = 1252;
 /// The per-link datagram budget of §6.3, applied again per peer here so one
 /// peer cannot fill the game's queue for the others.
@@ -88,6 +92,12 @@ impl Filter {
     /// game.
     pub fn inbound(&mut self, d: &LanDatagram, now: Instant) -> Result<(), Reject> {
         self.node.check_peer(d.peer)?;
+        if cfg!(feature = "mutant-si23-filter-before-charge") {
+            check_ports(d)?;
+            if !d.bcast && !ports::game(d.dst_port) && !self.flow_open(d, now) {
+                return Err(Reject::NotGamePort);
+            }
+        }
         charge(&mut self.inbound, d, now)?;
         if d.payload.len() > MAX_PAYLOAD {
             return Err(Reject::PayloadTooLarge);
@@ -111,8 +121,15 @@ impl Filter {
     /// generation of their own, so this is what keeps a flow opened for one
     /// admission from answering the next holder of the slot (SI-18).
     pub fn reset_peer(&mut self, slot: PeerSlot) {
+        if cfg!(feature = "mutant-si18-flows-survive-reset") {
+            return;
+        }
         if let Some(table) = self.flows.get_mut(index(slot)) {
             *table = FlowTable::EMPTY;
+        }
+        #[cfg(feature = "mutant-si23-reset-refills-budget")]
+        if let Some(budget) = self.inbound.get_mut(index(slot)) {
+            *budget = PeerBudget::new(Instant::now());
         }
     }
 
@@ -133,6 +150,14 @@ fn index(slot: PeerSlot) -> usize {
 fn charge(budgets: &mut [PeerBudget; SCOPES], d: &LanDatagram, now: Instant) -> Result<(), Reject> {
     let budget = budgets.get_mut(index(d.peer)).ok_or(Reject::NotInStar)?;
     let bytes = u64::try_from(d.payload.len()).unwrap_or(u64::MAX);
+    if cfg!(feature = "mutant-si23-no-peer-budget") {
+        return Ok(());
+    }
+    let bytes = if cfg!(feature = "mutant-si23-no-byte-budget") {
+        0
+    } else {
+        bytes
+    };
     if budget.packets.has(1, now) && budget.bytes.has(bytes, now) {
         budget.packets.take(1, now);
         budget.bytes.take(bytes, now);
@@ -157,7 +182,7 @@ fn check_broadcast(d: &LanDatagram, bucket: &mut Bucket, now: Instant) -> Result
         Err(Reject::BroadcastNotDiscovery)
     } else if d.payload.len() > MAX_BROADCAST_PAYLOAD {
         Err(Reject::BroadcastTooLarge)
-    } else if !bucket.take(1, now) {
+    } else if !cfg!(feature = "mutant-si23-no-broadcast-budget") && !bucket.take(1, now) {
         Err(Reject::BroadcastBudget)
     } else {
         Ok(())

@@ -120,6 +120,9 @@ impl Egress {
     /// interface's subnet (loopback only for a loopback bind). Credentials go
     /// only to compiled relays because unlisted URLs never reach iroh.
     pub(crate) fn scope(&self, addr: &EndpointAddr) -> Result<EndpointAddr, NetError> {
+        if cfg!(feature = "mutant-si29-scope-any") {
+            return Ok(addr.clone());
+        }
         let kept: Vec<TransportAddr> = addr
             .addrs
             .iter()
@@ -158,6 +161,9 @@ impl Egress {
     /// address itself, and global (QAD) addresses. Never CGNAT, the virtual
     /// subnet, or any other local interface.
     pub(crate) fn publishable(&self, addr: EndpointAddr) -> EndpointAddr {
+        if cfg!(feature = "mutant-si31-publish-all") {
+            return addr;
+        }
         let id = addr.id;
         let kept: Vec<TransportAddr> = addr
             .addrs
@@ -191,7 +197,9 @@ impl EndpointHooks for EgressGuard {
         remote_addr: &'a EndpointAddr,
         _alpn: &'a [u8],
     ) -> BeforeConnectOutcome {
-        if remote_addr.addrs.iter().all(|a| self.0.may_dial(a)) {
+        if cfg!(feature = "mutant-si29-no-connect-guard")
+            || remote_addr.addrs.iter().all(|a| self.0.may_dial(a))
+        {
             BeforeConnectOutcome::Accept
         } else {
             BeforeConnectOutcome::Reject
@@ -334,6 +342,43 @@ mod tests {
         let mut ips: Vec<_> = kept.ip_addrs().map(|s| s.to_string()).collect();
         ips.sort();
         assert_eq!(ips, ["192.168.1.30:4000", "203.0.114.9:4000"]);
+    }
+
+    /// The second layer alone: whatever address set reaches iroh's connect,
+    /// the hook refuses it if it holds one destination `scope` would drop.
+    #[tokio::test]
+    async fn si_29_connect_guard_refuses_what_scope_would_drop() {
+        let ours = relay("https://relay.kickoff.example");
+        let guard = EgressGuard(Egress::new(RelayMap::from(ours.clone()), Some(lan_bind())));
+        let alpn = crate::SESSION_ALPN;
+        for hostile in [
+            TransportAddr::Relay(relay("https://evil.example")),
+            TransportAddr::Ip("127.0.0.1:22".parse().unwrap()),
+            TransportAddr::Ip("100.100.100.100:41641".parse().unwrap()),
+            TransportAddr::Ip("10.75.0.2:7777".parse().unwrap()),
+            TransportAddr::Ip("203.0.114.9:0".parse().unwrap()),
+        ] {
+            let addr =
+                EndpointAddr::from_parts(id(), [TransportAddr::Relay(ours.clone()), hostile]);
+            assert!(
+                matches!(
+                    guard.before_connect(&addr, alpn).await,
+                    BeforeConnectOutcome::Reject
+                ),
+                "{addr:?}"
+            );
+        }
+        let allowed = EndpointAddr::from_parts(
+            id(),
+            [
+                TransportAddr::Relay(ours),
+                TransportAddr::Ip("192.168.1.30:4000".parse().unwrap()),
+            ],
+        );
+        assert!(matches!(
+            guard.before_connect(&allowed, alpn).await,
+            BeforeConnectOutcome::Accept
+        ));
     }
 
     #[test]

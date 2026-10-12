@@ -389,3 +389,41 @@ async fn another_major_version_refused_before_the_ticket_is_spent() {
     );
     assert_eq!(join(alice, ticket).await.unwrap().slot(), 2);
 }
+
+/// SI-23: an admitted key whose link never completes its `Hello` is closed
+/// at the deadline, so a silent link cannot sit on its seat's connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn si_23_link_without_hello_closed_at_the_deadline() {
+    let host = host().await;
+    let alice = Identity::new().await;
+    let ticket = host.bound(alice.id());
+    let silent = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr("127.0.0.1:0")
+        .unwrap()
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .unwrap();
+    let request = kickoff_wire::JoinRequest {
+        cap: copy_cap(&ticket),
+        session_key: silent.id(),
+        name: name("silent"),
+        platform: kickoff_wire::Platform::Linux,
+        game_build: kickoff_wire::BuildId::new("test-build").unwrap(),
+        kickoff_version: kickoff_session::KICKOFF_VERSION,
+    };
+    let admitted = alice.door.request_join(&ticket, request).await.unwrap();
+    let conn = silent
+        .connect(admitted.session_addr, kickoff_net::SESSION_ALPN)
+        .await
+        .unwrap();
+    let (mut send, _recv) = conn.open_bi().await.unwrap();
+    // One byte of a length prefix: the host gets the link, never a message.
+    send.write_all(&[0]).await.unwrap();
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(9), conn.closed()).await;
+    assert!(
+        closed.is_ok(),
+        "a link that never said Hello outlived the deadline"
+    );
+}

@@ -100,12 +100,15 @@ impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for BoundedVec<T
                 // The declared length is peer-chosen: refuse it before reserving
                 // anything, and never reserve more than the bound.
                 let declared = seq.size_hint().unwrap_or(0);
-                if declared > N {
+                if !cfg!(feature = "mutant-si23-trust-declared-length")
+                    && !cfg!(feature = "mutant-si23-unbounded-lists")
+                    && declared > N
+                {
                     return Err(de::Error::custom("sequence out of bounds"));
                 }
                 let mut items = Vec::with_capacity(declared);
                 while let Some(item) = seq.next_element()? {
-                    if items.len() >= N {
+                    if !cfg!(feature = "mutant-si23-unbounded-lists") && items.len() >= N {
                         return Err(de::Error::custom("sequence out of bounds"));
                     }
                     items.push(item);

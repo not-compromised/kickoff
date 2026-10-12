@@ -16,7 +16,7 @@ impl FrameLen {
     pub(crate) fn check(header: [u8; 4], max: usize) -> Result<FrameLen, IpcError> {
         let len =
             usize::try_from(u32::from_be_bytes(header)).map_err(|_| IpcError::TooLarge { max })?;
-        if len > max {
+        if !cfg!(feature = "mutant-si23-ipc-frame-unbounded") && len > max {
             return Err(IpcError::TooLarge { max });
         }
         Ok(FrameLen(len))
@@ -30,8 +30,13 @@ pub(crate) async fn read_header<R: AsyncRead + Unpin>(
     max: usize,
 ) -> Result<(FrameLen, Instant), IpcError> {
     let first = r.read_u8().await?;
+    let frame_deadline = if cfg!(feature = "mutant-si23-ipc-no-frame-deadline") {
+        std::time::Duration::from_secs(86_400)
+    } else {
+        FRAME_DEADLINE
+    };
     let deadline = Instant::now()
-        .checked_add(FRAME_DEADLINE)
+        .checked_add(frame_deadline)
         .ok_or(IpcError::Timeout)?;
     let mut rest = [0u8; 3];
     timeout_at(deadline, r.read_exact(&mut rest))
