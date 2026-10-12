@@ -7,6 +7,9 @@
 //! exists (§2.4, SI-21). A datagram's source slot is the slot of the link it
 //! arrived on, never anything in the packet.
 
+#[cfg(test)]
+extern crate self as kickoff_session;
+
 mod admission;
 mod approval;
 mod budget;

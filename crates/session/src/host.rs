@@ -74,6 +74,8 @@ pub(crate) struct Host {
     /// Follows the admission owner's ending transition after the goodbyes.
     ended: watch::Sender<bool>,
     operations: mpsc::Sender<PendingOperation>,
+    #[cfg(test)]
+    lifecycle: lifecycle_tests::Hooks,
 }
 
 pub(crate) fn start(
@@ -112,6 +114,8 @@ pub(crate) fn start(
         events,
         ended: watch::channel(false).0,
         operations,
+        #[cfg(test)]
+        lifecycle: lifecycle_tests::Hooks::default(),
     });
     host.publish(&host.admission());
     tasks.spawn(complete_operations(Arc::clone(&host), pending));
@@ -254,6 +258,8 @@ impl Host {
             self.publish(&adm);
             routes
         };
+        #[cfg(test)]
+        self.lifecycle.after_drain().await;
         let mut goodbyes = JoinSet::new();
         for route in routes {
             goodbyes.spawn(farewell(route, HostMsg::End));
@@ -520,6 +526,8 @@ async fn serve(host: Arc<Host>, link: Link, mut ctl: CtlStream) {
         link.close();
         return;
     }
+    #[cfg(test)]
+    host.lifecycle.hello_seen(peer);
     let (farewell_tx, mut farewell_rx) = oneshot::channel();
     {
         let mut adm = host.admission();
@@ -790,3 +798,7 @@ mod privacy_tests {
         assert!(host.approvals.borrow().is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
