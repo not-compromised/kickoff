@@ -21,5 +21,6 @@ while IFS=$'\t' read -r crate version archive_hash patch_hash; do
     [[ "$crate" == \#* ]] && continue
     printf '%s = { version = "=%s", default-features = false }\n' "$crate" "$version" >> "$work/Cargo.toml"
 done < vendor/crates.tsv
-cargo metadata --offline --manifest-path "$work/Cargo.toml" --format-version 1 > /dev/null
+# A fresh runner has not necessarily queried the index for patched crates.
+cargo metadata --manifest-path "$work/Cargo.toml" --format-version 1 > /dev/null
 cargo deny --manifest-path "$work/Cargo.toml" check advisories --hide-inclusion-graph

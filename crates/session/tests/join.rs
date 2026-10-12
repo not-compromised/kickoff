@@ -401,7 +401,7 @@ async fn si_23_link_without_hello_closed_at_the_deadline() {
     let ticket = host.bound(alice.id());
     struct Attacker;
     impl kickoff_send_guard::Guard for Attacker {
-        fn admit(&self, _: std::net::SocketAddr) -> bool {
+        fn admit(&self, _: u64, _: std::net::SocketAddr) -> bool {
             true
         }
     }
