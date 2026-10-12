@@ -64,6 +64,14 @@ note = "the policy stops checking that rows have registered mutants"
 
 [[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-no-wipe", test = "si_30_secret_wiped_on_drop", note = "dropping a Secret does not wipe it"
 [[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-secret-debug", test = "si_30_secret_has_no_debug_display_serialize", note = "Secret gets a redacting Debug"
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-secret-clone", test = "si_30_secret_has_no_debug_display_serialize", note = "Secret implements Clone"
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-dumpable", test = "si_30_hardened_process_leaks_no_secret_to_a_core_dump_or_proc_mem", note = "harden_process leaves the process dumpable (RLIMIT_CORE is still 0)"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-world-readable", test = "si_22_identity_key_created_0600_in_a_0700_dir", note = "the state directory is created 0755 and the key file 0644"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-world-readable", test = "si_22_another_user_cannot_read_the_identity_key", note = "the state directory is created 0755 and the key file 0644"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-dir-unchecked", test = "si_22_state_dir_with_wrong_mode_type_or_link_refused", note = "an existing state directory is followed and accepted whatever its type, owner or mode"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-file-unchecked", test = "si_22_identity_key_with_wrong_mode_type_or_link_refused", note = "the key file is followed and read whatever its type, owner or mode"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-replace-damaged", test = "si_22_damaged_identity_file_is_refused_not_replaced", note = "a damaged key file is replaced by a new identity"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-reset-keeps-trust", test = "si_22_reset_revokes_every_trust_entry_for_the_old_key", note = "reset replaces the key without revoking the old key's trust entries"
 [[unmutated]] test = "si_30_diagnostics_render_only_schema_keys_and_typed_values", reason = "every diag field is a closed enum or a number; letting one carry text is a type change, not a flag"
 
 # kickoff-ipc
@@ -151,9 +159,6 @@ note = "the policy stops checking that rows have registered mutants"
 # if one is left behind.
 
 [[pending]] si = "SI-29", item = "mutant-si29-no-send-guard", reason = "the vendored iroh SendGuard patch is not on this branch (r2 M2 impact, net items 2-3)"
-[[pending]] si = "SI-30", item = "mutant-si30-dumpable", reason = "secret::harden_process (PR_SET_DUMPABLE 0, RLIMIT_CORE 0) is not implemented (r2 M2 impact, secret item 1)"
 [[pending]] si = "SI-41", item = "test", reason = "approval objects (ApprovalId, Command::Decide) are not implemented (r2 M2 impact, session item 1)"
 [[pending]] si = "SI-41", item = "mutant", reason = "approval objects are not implemented, so nothing to mutate yet"
 [[pending]] si = "SI-41", item = "mutant-si41-approve-by-peer", reason = "approval objects are not implemented (r2 M2 impact, session item 3)"
-[[pending]] si = "SI-22", item = "test", reason = "no M2 crate stores the identity key or the trust list (store is M5); see the development.md NOTES question on SI-22's milestone"
-[[pending]] si = "SI-22", item = "mutant", reason = "no M2 crate stores the identity key or the trust list (store is M5)"

@@ -38,8 +38,9 @@ arc-swap = { version = "=1.9.2", default-features = false }
 # constant-time comparison. Both were already in the lock through iroh.
 zeroize = { version = "=1.9.1", default-features = false, features = ["alloc"] }
 subtle = { version = "=2.6.1", default-features = false }
-# kickoff-ipc (Linux): safe wrappers for geteuid, no-follow directory opens
-# and fstat, so the local-channel checks need no `unsafe`.
+# kickoff-ipc and kickoff-secret (Linux): safe wrappers for geteuid, no-follow
+# opens, fstat, prctl and setrlimit, so the local-channel checks, the identity
+# store and process hardening need no `unsafe`.
 rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "process"] }
 # kickoff-ipc (Linux): the one safe wrapper for SO_PEERPIDFD (SI-7); rustix
 # 1.1.5 has none. Only the `socket` module is enabled.

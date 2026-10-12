@@ -1414,7 +1414,9 @@ version = "0.0.0"
 name = "kickoff-secret"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
  "iroh-base",
+ "rustix",
  "serde",
  "subtle",
  "zeroize",
@@ -1474,6 +1476,9 @@ version = "0.0.0"
 [[package]]
 name = "kickoffd"
 version = "0.0.0"
+dependencies = [
+ "kickoff-secret",
+]
 
 [[package]]
 name = "lazy_static"
