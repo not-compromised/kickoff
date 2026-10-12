@@ -11,6 +11,7 @@ Spec: [design.md](design.md). Standing security rules: [SECURITY-INVARIANTS.md](
 | `crates/net` | iroh door and session endpoints, fragmentation, egress policy | M2 |
 | `crates/session` | admission owner, roster, pump, budgets | M2 |
 | `crates/ipc` | authenticated, versioned local channels | M2 (Linux), M7 (Windows) |
+| `crates/local` | shared Linux kernel authentication and ancillary-refusing transport | M2 (Linux) |
 | `crates/secret` | `Secret<T>`, process hardening, Linux identity storage | M2 |
 | `crates/budget` | shared saturating token arithmetic; rates and charging order stay local | M2 |
 | `crates/send-guard` | the registry called by vendored iroh before IP sends | M2 |
@@ -164,12 +165,11 @@ scaffolding M2.
   has a private constructor: other crates cannot expose a stored ticket or
   substitute another owner. Capabilities hold private `Secret<CapValue>` data;
   callers use invitation-kind inspection and protected join copies.
-- Wire owns ticket text and capability encodings. IPC wraps the wire-owned text
-  kind; its codec receives wiping transit bytes. `encode` and `encode_framed`
-  intentionally return uniquely owned `SecretBuffer` transport representations.
-  These buffers expose slices for transmission; they never share allocations,
-  and wipe live bytes and spare capacity on success, error and cancellation.
-  This storage/access boundary does not make serialized transport bytes opaque.
+- Wire owns secret-bearing serialization and transmission. Tickets remain
+  opaque; Join frames hold `Secret<FrameBody>` and expose bytes only inside
+  wire's private owner closure while writing. Recipient authority and the
+  public nonsecret encoders are indexed in
+  [wire secret transmission](../crates/wire/README.md#secret-transmission).
 - `IdentityKey` shares one `Secret<SecretKey>` allocation. Identity persistence,
   public identity and signing operations stay inside its owner. Binding an iroh
   endpoint copies the key only inside that adapter, clears address-lookup
@@ -180,6 +180,9 @@ scaffolding M2.
   probe still gates listening; the worker becomes nondumpable with zero limits
   before its runtime. Runtime/loader work before Rust `main` remains outside
   this startup-order proof.
+- Host Leave and Kick completion belongs to the session task set; dropping a
+  caller's future does not cancel an accepted operation. See
+  [session lifecycle](../crates/session/README.md#lifecycle-and-deadline-boundaries).
 - `Session::approvals()` holds the pending set in a watch receiver. Slow readers
   can recover it even if they missed `ApprovalRequested` on the event stream.
 - `paste` (RUSTSEC-2024-0436, unmaintained) arrives through iroh 1.3.0 →

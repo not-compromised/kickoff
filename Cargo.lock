@@ -1605,6 +1605,7 @@ name = "kickoff-ipc"
 version = "0.0.0"
 dependencies = [
  "iroh-base",
+ "kickoff-local",
  "kickoff-secret",
  "kickoff-wire",
  "nix",
@@ -1614,6 +1615,16 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "kickoff-local"
+version = "0.0.0"
+dependencies = [
+ "nix",
+ "rustix",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -1701,13 +1712,17 @@ dependencies = [
  "bytes",
  "data-encoding",
  "getrandom 0.4.3",
+ "iroh",
  "iroh-base",
+ "kickoff-local",
  "kickoff-secret",
+ "kickoff-send-guard",
  "postcard",
  "proptest",
  "serde",
  "serde-reflection",
  "thiserror 2.0.21",
+ "tokio",
  "zeroize",
 ]
 
@@ -1719,8 +1734,10 @@ version = "0.0.0"
 name = "kickoffd"
 version = "0.0.0"
 dependencies = [
+ "iroh-base",
  "kickoff-ipc",
  "kickoff-secret",
+ "kickoff-wire",
  "tokio",
 ]
 

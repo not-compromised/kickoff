@@ -8,9 +8,11 @@ diagnostics schema (design §3.4, §6.4, SI-22, SI-30).
   `expose(&owner, |v| ...)` requires the kind's private owner token; unrelated
   holders use typed owner operations. Rust coherence prevents replacing an
   existing kind's owner. `ct_eq` compares equal-length inputs in constant time.
-- `SecretBuffer` holds uniquely owned transport bytes, with no `Clone` or
-  formatting implementation. Its slices serve encoders and network writes;
-  drop wipes live bytes and spare capacity, including errors and cancellation.
+- `SecretBuffer` is a wiping allocation used inside encoders and receivers.
+  Drop wipes live bytes and spare capacity, including errors and cancellation.
+  Secret-bearing output remains behind
+  [wire's designated transmission owner](../wire/README.md#secret-transmission);
+  public slice encoders accept only nonsecret message types.
 - `key::IdentityKey` is a shared handle to one protected key allocation. It
   provides public identity, signing and binding operations. Binding clears
   key-observing lookup callbacks and key logging; `KeyEndpoint` deliberately

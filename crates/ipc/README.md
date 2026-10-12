@@ -89,7 +89,7 @@ commands in the binary return `Refused(Failed)` until final adapters exist.
   `R::Command`, so CLI code cannot build a UI command.
 - Commands: `CliCommand`, `UiCommand`, `OverlayCommand`. Only `UiCommand`
   has `Decide { approval: ApprovalId, allow }` (the native dialog path);
-  draft 2's `Approve(EndpointId)` is gone and its tag retired. Replies: `Done`,
+  draft 2's `Approve(EndpointId)` is no longer a command. Replies: `Done`,
   `Refused(Refusal)`, `Invite(TicketText)` (never to the overlay),
   `Report(diag::Report)`.
 - `TicketText` is a `Secret<wire::TicketTextValue>` restricted to 1..=2048 ASCII letters
@@ -99,7 +99,7 @@ commands in the binary return `Refused(Failed)` until final adapters exist.
 
 | SI | Test |
 |---|---|
-| SI-7 (Linux) | `tests/si_7.rs`: private directory (mode, owner, symlink, file, public or relative base), exclusive socket (file, symlink, live fake server), caller with another uid, caller running another executable, fake server started first (gets zero bytes), `si_7_second_uid_refused` with a real second uid, `si_7_recycled_pid_refused` (the caller exits and a trusted binary takes its pid before the check), and `si_7_descriptors_from_a_caller_close_the_channel_and_are_closed` (with the hello and after it). `src/linux/stream.rs`: descriptors and credentials close the channel at the read |
+| SI-7 (Linux) | `tests/si_7.rs`: private directory (mode, owner, symlink, file, public or relative base), exclusive socket (file, symlink, live fake server), caller with another uid, caller running another executable, fake server started first (gets zero bytes), `si_7_second_uid_refused` with a real second uid, `si_7_recycled_pid_refused` (the caller exits and a trusted binary takes its pid before the check), and `si_7_descriptors_from_a_caller_close_the_channel_and_are_closed` (with the hello and after it). `../local/src/stream.rs`: descriptors and credentials close the channel at the read |
 | SI-10 | `tests/si_10.rs`: version mismatch refused before a pipelined command reaches the daemon; client refuses a server of another version and sends nothing more |
 | SI-3 | `tests/si_3.rs`: every command variant classified (exhaustive match) against a denylist; the one text argument refuses paths, URLs, options and escapes, on the wire too |
 | SI-23 (pipe) | `tests/channel.rs` and `src/frame.rs`: oversize frame refused from its header before the body is read or allocated, stalled frame, request rate, channel slots |
@@ -116,11 +116,12 @@ fails with a message saying so; it does not skip (SI-33).
 
 Deviations from draft 2 and the M2 scaffold, and open questions.
 
-1. **`Server::bind` and `connect` take a `Trust`;** `connect` is generic over
-   the role instead of taking a `ChannelRole`. The daemon passes
-   `Trust::clients()`, clients pass `Trust::kickoffd()`. Tests use
-   `same_user` and `for_uid` to stand in for installed binaries and for a
-   second uid.
+1. **Shared kernel transport owner.** [kickoff-local](../local/README.md)
+   owns `Trust` and `DataOnly`; IPC reexports the credential interface. Tests
+   may configure ordinary channel trust, but a ticket write independently
+   requires the canonical installed recipient. No custom trust constructor
+   grants secret transmission authority. Secret-bearing IPC also refuses a
+   kernel peer in the sender's own process.
 2. **Every name collision fails closed.** `bind` never unlinks an existing
    name, including a dead socket left by a killed process. A graceful owner
    removes only its own socket inode on drop. Recovery from an ungraceful exit
@@ -172,8 +173,9 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
     by `ipc` and `session`. Only session's admission owner mints an id and
     decides whether it is still current. Its byte conversion is the local
     channel encoding, with no effect on peer message formats.
-13. **`PROTOCOL_VERSION` is 2**: `UiCommand` changed (`Approve` out,
-    `Decide` in). Tag 6 is retired, `Decide` is tag 11.
+13. **`PROTOCOL_VERSION` is 3**: role commands use private postcard enums.
+    The fixed version handshake refuses earlier custom command layouts before
+    decoding or a side effect.
 
 Questions for the design:
 

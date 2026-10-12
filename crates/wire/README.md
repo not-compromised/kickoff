@@ -14,7 +14,7 @@ bytes it came from. No error carries input bytes (SI-30).
 | Area | Items |
 |---|---|
 | LAN datagrams | `LanHeader`, `FragmentHeader`, `decode_datagram(link_slot, bytes) -> Inbound`, `encode_datagram(d, frag_id, max) -> Vec<Bytes>` |
-| Messages | `JoinRequest`, `JoinReply`, `GuestMsg`, `HostMsg`; `encode`, `decode`, `encode_framed`, `frame_len` |
+| Messages | `JoinRequest`, `JoinReply`, `GuestMsg`, `HostMsg`; nonsecret `encode`/`encode_framed`, `decode`, `frame_len`, opaque `prepare_message` |
 | Tickets | `Ticket`, `Cap`, `parse_ticket -> Secret<Ticket>`, `encode_ticket -> Secret<TicketTextValue>` |
 | Invites | `Invites::new`, `issue(key, invitee, now) -> Cap`, `redeem(cap, requester, now) -> Redeemed` |
 
@@ -80,10 +80,28 @@ same properties the fuzzer does.
   `cargo check --manifest-path crates/wire/fuzz/Cargo.toml --locked` there would
   keep it from rotting.
 
-Stored tickets and capabilities expose no raw fields to another consuming
-crate. Wire's private owner token permits its fixed encode, parse, invitation
-kind and protected join-copy operations. Message encoders return uniquely
-owned wiping `SecretBuffer` transit bytes. Serialization deliberately supplies
-slices to transport callers; this is separate from stored-kind raw exposure.
-Ticket, base32, canonical, join body and frame allocations wipe on success,
-error and cancellation.
+## Secret transmission
+
+Wire's private consumer owns ticket fields and serialization. `encode_ticket`
+returns opaque protected text. `TicketTextValue::postcard_frame` and
+`prepare_message` return `Transmission`, whose body is `Secret<FrameBody>`.
+It has no readable body, serializer, formatting, cloning or arbitrary writer
+interface. Wire's owner closure supplies each write's borrowed bytes.
+`encode` and `encode_framed` accept only the sealed `PublicWireMessage` set,
+which excludes `JoinRequest`.
+
+Local ticket transmission requires an authenticated
+[`InstalledPeer`](../local/README.md), not caller-configured trust or a raw
+socket. Join transmission checks the connection's identity against the
+capability's immutable issuing door before opening its own stream. Signing
+and signature-verified ticket parsing assign that authority; protected copies
+preserve it. Ticket encoding requires that existing issuing authority too. A
+decoded incoming Join cannot regain export authority by being wrapped in a
+Ticket and reparsed. Raw fixture construction can provide an explicit issuer
+only alongside the raw
+capability inputs already known to its caller.
+
+Owned ticket, base32, canonical and frame allocations wipe on success, error
+and cancellation. The frame regression observes live bytes after their wipe
+and before release. Compiler stack copies and dependency transport buffers
+remain outside this owned-allocation proof.

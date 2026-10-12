@@ -17,7 +17,6 @@ mutant-si3-ticket-text-any = []
 mutant-si7-base-unchecked = []
 mutant-si7-dir-mode-unchecked = []
 mutant-si7-socket-mode = []
-mutant-si7-reclaim-dead = []
 mutant-si7-reclaim-any = []
 mutant-si7-client-any-socket = []
 mutant-si7-control-unchecked = []
@@ -47,8 +46,6 @@ kickoff-local.workspace = true
 iroh-base.workspace = true
 kickoff-secret.workspace = true
 kickoff-wire.workspace = true
-postcard.workspace = true
-serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 zeroize.workspace = true

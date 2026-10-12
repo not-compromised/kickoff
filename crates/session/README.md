@@ -270,9 +270,21 @@ five-second bound. Every host control write runs against the remaining
 fifteen-second Pong window, so blocked roster and Ping writes cannot suspend
 idle expiry. Status messages and roster changes never renew that window.
 
+Public Leave and Kick requests use a bounded queue of sixteen waiting
+operations and one session-owned completion task. A caller awaits only its
+completion notification; dropping it cannot strand committed farewell,
+publication or endpoint closure. The worker rechecks admission state when it
+executes a queued request. Queue waits and farewell I/O hold no owner lock.
+Dropping the whole Session still aborts its task set.
+
 The lifecycle tests observe `End`, retain the public `Leave` future at that
 boundary, and submit a late bearer join or an already-admitted delayed Hello.
 This prevents endpoint closure from masking post-clear approvals or post-drain
 frames. The door and liveness fixtures advertise zero QUIC receive credit and
 keep the transport alive, rather than approximating backpressure by merely
 avoiding application reads. Dedicated mutants remove each boundary.
+
+Cancellation regressions destroy the actual public Leave/Kick future while
+retaining Session after observing the peer farewell. They require endpoint
+closure and Ended publication, or roster removal and persistent revocation,
+without another operation incidentally finishing that transition.
