@@ -1467,6 +1467,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kickoff-xtask"
+version = "0.0.0"
+
+[[package]]
 name = "kickoffd"
 version = "0.0.0"
 

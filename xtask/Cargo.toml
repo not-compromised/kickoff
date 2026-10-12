@@ -1,0 +1,21 @@
+[package]
+name = "kickoff-xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../scripts/mutant-guard.rs"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[features]
+# SI-33 mutant (see /mutants.toml): the policy stops checking mutants.
+mutant-si33-tests-only = []
+
+[dependencies]

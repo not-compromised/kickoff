@@ -1,0 +1,25 @@
+# Build mutants (docs/SECURITY-INVARIANTS.md, SI-33). Each [[mutant]] names a
+# cargo feature `mutant-si<N>-<slug>` that compiles one protection out of the
+# package `crate`, and the test function that must FAIL with it enabled and
+# PASS without it. `test_crate` names the package holding that test when it is
+# not `crate`. `cargo run -p kickoff-xtask -- mutants` runs them all, and
+# scripts/check.sh runs that; xtask/tests/si_33_policy.rs checks this file
+# against the invariant table and the workspace.
+#
+# An entry may also be written on one line:
+#   [[mutant]] si = "SI-3", crate = "...", feature = "...", test = "...", note = "..."
+# Strings take \" and \\ escapes only.
+#
+# [[unmutated]]: an SI test that no feature flag can falsify, with the reason.
+# [[pending]]:   a gap in an M2 row that this branch does not close yet; `item`
+#                is a named mutant, `test` or `mutant`. The policy fails once
+#                the gap is gone, so the entry must then be removed.
+
+# SI-33
+
+[[mutant]]
+si = "SI-33"
+crate = "kickoff-xtask"
+feature = "mutant-si33-tests-only"
+test = "si_33_policy_reports_rows_without_tests_or_mutants"
+note = "the policy stops checking that rows have registered mutants"
