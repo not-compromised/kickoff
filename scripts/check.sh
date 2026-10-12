@@ -28,6 +28,10 @@ for manifest in crates/*/Cargo.toml bins/*/Cargo.toml xtask/Cargo.toml; do
 done
 echo ok
 
+step "vendored iroh (design §3.4)"
+# Upstream iroh 1.3.0 plus the one reviewed patch, nothing else.
+scripts/check-vendor.sh
+
 step "cargo fmt --check"
 cargo fmt --all --check
 
@@ -39,9 +43,11 @@ cargo test --workspace --locked
 
 step "release latency (design §7)"
 # Debug builds assert only loose ceilings; these assert the §7 budgets
-# (p50 <= 100 us, p99 <= 500 us game to game; <= 2 us codec plus filter).
+# (p50 <= 100 us, p99 <= 500 us game to game; <= 2 us codec plus filter;
+# <= 50 ns for the send guard on an approved destination).
 cargo test --release --locked -p kickoff-session --test budget
 cargo test --release --locked -p kickoff-net --test latency
+cargo test --release --locked -p kickoff-net --lib send_guard_on_an_approved_destination_within_budget
 cargo test --release --locked -p kickoff-vlan --test hot_path
 
 step "cargo deny"

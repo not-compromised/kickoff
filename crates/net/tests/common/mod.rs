@@ -93,9 +93,14 @@ pub async fn pair(host: &SessionNet, guest: &SessionNet, peer: PeerRef) -> (Link
 
 /// A bare iroh endpoint with no Kickoff policy at all: the attacker's tool.
 pub async fn raw_endpoint() -> Endpoint {
+    raw_endpoint_at(std::net::Ipv4Addr::LOCALHOST).await
+}
+
+/// The same on another loopback address, for a flood from many sources.
+pub async fn raw_endpoint_at(ip: std::net::Ipv4Addr) -> Endpoint {
     Endpoint::builder(presets::Minimal)
         .clear_ip_transports()
-        .bind_addr("127.0.0.1:0")
+        .bind_addr((ip, 0))
         .unwrap()
         .relay_mode(RelayMode::Disabled)
         .bind()

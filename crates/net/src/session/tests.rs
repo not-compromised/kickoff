@@ -1,0 +1,357 @@
+//! SI-18 holds an unknown or stale session key back in several layers.
+//! Each test here drives one layer alone, by hand, so removing just that
+//! layer (its `mutant-si18-*` feature) fails its test even though the
+//! other layers would still refuse the key end to end.
+//!
+//! The SI-29 and SI-31 tests here need what the public API does not offer: a
+//! second loopback host, a synthetic view of the host, and the endpoint's
+//! sockets.
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration;
+
+use iroh::{SecretKey, TransportAddr};
+use kickoff_wire::{Generation, GuestMsg, LanDatagram};
+
+use super::*;
+
+const WAIT: Duration = Duration::from_secs(5);
+
+fn peer(generation: u64) -> PeerRef {
+    PeerRef {
+        id: SecretKey::generate().public(),
+        slot: PeerSlot::new(2).unwrap(),
+        generation: Generation::new(generation),
+    }
+}
+
+async fn endpoint(serve: bool, hook: Option<AdmissionHook>) -> Endpoint {
+    let alpns = if serve {
+        vec![SESSION_ALPN.to_vec()]
+    } else {
+        Vec::new()
+    };
+    let builder = Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .relay_mode(RelayMode::Disabled)
+        .alpns(alpns)
+        .transport_config(transport(HOST_BIDI, true));
+    match hook {
+        Some(hook) => builder.hooks(hook),
+        None => builder,
+    }
+    .bind()
+    .await
+    .unwrap()
+}
+
+/// `client` dials `host`; the host's side comes back unaccepted, so the
+/// test applies a layer to it by hand.
+async fn dial(
+    host: &Endpoint,
+    client: &Endpoint,
+) -> (Incoming, tokio::task::JoinHandle<Option<Connection>>) {
+    let (to, client) = (host.addr(), client.clone());
+    let dialing = tokio::spawn(async move { client.connect(to, SESSION_ALPN).await.ok() });
+    let incoming = tokio::time::timeout(WAIT, host.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    (incoming, dialing)
+}
+
+fn admitted(entries: &[(EndpointId, PeerRef)]) -> Arc<AdmittedSet> {
+    Arc::new(entries.iter().copied().collect())
+}
+
+/// Layer 1: the handshake hook refuses a key outside the admitted set
+/// before iroh hands the connection out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_18_handshake_hook_rejects_an_unadmitted_key() {
+    let shared = Arc::new(Shared::default());
+    let hook = AdmissionHook {
+        shared: Arc::clone(&shared),
+        role: Role::Host,
+    };
+    let host = endpoint(true, Some(hook)).await;
+    let stranger = endpoint(false, None).await;
+    let (incoming, _dialing) = dial(&host, &stranger).await;
+    let handshake = tokio::time::timeout(WAIT, incoming.accept().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        handshake.is_err(),
+        "an unadmitted key got through the handshake hook"
+    );
+    assert!(shared.live().is_empty());
+}
+
+/// Layer 2: the key the hook admitted is looked up again once the
+/// connection is accepted. Here the owner removed it in between.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_18_admission_is_rechecked_after_the_handshake() {
+    let shared = Arc::new(Shared::default());
+    let host = endpoint(true, None).await;
+    let guest = endpoint(false, None).await;
+    // What the hook recorded when it admitted the key.
+    let (first, _dialing) = dial(&host, &guest).await;
+    let recorded = first.accept().unwrap().await.unwrap();
+    shared.live().insert(
+        guest.id(),
+        Live {
+            peer: peer(1),
+            conn: recorded.weak_handle(),
+        },
+    );
+    // The owner has since published a set without it.
+    let (incoming, _dialing) = dial(&host, &guest).await;
+    let pending = Arc::new(tokio::sync::Semaphore::new(1))
+        .try_acquire_owned()
+        .unwrap();
+    let established = tokio::time::timeout(WAIT, establish(incoming, pending, shared, None)).await;
+    assert!(
+        matches!(established, Ok(Err(NetError::Closed))),
+        "a key removed after the handshake was not refused"
+    );
+}
+
+/// Layer 3: a link is handed out only if its generation is still current
+/// when the guest's control stream arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_18_link_refused_when_its_generation_moved_before_the_stream() {
+    let shared = Arc::new(Shared::default());
+    let host = endpoint(true, None).await;
+    let guest = endpoint(false, None).await;
+    let read_as = peer(1);
+    let now = PeerRef {
+        generation: Generation::new(2),
+        ..read_as
+    };
+    shared.admitted.store(admitted(&[(guest.id(), now)]));
+    let (incoming, dialing) = dial(&host, &guest).await;
+    let conn = incoming.accept().unwrap().await.unwrap();
+    let client = dialing.await.unwrap().unwrap();
+    let (mut send, _recv) = client.open_bi().await.unwrap();
+    send.write_all(&[0]).await.unwrap();
+    let link = tokio::time::timeout(
+        WAIT,
+        Link::accept(conn, guest.id(), read_as, Arc::clone(&shared)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        link.is_err(),
+        "a link was handed out under a generation that is no longer current"
+    );
+}
+
+/// Layer 4: every datagram re-checks the generation, so a stale link
+/// whose connection is somehow still open delivers nothing. The set is
+/// swapped here without `set_admitted`, which would also close it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_18_each_datagram_rechecks_the_generation() {
+    let host = session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Host)
+        .await
+        .unwrap();
+    let guest = session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Guest)
+        .await
+        .unwrap();
+    let p = peer(1);
+    host.set_admitted([(guest.id(), p)].into_iter().collect());
+    let pass = AdmitPass {
+        slot: p.slot,
+        generation: p.generation,
+    };
+    let (guest_link, mut ctl) = guest.dial(host.addr(), pass).await.unwrap();
+    ctl.send(&GuestMsg::Hello {
+        generation: p.generation,
+    })
+    .await
+    .unwrap();
+    let (host_link, _host_ctl) = tokio::time::timeout(WAIT, host.accept())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let bumped = PeerRef {
+        generation: Generation::new(2),
+        ..p
+    };
+    host.shared
+        .admitted
+        .store(admitted(&[(guest.id(), bumped)]));
+    guest_link.send_lan(&LanDatagram {
+        peer: PeerSlot::HOST,
+        bcast: false,
+        src_port: 7777,
+        dst_port: 7777,
+        payload: bytes::Bytes::from_static(b"stale"),
+    });
+    let got = tokio::time::timeout(WAIT, host_link.recv_lan())
+        .await
+        .unwrap();
+    assert_eq!(got.err(), Some(NetError::Closed), "a stale link delivered");
+}
+
+/// A bare iroh endpoint on `ip`, with no Kickoff policy.
+async fn raw(ip: Ipv4Addr) -> Endpoint {
+    Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr((ip, 0))
+        .unwrap()
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .unwrap()
+}
+
+/// A relay map whose one relay is a closed loopback port: relay-only
+/// endpoints need a relay to exist, and this one keeps every test on the host.
+fn dead_relay() -> RelayMap {
+    RelayMap::from("http://127.0.0.1:9".parse::<iroh::RelayUrl>().unwrap())
+}
+
+/// Every address `observer` has recorded for `id`, however it learned it.
+async fn learned(observer: &Endpoint, id: EndpointId) -> Vec<TransportAddr> {
+    observer
+        .remote_info(id)
+        .await
+        .map(|info| info.into_addrs().map(|a| a.into_addr()).collect())
+        .unwrap_or_default()
+}
+
+/// SI-31, the leaked-endpoint test. An admitted peer hands the host's session
+/// endpoint to an outsider, whose handshake completes and is then rejected.
+/// Both record every candidate iroh shows them, and both see exactly the bound
+/// address. The interface change is the owner's response to one: the endpoint
+/// is recreated on the new address, and the same holds there. A relay-only
+/// endpoint shows nothing at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_31_leaked_endpoint_shows_only_the_bound_address() {
+    for ip in [Ipv4Addr::LOCALHOST, Ipv4Addr::new(127, 0, 0, 2)] {
+        let bind = IfaceAddr::loopback_at(ip);
+        let host = session(&RelayMap::empty(), bind, Role::Host).await.unwrap();
+        let leaked = host.addr();
+        let allowed: Vec<SocketAddr> = leaked.ip_addrs().copied().collect();
+        assert_eq!(allowed.len(), 1, "published {allowed:?}");
+        assert!(allowed.iter().all(|a| a.ip() == IpAddr::V4(ip)));
+
+        let admitted = raw(ip).await;
+        host.set_admitted([(admitted.id(), peer(1))].into_iter().collect());
+        let conn = tokio::time::timeout(WAIT, admitted.connect(leaked.clone(), SESSION_ALPN))
+            .await
+            .unwrap()
+            .unwrap();
+        let (mut send, _recv) = conn.open_bi().await.unwrap();
+        send.write_all(&[0, 0, 0, 1, 0]).await.unwrap();
+
+        let outsider = raw(ip).await;
+        let rejected = tokio::time::timeout(WAIT, async {
+            let conn = outsider.connect(leaked.clone(), SESSION_ALPN).await.ok()?;
+            Some(conn.closed().await)
+        })
+        .await
+        .unwrap();
+        assert!(
+            rejected.is_some(),
+            "the outsider's handshake never completed"
+        );
+        // Long enough for iroh's candidate exchange on the live connection.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        for (who, observer) in [("the admitted peer", &admitted), ("an outsider", &outsider)] {
+            let seen = learned(observer, host.id()).await;
+            assert!(!seen.is_empty(), "{who} recorded nothing");
+            for addr in &seen {
+                assert!(
+                    matches!(addr, TransportAddr::Ip(sock) if allowed.contains(sock)),
+                    "{who} learned {addr:?} beyond {allowed:?}"
+                );
+            }
+        }
+        host.close().await;
+    }
+
+    let host = session(&dead_relay(), SessionBind::RelayOnly, Role::Host)
+        .await
+        .unwrap();
+    let leaked = host.addr();
+    assert_eq!(
+        leaked.ip_addrs().count(),
+        0,
+        "relay-only published {leaked:?}"
+    );
+    let outsider = raw(Ipv4Addr::LOCALHOST).await;
+    let dialed = tokio::time::timeout(WAIT, outsider.connect(leaked, SESSION_ALPN)).await;
+    assert!(!matches!(dialed, Ok(Ok(_))));
+    let seen = learned(&outsider, host.id()).await;
+    assert!(
+        seen.iter().all(|a| !matches!(a, TransportAddr::Ip(_))),
+        "an outsider learned {seen:?} from a relay-only endpoint"
+    );
+}
+
+/// SI-31 and SI-29: a relay-only endpoint has no IP transport, so it owns no
+/// UDP socket. It cannot open or publish an IP path, runs no QAD probe, and
+/// its dials keep no IP destination.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_31_relay_only_endpoint_owns_no_socket_and_publishes_no_address() {
+    for role in [Role::Host, Role::Guest] {
+        let net = session(&dead_relay(), SessionBind::RelayOnly, role)
+            .await
+            .unwrap();
+        assert!(
+            net.ep.bound_sockets().is_empty(),
+            "a relay-only endpoint bound {:?}",
+            net.ep.bound_sockets()
+        );
+        assert_eq!(net.addr().ip_addrs().count(), 0);
+        assert!(net.guarded.is_none());
+    }
+    let host = session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Host)
+        .await
+        .unwrap();
+    let guest = session(&dead_relay(), SessionBind::RelayOnly, Role::Guest)
+        .await
+        .unwrap();
+    let p = peer(1);
+    host.set_admitted([(guest.id(), p)].into_iter().collect());
+    let pass = AdmitPass {
+        slot: p.slot,
+        generation: p.generation,
+    };
+    let dialed = guest.dial(host.addr(), pass).await;
+    assert_eq!(dialed.err(), Some(NetError::Egress), "dialed an IP address");
+}
+
+/// SI-29, the hook itself: a guest whose view names the host's address as its
+/// DNS resolver. `scope` and the connect guard allow loopback, so only the
+/// send guard in the vendored iroh stands between them, and nothing iroh
+/// sends there leaves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_29_send_guard_drops_what_iroh_sends_to_a_refused_destination() {
+    let host = session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Host)
+        .await
+        .unwrap();
+    let bind = IfaceAddr::loopback_at(Ipv4Addr::new(127, 0, 0, 2));
+    let view = View::new(bind, Vec::new(), Vec::new(), vec![Ipv4Addr::LOCALHOST]);
+    let guest = bind_session(&RelayMap::empty(), Some(view), Role::Guest)
+        .await
+        .unwrap();
+    let p = peer(1);
+    host.set_admitted([(guest.id(), p)].into_iter().collect());
+    let pass = AdmitPass {
+        slot: p.slot,
+        generation: p.generation,
+    };
+    let dialed = tokio::time::timeout(Duration::from_secs(3), guest.dial(host.addr(), pass)).await;
+    assert!(
+        !matches!(dialed, Ok(Ok(_))),
+        "the guest reached a destination its send guard refuses"
+    );
+    assert!(
+        guest.egress_denied() > 0,
+        "no packet was refused at the send path"
+    );
+}

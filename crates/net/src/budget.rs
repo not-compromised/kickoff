@@ -43,6 +43,13 @@ impl Bucket {
         self.tokens >= cost
     }
 
+    /// Whether the bucket has refilled completely: its owner has been idle
+    /// long enough that forgetting it loses nothing.
+    pub(crate) fn full(&mut self, now: Instant) -> bool {
+        self.refill(now);
+        self.tokens == self.burst
+    }
+
     fn refill(&mut self, now: Instant) {
         let elapsed = now.saturating_duration_since(self.last).as_nanos();
         self.last = now;

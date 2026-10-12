@@ -1,23 +1,25 @@
 //! The per-session endpoint (§3.4, §4.3): fresh key, one bound interface
-//! address, `kickoff/session/1`, and the admission hook.
+//! address or none, `kickoff/session/1`, and the admission hook.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 use iroh::endpoint::{
-    AfterHandshakeOutcome, Connection, EndpointHooks, Incoming, WeakConnectionHandle, presets,
+    AfterHandshakeOutcome, Builder, Connection, EndpointHooks, Incoming, WeakConnectionHandle,
+    presets,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode};
 use kickoff_wire::{AdmitPass, PeerRef, PeerSlot};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
-use crate::egress::{Egress, EgressGuard, IfaceAddr};
+use crate::egress::{Egress, EgressGuard, IfaceAddr, SendGuard, View};
+use crate::guarded::{self, Guarded};
+use crate::incoming::Gate;
 use crate::link::{self, CtlStream, Link};
 use crate::reassembly::GlobalBudget;
 use crate::{
-    AbortOnDrop, CONNECT_DEADLINE, HANDSHAKE_DEADLINE, NetError, PENDING_INCOMING, SESSION_ALPN,
-    close, transport,
+    AbortOnDrop, CONNECT_DEADLINE, HANDSHAKE_DEADLINE, NetError, SESSION_ALPN, close, transport,
 };
 
 /// Admitted links waiting for `accept`.
@@ -135,11 +137,43 @@ impl EndpointHooks for AdmissionHook {
     }
 }
 
-/// Fresh key per session, recreated when the default route changes. An empty
-/// relay map makes it direct-only.
+/// How a session endpoint reaches peers (§3.4, R2-9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionBind {
+    /// Direct paths from this one interface address, plus relays. Peers learn
+    /// this address and the QAD public address.
+    Direct(IfaceAddr),
+    /// Relays only: no IP transport and no QAD probe, so the endpoint owns no
+    /// UDP socket and no peer learns any address of this host.
+    RelayOnly,
+}
+
+impl From<IfaceAddr> for SessionBind {
+    fn from(addr: IfaceAddr) -> SessionBind {
+        SessionBind::Direct(addr)
+    }
+}
+
+/// Fresh key per session. A `Direct` endpoint is recreated by its owner when
+/// the default route changes. An empty relay map makes a `Direct` endpoint
+/// direct-only; a `RelayOnly` one needs at least one relay.
 pub async fn session(
     relays: &RelayMap,
-    bind: IfaceAddr,
+    bind: impl Into<SessionBind>,
+    role: Role,
+) -> Result<SessionNet, NetError> {
+    let bind = bind.into();
+    let view = match bind {
+        SessionBind::Direct(iface) => Some(View::current(iface, &[]).await),
+        SessionBind::RelayOnly => None,
+    };
+    bind_session(relays, view, role).await
+}
+
+/// `view` is `None` for a relay-only endpoint; tests pass a synthetic view.
+async fn bind_session(
+    relays: &RelayMap,
+    view: Option<View>,
     role: Role,
 ) -> Result<SessionNet, NetError> {
     let relay_mode = if relays.is_empty() {
@@ -153,35 +187,58 @@ pub async fn session(
     } else {
         (Vec::new(), 0)
     };
-    let egress = Egress::new(relays.clone(), Some(bind));
     let shared = Arc::new(Shared::default());
-    let ep = Endpoint::builder(presets::Minimal)
-        .clear_ip_transports()
-        .bind_addr((
-            if cfg!(feature = "mutant-si31-unbound") {
+    let make = || -> Builder {
+        Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .relay_mode(relay_mode.clone())
+            .alpns(alpns.clone())
+            .transport_config(transport(bidi, true))
+            .hooks(AdmissionHook {
+                shared: Arc::clone(&shared),
+                role,
+            })
+    };
+    let (ep, egress, guarded) = match view {
+        Some(view) => {
+            let bind = view.bind();
+            let egress = Egress::new(relays.clone(), Some(bind));
+            let ip = if cfg!(feature = "mutant-si31-unbound") {
                 std::net::Ipv4Addr::UNSPECIFIED
             } else {
                 bind.ip()
-            },
-            0,
-        ))
-        .map_err(|_| NetError::Bind)?
-        .relay_mode(relay_mode)
-        .alpns(alpns)
-        .transport_config(transport(bidi, true))
-        .hooks(EgressGuard(egress.clone()))
-        .hooks(AdmissionHook {
-            shared: Arc::clone(&shared),
-            role,
-        })
-        .bind()
-        .await
-        .map_err(|_| NetError::Bind)?;
+            };
+            let (ep, guarded) = guarded::bind(make, ip, &egress, view).await?;
+            (ep, egress, Some(guarded))
+        }
+        None if relays.is_empty() => return Err(NetError::Bind),
+        None => {
+            let egress = Egress::new(relays.clone(), None);
+            let builder = make().hooks(EgressGuard::new(egress.clone()));
+            let builder = if cfg!(feature = "mutant-si31-relay-only-binds") {
+                builder
+                    .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, 0))
+                    .map_err(|_| NetError::Bind)?
+            } else {
+                builder
+            };
+            let ep = builder.bind().await.map_err(|_| NetError::Bind)?;
+            (ep, egress, None)
+        }
+    };
+    let guard = guarded.as_ref().map(|g| Arc::clone(&g.guard));
+    let gate = Gate::new(guard.clone());
     let (tx, rx) = mpsc::channel(ACCEPT_QUEUE);
     let task = if serves {
-        tokio::spawn(host_accept(ep.clone(), Arc::clone(&shared), tx))
+        tokio::spawn(host_accept(
+            ep.clone(),
+            gate,
+            Arc::clone(&shared),
+            guard,
+            tx,
+        ))
     } else {
-        tokio::spawn(refuse_all(ep.clone()))
+        tokio::spawn(refuse_all(ep.clone(), gate))
     };
     Ok(SessionNet {
         ep,
@@ -190,6 +247,7 @@ pub async fn session(
         shared,
         links: tokio::sync::Mutex::new(rx),
         _accept: AbortOnDrop(task),
+        guarded,
     })
 }
 
@@ -200,6 +258,8 @@ pub struct SessionNet {
     shared: Arc<Shared>,
     links: tokio::sync::Mutex<mpsc::Receiver<(Link, CtlStream)>>,
     _accept: AbortOnDrop,
+    /// `None` for a relay-only endpoint, which has no IP transport.
+    guarded: Option<Guarded>,
 }
 
 impl SessionNet {
@@ -211,6 +271,12 @@ impl SessionNet {
     /// The bound interface address plus the QAD public address only.
     pub fn addr(&self) -> EndpointAddr {
         self.egress.publishable(self.ep.addr())
+    }
+
+    /// IP packets the send guard has dropped (§3.4), for health reporting.
+    /// Always 0 for a relay-only endpoint.
+    pub fn egress_denied(&self) -> u64 {
+        self.guarded.as_ref().map_or(0, |g| g.guard.denied())
     }
 
     /// Host: replaces the admitted set. Live connections whose key left the
@@ -245,6 +311,9 @@ impl SessionNet {
             .await
             .map_err(|_| NetError::Closed)?
             .map_err(|_| NetError::Closed)?;
+        if let Some(guarded) = &self.guarded {
+            guarded.guard.track(&conn);
+        }
         let peer = PeerRef {
             id: host.id,
             slot: PeerSlot::HOST,
@@ -267,20 +336,19 @@ impl SessionNet {
     }
 }
 
-async fn host_accept(ep: Endpoint, shared: Arc<Shared>, tx: mpsc::Sender<(Link, CtlStream)>) {
-    let pending = Arc::new(Semaphore::new(PENDING_INCOMING));
+async fn host_accept(
+    ep: Endpoint,
+    gate: Gate,
+    shared: Arc<Shared>,
+    guard: Option<Arc<SendGuard>>,
+    tx: mpsc::Sender<(Link, CtlStream)>,
+) {
     while let Some(incoming) = ep.accept().await {
-        let Ok(permit) = Arc::clone(&pending).try_acquire_owned() else {
-            incoming.refuse();
+        let Some((incoming, pending)) = gate.admit(incoming) else {
             continue;
         };
-        if !incoming.remote_addr_validated() {
-            if let Err(err) = incoming.retry() {
-                err.into_incoming().refuse();
-            }
-            continue;
-        }
         let shared = Arc::clone(&shared);
+        let guard = guard.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
             let deadline = if cfg!(feature = "mutant-si23-no-handshake-deadline") {
@@ -288,21 +356,28 @@ async fn host_accept(ep: Endpoint, shared: Arc<Shared>, tx: mpsc::Sender<(Link, 
             } else {
                 HANDSHAKE_DEADLINE
             };
-            let link = tokio::time::timeout(deadline, establish(incoming, shared)).await;
-            drop(permit);
-            if let Ok(Ok(link)) = link {
+            let link = tokio::time::timeout(deadline, establish(incoming, pending, shared, guard));
+            if let Ok(Ok(link)) = link.await {
                 let _ = tx.try_send(link);
             }
         });
     }
 }
 
-async fn establish(incoming: Incoming, shared: Arc<Shared>) -> Result<(Link, CtlStream), NetError> {
+/// The pending slot is held until the handshake completes; after it, only
+/// admitted keys remain, one connection each.
+async fn establish(
+    incoming: Incoming,
+    pending: OwnedSemaphorePermit,
+    shared: Arc<Shared>,
+    guard: Option<Arc<SendGuard>>,
+) -> Result<(Link, CtlStream), NetError> {
     let conn = incoming
         .accept()
         .map_err(|_| NetError::Closed)?
         .await
         .map_err(|_| NetError::Closed)?;
+    drop(pending);
     let key = conn.remote_id();
     let admitted = if cfg!(feature = "mutant-si18-no-establish-recheck") {
         shared.live().get(&key).map(|live| live.peer)
@@ -313,205 +388,18 @@ async fn establish(incoming: Incoming, shared: Arc<Shared>) -> Result<(Link, Ctl
         conn.close(close::NOT_ADMITTED, b"");
         return Err(NetError::Closed);
     };
+    if let Some(guard) = &guard {
+        guard.track(&conn);
+    }
     link::Link::accept(conn, key, peer, shared).await
 }
 
 /// Guests accept nothing (SI-21): every attempt is refused before TLS.
-async fn refuse_all(ep: Endpoint) {
+async fn refuse_all(ep: Endpoint, gate: Gate) {
     while let Some(incoming) = ep.accept().await {
-        incoming.refuse();
+        gate.refuse(incoming);
     }
 }
 
 #[cfg(test)]
-mod tests {
-    //! SI-18 holds an unknown or stale session key back in several layers.
-    //! Each test here drives one layer alone, by hand, so removing just that
-    //! layer (its `mutant-si18-*` feature) fails its test even though the
-    //! other layers would still refuse the key end to end.
-
-    use std::net::Ipv4Addr;
-    use std::time::Duration;
-
-    use iroh::SecretKey;
-    use kickoff_wire::{Generation, GuestMsg, LanDatagram};
-
-    use super::*;
-
-    const WAIT: Duration = Duration::from_secs(5);
-
-    fn peer(generation: u64) -> PeerRef {
-        PeerRef {
-            id: SecretKey::generate().public(),
-            slot: PeerSlot::new(2).unwrap(),
-            generation: Generation::new(generation),
-        }
-    }
-
-    async fn endpoint(serve: bool, hook: Option<AdmissionHook>) -> Endpoint {
-        let alpns = if serve {
-            vec![SESSION_ALPN.to_vec()]
-        } else {
-            Vec::new()
-        };
-        let builder = Endpoint::builder(presets::Minimal)
-            .clear_ip_transports()
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .relay_mode(RelayMode::Disabled)
-            .alpns(alpns)
-            .transport_config(transport(HOST_BIDI, true));
-        match hook {
-            Some(hook) => builder.hooks(hook),
-            None => builder,
-        }
-        .bind()
-        .await
-        .unwrap()
-    }
-
-    /// `client` dials `host`; the host's side comes back unaccepted, so the
-    /// test applies a layer to it by hand.
-    async fn dial(
-        host: &Endpoint,
-        client: &Endpoint,
-    ) -> (Incoming, tokio::task::JoinHandle<Option<Connection>>) {
-        let (to, client) = (host.addr(), client.clone());
-        let dialing = tokio::spawn(async move { client.connect(to, SESSION_ALPN).await.ok() });
-        let incoming = tokio::time::timeout(WAIT, host.accept())
-            .await
-            .unwrap()
-            .unwrap();
-        (incoming, dialing)
-    }
-
-    fn admitted(entries: &[(EndpointId, PeerRef)]) -> Arc<AdmittedSet> {
-        Arc::new(entries.iter().copied().collect())
-    }
-
-    /// Layer 1: the handshake hook refuses a key outside the admitted set
-    /// before iroh hands the connection out.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn si_18_handshake_hook_rejects_an_unadmitted_key() {
-        let shared = Arc::new(Shared::default());
-        let hook = AdmissionHook {
-            shared: Arc::clone(&shared),
-            role: Role::Host,
-        };
-        let host = endpoint(true, Some(hook)).await;
-        let stranger = endpoint(false, None).await;
-        let (incoming, _dialing) = dial(&host, &stranger).await;
-        let handshake = tokio::time::timeout(WAIT, incoming.accept().unwrap())
-            .await
-            .unwrap();
-        assert!(
-            handshake.is_err(),
-            "an unadmitted key got through the handshake hook"
-        );
-        assert!(shared.live().is_empty());
-    }
-
-    /// Layer 2: the key the hook admitted is looked up again once the
-    /// connection is accepted. Here the owner removed it in between.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn si_18_admission_is_rechecked_after_the_handshake() {
-        let shared = Arc::new(Shared::default());
-        let host = endpoint(true, None).await;
-        let guest = endpoint(false, None).await;
-        // What the hook recorded when it admitted the key.
-        let (first, _dialing) = dial(&host, &guest).await;
-        let recorded = first.accept().unwrap().await.unwrap();
-        shared.live().insert(
-            guest.id(),
-            Live {
-                peer: peer(1),
-                conn: recorded.weak_handle(),
-            },
-        );
-        // The owner has since published a set without it.
-        let (incoming, _dialing) = dial(&host, &guest).await;
-        let established = tokio::time::timeout(WAIT, establish(incoming, shared)).await;
-        assert!(
-            matches!(established, Ok(Err(NetError::Closed))),
-            "a key removed after the handshake was not refused"
-        );
-    }
-
-    /// Layer 3: a link is handed out only if its generation is still current
-    /// when the guest's control stream arrives.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn si_18_link_refused_when_its_generation_moved_before_the_stream() {
-        let shared = Arc::new(Shared::default());
-        let host = endpoint(true, None).await;
-        let guest = endpoint(false, None).await;
-        let read_as = peer(1);
-        let now = PeerRef {
-            generation: Generation::new(2),
-            ..read_as
-        };
-        shared.admitted.store(admitted(&[(guest.id(), now)]));
-        let (incoming, dialing) = dial(&host, &guest).await;
-        let conn = incoming.accept().unwrap().await.unwrap();
-        let client = dialing.await.unwrap().unwrap();
-        let (mut send, _recv) = client.open_bi().await.unwrap();
-        send.write_all(&[0]).await.unwrap();
-        let link = tokio::time::timeout(
-            WAIT,
-            Link::accept(conn, guest.id(), read_as, Arc::clone(&shared)),
-        )
-        .await
-        .unwrap();
-        assert!(
-            link.is_err(),
-            "a link was handed out under a generation that is no longer current"
-        );
-    }
-
-    /// Layer 4: every datagram re-checks the generation, so a stale link
-    /// whose connection is somehow still open delivers nothing. The set is
-    /// swapped here without `set_admitted`, which would also close it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn si_18_each_datagram_rechecks_the_generation() {
-        let host = session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Host)
-            .await
-            .unwrap();
-        let guest = session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Guest)
-            .await
-            .unwrap();
-        let p = peer(1);
-        host.set_admitted([(guest.id(), p)].into_iter().collect());
-        let pass = AdmitPass {
-            slot: p.slot,
-            generation: p.generation,
-        };
-        let (guest_link, mut ctl) = guest.dial(host.addr(), pass).await.unwrap();
-        ctl.send(&GuestMsg::Hello {
-            generation: p.generation,
-        })
-        .await
-        .unwrap();
-        let (host_link, _host_ctl) = tokio::time::timeout(WAIT, host.accept())
-            .await
-            .unwrap()
-            .unwrap();
-
-        let bumped = PeerRef {
-            generation: Generation::new(2),
-            ..p
-        };
-        host.shared
-            .admitted
-            .store(admitted(&[(guest.id(), bumped)]));
-        guest_link.send_lan(&LanDatagram {
-            peer: PeerSlot::HOST,
-            bcast: false,
-            src_port: 7777,
-            dst_port: 7777,
-            payload: bytes::Bytes::from_static(b"stale"),
-        });
-        let got = tokio::time::timeout(WAIT, host_link.recv_lan())
-            .await
-            .unwrap();
-        assert_eq!(got.err(), Some(NetError::Closed), "a stale link delivered");
-    }
-}
+mod tests;

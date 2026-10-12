@@ -27,14 +27,26 @@ mutant-si23-no-per-link-reassembly-cap = []
 mutant-si23-no-global-reassembly-cap = []
 mutant-si23-door-no-invalid-limit = []
 mutant-si23-no-handshake-deadline = []
+mutant-si23-no-handshake-rate = []
+mutant-si23-door-no-awaiting-cap = []
+mutant-si23-door-no-identity-cap = []
+mutant-si23-door-no-join-deadline = []
 mutant-si29-scope-any = []
 mutant-si29-no-connect-guard = []
+mutant-si29-no-send-guard = []
+mutant-si29-guard-any-range = []
+mutant-si29-guard-ignores-host-view = []
+mutant-si29-guard-any-port = []
+mutant-si29-guard-no-destination-cap = []
+mutant-si29-guard-keeps-cache = []
 mutant-si31-publish-all = []
 mutant-si31-unbound = []
+mutant-si31-relay-only-binds = []
 
 [dependencies]
 kickoff-wire.workspace = true
 kickoff-secret.workspace = true
+kickoff-send-guard.workspace = true
 iroh.workspace = true
 thiserror.workspace = true
 bytes.workspace = true

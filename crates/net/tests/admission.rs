@@ -206,3 +206,58 @@ async fn si_23_silent_connection_closed_at_the_handshake_deadline() {
     let closed = tokio::time::timeout(Duration::from_secs(8), conn.closed()).await;
     assert!(closed.is_ok(), "a silent connection outlived the deadline");
 }
+
+/// SI-23: a session endpoint an admitted peer leaked, flooded by fresh
+/// identities from one source. At most 8 handshakes a second from that source
+/// reach TLS; the rest are refused before it. The established link keeps
+/// working throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_leaked_endpoint_flood_with_fresh_identities() {
+    let host = node(Role::Host).await;
+    let guest = node(Role::Guest).await;
+    let (host_link, guest_link) = pair(&host, &guest, peer(2, 1)).await;
+    let leaked = host.addr();
+
+    let mut flooders = Vec::new();
+    for _ in 0..40 {
+        flooders.push(raw_endpoint().await);
+    }
+    let mut dials = tokio::task::JoinSet::new();
+    for ep in &flooders {
+        let (ep, to) = (ep.clone(), leaked.clone());
+        dials.spawn(async move {
+            match tokio::time::timeout(WAIT, ep.connect(to, SESSION_ALPN)).await {
+                Ok(Err(err)) => !refused_before_tls(&err),
+                _ => true,
+            }
+        });
+    }
+    let mut reached_tls = 0;
+    while let Some(reached) = dials.join_next().await {
+        reached_tls += usize::from(reached.unwrap());
+    }
+    assert!(
+        reached_tls <= 10,
+        "{reached_tls} of 40 handshakes from one source reached TLS"
+    );
+
+    guest_link.send_lan(&lan(64, 1));
+    let got = tokio::time::timeout(WAIT, host_link.recv_lan())
+        .await
+        .unwrap();
+    assert!(got.is_ok(), "the established link stopped delivering");
+}
+
+fn refused_before_tls(err: &iroh::endpoint::ConnectError) -> bool {
+    use iroh::endpoint::{ConnectError, ConnectingError, ConnectionError, TransportErrorCode};
+    let source = match err {
+        ConnectError::Connection { source, .. }
+        | ConnectError::Connecting {
+            source: ConnectingError::ConnectionError { source, .. },
+            ..
+        } => source,
+        _ => return false,
+    };
+    matches!(source, ConnectionError::ConnectionClosed(close)
+        if close.error_code == TransportErrorCode::CONNECTION_REFUSED)
+}

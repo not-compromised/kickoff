@@ -3,15 +3,18 @@
 //!
 //! Two endpoints per node. The **door** carries the persistent identity, is
 //! relay-only and speaks only `kickoff/join/1`. The **session** endpoint has a
-//! fresh key per session, binds one interface address, and on the host accepts
-//! `kickoff/session/1` only from session keys in the admitted set the
-//! admission owner last published. Guests' session endpoints accept nothing
-//! (SI-21). Only admitted peers learn a session endpoint's address (SI-31).
-//! `egress` is the one place data becomes a destination (SI-29).
+//! fresh key per session, binds one interface address or is relay-only, and on
+//! the host accepts `kickoff/session/1` only from session keys in the admitted
+//! set the admission owner last published. Guests' session endpoints accept
+//! nothing (SI-21). Only admitted peers learn a session endpoint's address
+//! (SI-31). `egress` is the one place data becomes a destination, and its send
+//! guard sees every IP packet, including those iroh addresses itself (SI-29).
 
 mod budget;
 mod door;
 mod egress;
+mod guarded;
+mod incoming;
 mod link;
 mod reassembly;
 mod session;
@@ -24,7 +27,7 @@ use iroh::endpoint::{QuicTransportConfig, VarInt};
 pub use door::{Door, JoinAttempt, door, door_loopback};
 pub use egress::IfaceAddr;
 pub use link::{CtlStream, Link, LinkHealth, PathStatus};
-pub use session::{AdmittedSet, Role, SessionNet, session};
+pub use session::{AdmittedSet, Role, SessionBind, SessionNet, session};
 
 use kickoff_wire::JoinRefused;
 
