@@ -280,6 +280,27 @@ pub(crate) struct SendGuard {
     state: Mutex<State>,
     conns: Mutex<HashMap<u64, WeakConnectionHandle>>,
     denied: AtomicU64,
+    #[cfg(test)]
+    track_schedule: Mutex<Option<TrackSchedule>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct TrackSchedule {
+    context: u64,
+    snapshot_ready: std::sync::mpsc::SyncSender<()>,
+    packet_held: std::sync::Arc<std::sync::Barrier>,
+    state_held: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+struct TrackScheduleReset<'a>(&'a Mutex<Option<TrackSchedule>>);
+
+#[cfg(test)]
+impl Drop for TrackScheduleReset<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
 }
 
 impl SendGuard {
@@ -294,7 +315,33 @@ impl SendGuard {
             }),
             conns: Mutex::new(HashMap::new()),
             denied: AtomicU64::new(0),
+            #[cfg(test)]
+            track_schedule: Mutex::new(None),
         }
+    }
+
+    /// Schedule one context against an actual transport admission, never a
+    /// process-global hook that could pause unrelated endpoints.
+    #[cfg(test)]
+    pub(crate) fn schedule_track(
+        &self,
+        context: u64,
+        snapshot_ready: std::sync::mpsc::SyncSender<()>,
+        packet_held: std::sync::Arc<std::sync::Barrier>,
+        state_held: std::sync::Arc<std::sync::Barrier>,
+    ) -> impl Drop + use<'_> {
+        let mut schedule = self
+            .track_schedule
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(schedule.is_none());
+        *schedule = Some(TrackSchedule {
+            context,
+            snapshot_ready,
+            packet_held,
+            state_held,
+        });
+        TrackScheduleReset(&self.track_schedule)
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -406,12 +453,30 @@ impl SendGuard {
         let context = conn.send_context();
         let owner = Owner::Remote(*conn.remote_id().as_bytes());
         let weak = conn.weak_handle();
-        if cfg!(feature = "mutant-si23-guard-locks-before-connection") {
-            self.state()
-                .associate(conn.send_context(), owner, None, true, Instant::now());
-        } else {
-            self.state()
-                .associate(context, owner, None, true, Instant::now());
+        #[cfg(test)]
+        let schedule = self
+            .track_schedule
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|schedule| schedule.context == context)
+            .cloned();
+        #[cfg(test)]
+        if let Some(schedule) = &schedule {
+            assert!(schedule.snapshot_ready.send(()).is_ok());
+            schedule.packet_held.wait();
+        }
+        {
+            let mut state = self.state();
+            #[cfg(test)]
+            if let Some(schedule) = &schedule {
+                schedule.state_held.wait();
+            }
+            if cfg!(feature = "mutant-si23-guard-locks-before-connection") {
+                state.associate(conn.send_context(), owner, None, true, Instant::now());
+            } else {
+                state.associate(context, owner, None, true, Instant::now());
+            }
         }
         let full = self
             .conns

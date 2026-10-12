@@ -448,7 +448,17 @@ async fn si_29_transport_carries_distinct_connection_contexts() {
 #[test]
 #[allow(clippy::panic)]
 fn si_23_guard_connection_snapshots_do_not_block_packets() {
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    struct SupervisedChild(Option<std::process::Child>);
+    impl Drop for SupervisedChild {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "session::tests::guard_connection_snapshot_worker",
@@ -459,21 +469,28 @@ fn si_23_guard_connection_snapshots_do_not_block_packets() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    let mut child = SupervisedChild(Some(child));
     let started = std::time::Instant::now();
     loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
+        if let Some(status) = child.0.as_mut().unwrap().try_wait().unwrap() {
+            let output = child.0.take().unwrap().wait_with_output().unwrap();
+            let diagnostics = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
             );
+            eprintln!("{diagnostics}");
+            assert!(status.success(), "{}", diagnostics);
             break;
         }
         if started.elapsed() >= Duration::from_secs(15) {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("concurrent admission and game packets deadlocked");
+            child.0.as_mut().unwrap().kill().unwrap();
+            let output = child.0.take().unwrap().wait_with_output().unwrap();
+            panic!(
+                "concurrent admission and game packets deadlocked\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -484,6 +501,136 @@ async fn guard_connection_snapshot_worker() {
     if std::env::var_os("KICKOFF_GUARD_STRESS").is_none() {
         return;
     }
+    // Noq's real driver holds the connection mutex throughout this callback.
+    // Rendezvous after snapshots, then after state acquisition, so tracking
+    // and packet admission must attempt the competing locks in that order.
+    struct ScheduledGuard {
+        guard: Arc<SendGuard>,
+        armed: std::sync::atomic::AtomicU64,
+        packet_held: Arc<std::sync::Barrier>,
+        state_held: Arc<std::sync::Barrier>,
+        completed: std::sync::mpsc::SyncSender<bool>,
+    }
+    impl kickoff_send_guard::Guard for ScheduledGuard {
+        fn admit(&self, context: u64, dst: SocketAddr) -> bool {
+            use std::sync::atomic::Ordering;
+            let selected = context != 0
+                && self
+                    .armed
+                    .compare_exchange(context, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok();
+            if selected {
+                eprintln!("guard proof: target packet holds transport connection");
+                self.packet_held.wait();
+                self.state_held.wait();
+                eprintln!("guard proof: tracking holds state, invoking real packet guard");
+            }
+            let admitted = kickoff_send_guard::Guard::admit(self.guard.as_ref(), context, dst);
+            if selected {
+                self.completed.send(admitted).unwrap();
+            }
+            admitted
+        }
+        fn associate(&self, context: u64, remote: [u8; 32]) {
+            kickoff_send_guard::Guard::associate(self.guard.as_ref(), context, remote);
+        }
+        fn expect(&self, context: u64, remote: [u8; 32]) {
+            kickoff_send_guard::Guard::expect(self.guard.as_ref(), context, remote);
+        }
+        fn probe(&self, context: u64, dst: SocketAddr) {
+            kickoff_send_guard::Guard::probe(self.guard.as_ref(), context, dst);
+        }
+        fn forget(&self, context: u64) {
+            kickoff_send_guard::Guard::forget(self.guard.as_ref(), context);
+        }
+    }
+
+    let bind = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let guard = Arc::new(SendGuard::new(View::new(
+        IfaceAddr::loopback(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )));
+    let packet_held = Arc::new(std::sync::Barrier::new(2));
+    let state_held = Arc::new(std::sync::Barrier::new(2));
+    let (packet_completed, admitted_packet) = std::sync::mpsc::sync_channel(1);
+    let scheduled = Arc::new(ScheduledGuard {
+        guard: Arc::clone(&guard),
+        armed: std::sync::atomic::AtomicU64::new(0),
+        packet_held: Arc::clone(&packet_held),
+        state_held: Arc::clone(&state_held),
+        completed: packet_completed,
+    });
+    let registered = kickoff_send_guard::register(bind, scheduled.clone()).unwrap();
+    let server = Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr(bind)
+        .unwrap()
+        .hooks(FixtureGuard {
+            _registration: registered,
+        })
+        .relay_mode(RelayMode::Disabled)
+        .alpns(vec![SESSION_ALPN.to_vec()])
+        .transport_config(transport(HOST_BIDI, true))
+        .bind()
+        .await
+        .unwrap();
+    let client = endpoint(false, None).await;
+    let client_addr = client.addr();
+    let peer_addr = *client_addr.ip_addrs().next().unwrap();
+    guard.answer(peer_addr, std::time::Instant::now());
+    let (receiving, sending) = tokio::join!(
+        async { client.connect(server.addr(), SESSION_ALPN).await.unwrap() },
+        async { server.accept().await.unwrap().await.unwrap() },
+    );
+    // Accepted IP connections start with the peer's real socket address;
+    // the client's initial mapped route can send through an actor instead.
+    assert!(
+        sending
+            .paths()
+            .iter()
+            .any(|path| path.remote_addr() == &TransportAddr::Ip(peer_addr))
+    );
+    let context = sending.send_context();
+    assert_ne!(context, 0);
+    let (snapshot_ready, snapshot_reached) = std::sync::mpsc::sync_channel(1);
+    let schedule = guard.schedule_track(context, snapshot_ready, packet_held, state_held);
+    let (track_completed, tracked) = std::sync::mpsc::sync_channel(1);
+    let tracking_guard = Arc::clone(&guard);
+    let tracking_conn = sending.clone();
+    let tracking = std::thread::spawn(move || {
+        tracking_guard.track(&tracking_conn);
+        track_completed.send(()).unwrap();
+    });
+    snapshot_reached.recv_timeout(WAIT).unwrap();
+    eprintln!("guard proof: target connection snapshots complete, arming packet rendezvous");
+    scheduled
+        .armed
+        .store(context, std::sync::atomic::Ordering::SeqCst);
+    let payload = bytes::Bytes::from_static(b"guard-lock-order-progress");
+    sending.send_datagram(payload.clone()).unwrap();
+    tracked.recv_timeout(WAIT).unwrap();
+    assert!(
+        admitted_packet.recv_timeout(WAIT).unwrap(),
+        "real guard refused target packet"
+    );
+    assert_eq!(
+        tokio::time::timeout(WAIT, receiving.read_datagram())
+            .await
+            .unwrap()
+            .unwrap(),
+        payload
+    );
+    tracking.join().unwrap();
+    drop(schedule);
+    eprintln!("guard proof: tracking and real packet admission completed, datagram received");
+    client.close().await;
+    server.close().await;
+
     for _ in 0..3 {
         let host = Arc::new(
             session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Host)

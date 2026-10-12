@@ -203,7 +203,7 @@ note = "the policy stops checking that rows have registered mutants"
 
 [[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-no-trusted-slots", test = "si_23_guard_preserves_slots_for_expected_or_admitted_peers", note = "unknown identities can consume every guard context and remote budget slot"
 
-[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-locks-before-connection", test = "si_23_guard_connection_snapshots_do_not_block_packets", note = "tracking locks guard state before reading the transport connection, inverting the send-driver lock order"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-locks-before-connection", test = "si_23_guard_connection_snapshots_do_not_block_packets", note = "forced overlap of real transport packet admission and state-held tracking exposes the inverted send-driver lock order; also retains six-peer packet progress"
 
 [[mutant]]
 si = "SI-10"
