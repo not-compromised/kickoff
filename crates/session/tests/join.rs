@@ -534,3 +534,87 @@ async fn si_31_bearer_sessions_carry_game_frames_through_a_real_relay() {
     let received = next_udp(&host_game, WAIT).await.unwrap();
     assert_eq!(received.payload, b"through-relay");
 }
+
+/// TLS completed, but the guest waits past its two-second Hello window before
+/// making any stream visible. A fresh receive deadline would accept this Hello.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_complete_hello_after_tls_deadline_is_refused() {
+    let host = host().await;
+    let identity = Identity::new().await;
+    let raw = raw_endpoint_with_window(std::net::Ipv4Addr::LOCALHOST, 512 * 1024).await;
+    let ticket = host.bound(identity.id());
+    let admitted = identity
+        .door
+        .request_join(&ticket, raw_request(&ticket, raw.id()))
+        .await
+        .unwrap();
+    let conn = raw
+        .connect(admitted.session_addr, kickoff_net::SESSION_ALPN)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2400)).await;
+    if let Ok((mut send, mut recv)) = conn.open_bi().await {
+        let frame = kickoff_wire::encode_framed(&kickoff_wire::GuestMsg::Hello {
+            generation: admitted.pass.generation,
+        })
+        .unwrap();
+        let _ = send.write_all(&frame).await;
+        let mut prefix = [0u8; 4];
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            recv.read_exact(&mut prefix),
+        )
+        .await;
+        assert!(
+            !matches!(answer, Ok(Ok(()))),
+            "a late complete Hello received a host roster"
+        );
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), conn.closed())
+            .await
+            .is_ok()
+    );
+}
+
+/// A first byte within the window cannot start another two-second body wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_partial_hello_does_not_restart_tls_deadline() {
+    let host = host().await;
+    let identity = Identity::new().await;
+    let raw = raw_endpoint_with_window(std::net::Ipv4Addr::LOCALHOST, 512 * 1024).await;
+    let ticket = host.bound(identity.id());
+    let admitted = identity
+        .door
+        .request_join(&ticket, raw_request(&ticket, raw.id()))
+        .await
+        .unwrap();
+    let conn = raw
+        .connect(admitted.session_addr, kickoff_net::SESSION_ALPN)
+        .await
+        .unwrap();
+    let frame = kickoff_wire::encode_framed(&kickoff_wire::GuestMsg::Hello {
+        generation: admitted.pass.generation,
+    })
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    send.write_all(&frame[..1]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let _ = send.write_all(&frame[1..]).await;
+    let mut prefix = [0u8; 4];
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        recv.read_exact(&mut prefix),
+    )
+    .await;
+    assert!(
+        !matches!(answer, Ok(Ok(()))),
+        "a partial Hello restarted the post-TLS deadline"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), conn.closed())
+            .await
+            .is_ok()
+    );
+}

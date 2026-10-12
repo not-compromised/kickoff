@@ -356,3 +356,75 @@ reason = "layered count, type and lease checks; independent count and descriptor
 [[unmutated]]
 test = "si_7_installed_daemon_modes_authenticate_with_hardening"
 reason = "installed executable startup composition; negative protections have independent IPC mutants"
+
+[[mutant]]
+si = "SI-41"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si41-join-after-end"
+test = "si_41_end_refuses_bearer_join_after_final_clear"
+note = "the admission owner allows a bearer join to create a prompt after ending"
+
+[[mutant]]
+si = "SI-18"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si18-link-after-end"
+test = "si_18_end_refuses_delayed_hello_after_route_drain"
+note = "the admission owner lets delayed Hello activate a route after ending"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-net"
+feature = "mutant-si23-door-unbounded-reply"
+test = "si_23_door_reply_write_and_linger_share_one_deadline"
+note = "zero reply credit blocks writes before the reply lifetime is bounded"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-net"
+feature = "mutant-si23-door-unbounded-overflow"
+test = "si_23_door_overflow_closes_without_retaining_reply_tasks"
+note = "queue overflow spawns a task that retains a blocked reply"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si23-no-priority-replies"
+test = "si_23_zero_credit_replies_preserve_priority_capacity"
+note = "priority joins compete with blocked general replies for the same permits"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si23-pong-deadline-during-write"
+test = "si_23_blocked_control_write_cannot_suspend_pong_expiry"
+note = "a blocked roster or Ping write stops polling the absolute Pong deadline"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-net"
+feature = "mutant-si23-fresh-hello-deadline"
+test = "si_23_no_control_stream_closed_two_seconds_after_tls"
+note = "stream arrival retains five seconds after TLS"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-session"
+feature = "mutant-si23-fresh-hello-deadline"
+test = "si_23_complete_hello_after_tls_deadline_is_refused"
+note = "late stream arrival starts a fresh Hello decoding window"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-session"
+feature = "mutant-si23-fresh-hello-deadline"
+test = "si_23_partial_hello_does_not_restart_tls_deadline"
+note = "a first byte near the deadline restarts Hello decoding"

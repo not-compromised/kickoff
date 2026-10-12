@@ -171,3 +171,16 @@ Passing `&RelayMap` to the door or session factory keeps the default CA roots.
 A trusted adapter may pass `Relays::with_ca`, as the in-process HTTPS relay
 fixture does with its generated CA. Peer messages cannot provide roots, and
 the wire decoder still accepts only canonical HTTPS relay URLs.
+
+## Admission lifetime bounds
+
+A door answer's five-second lifetime includes its write, stream finish and
+close acknowledgement. Cancellation and timeout close the connection. Full
+admission queues close overflow requests immediately, without spawning reply
+tasks. `JoinAttempt::is_priority` carries the reserved-queue classification to
+the admission owner's reserved reply pool.
+
+The host's session admission hook records a two-second absolute Hello deadline
+at TLS completion. Waiting for the first control stream consumes that window;
+`CtlStream::hello_deadline` carries it through the accept queue to the session
+owner's decoder. The TLS handshake retains its own five-second bound.

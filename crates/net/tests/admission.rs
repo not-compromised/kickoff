@@ -188,8 +188,8 @@ async fn si_21_guest_refuses_even_a_key_it_was_told_to_admit() {
 }
 
 /// SI-23: an admitted key that completes the handshake and never opens its
-/// control stream is dropped at the handshake deadline (5 s), so silent
-/// connections cannot hold the 16 pending slots.
+/// control stream is dropped two seconds after TLS completion. The legacy
+/// test name also covers removal of the handshake/stream deadline feature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn si_23_silent_connection_closed_at_the_handshake_deadline() {
     let host = node(Role::Host).await;
@@ -260,4 +260,22 @@ fn refused_before_tls(err: &iroh::endpoint::ConnectError) -> bool {
     };
     matches!(source, ConnectionError::ConnectionClosed(close)
         if close.error_code == TransportErrorCode::CONNECTION_REFUSED)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_no_control_stream_closed_two_seconds_after_tls() {
+    let host = node(Role::Host).await;
+    let silent = raw_endpoint().await;
+    host.set_admitted(
+        [(silent.id(), peer(2, 1))]
+            .into_iter()
+            .collect::<AdmittedSet>(),
+    );
+    let conn = silent.connect(host.addr(), SESSION_ALPN).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(2500), conn.closed())
+            .await
+            .is_ok(),
+        "stream arrival retained the old five-second establishment window"
+    );
 }

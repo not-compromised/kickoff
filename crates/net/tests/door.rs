@@ -264,3 +264,36 @@ async fn door_speaks_only_the_join_alpn() {
     let ep = raw_endpoint().await;
     assert!(raw_dial(&ep, host_door.addr(), SESSION_ALPN).await.is_err());
 }
+
+/// Real QUIC receive credit is zero, while client-to-server writes remain usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_door_reply_write_and_linger_share_one_deadline() {
+    let host = door().await;
+    let guest = raw_endpoint_with_window(Ipv4Addr::LOCALHOST, 0).await;
+    let conn = guest.connect(host.addr(), JOIN_ALPN).await.unwrap();
+    let (mut send, _recv) = conn.open_bi().await.unwrap();
+    send.write_all(&kickoff_wire::encode_framed(&request(guest.id())).unwrap())
+        .await
+        .unwrap();
+    send.finish().unwrap();
+    let attempt = tokio::time::timeout(WAIT, host.next_join())
+        .await
+        .unwrap()
+        .unwrap();
+    let answer = attempt.answer(Err(JoinRefused::InvalidCap));
+    tokio::pin!(answer);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut answer)
+            .await
+            .is_err(),
+        "the zero-credit write did not block"
+    );
+    assert!(conn.close_reason().is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(6), &mut answer)
+            .await
+            .is_ok(),
+        "zero reply credit held the answer beyond its complete lifetime"
+    );
+    assert!(tokio::time::timeout(WAIT, conn.closed()).await.is_ok());
+}

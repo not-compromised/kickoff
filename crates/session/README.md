@@ -241,3 +241,36 @@ and open questions.
 - The §7 hot path (≤ 2 µs) is timed in `kickoff-vlan`'s `tests/hot_path.rs`,
   release build, not a criterion bench.
 - Recreating the session endpoint on a default-route change (kickoffd's job).
+
+## Lifecycle and deadline boundaries
+
+The admission owner marks ending, clears approvals and drains routes while
+holding the admission mutex. Invite creation, commands, sweep and link-loss
+callbacks check that same state under that mutex; `join` and `link_up` reject
+before changing a seat. The drained links keep their published admission long
+enough to receive `End`. Farewell waits run after releasing the mutex.
+
+The lock order is admission, routes, LAN, then publication. Routing readers
+only send or deliver; they never acquire admission. Draining takes the routing
+write lock and waits for existing deliveries and sends to finish. No route can
+be activated afterward. The actor paths release LAN locks before ending, and
+control writes and farewell waits hold none of these locks.
+
+Door replies use sixteen permits, with eight reserved for bound and trusted
+identities. A full reply pool closes that request without waiting outside the
+door's event selection. Door answer writes and close acknowledgement share a
+five-second total deadline; queue overflow closes immediately.
+
+The session endpoint captures the absolute two-second Hello deadline in its
+TLS admission hook. The stream wait and host decoder use that same deadline,
+including time spent waiting in the accept queue. TLS itself has its separate
+five-second bound. Every host control write runs against the remaining
+fifteen-second Pong window, so blocked roster and Ping writes cannot suspend
+idle expiry. Status messages and roster changes never renew that window.
+
+The lifecycle tests observe `End`, retain the public `Leave` future at that
+boundary, and submit a late bearer join or an already-admitted delayed Hello.
+This prevents endpoint closure from masking post-clear approvals or post-drain
+frames. The door and liveness fixtures advertise zero QUIC receive credit and
+keep the transport alive, rather than approximating backpressure by merely
+avoiding application reads. Dedicated mutants remove each boundary.

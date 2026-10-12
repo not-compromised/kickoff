@@ -26,6 +26,7 @@ use crate::{
 
 /// Admitted links waiting for `accept`.
 const ACCEPT_QUEUE: usize = 8;
+const HELLO_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 /// Bidi streams a guest may hold open on the host: control plus three blobs (§6.3).
 const HOST_BIDI: u32 = 4;
 
@@ -74,6 +75,7 @@ pub(crate) struct Shared {
 struct Live {
     peer: PeerRef,
     conn: WeakConnectionHandle,
+    hello_deadline: tokio::time::Instant,
 }
 
 impl Live {
@@ -104,6 +106,8 @@ struct AdmissionHook {
 
 impl EndpointHooks for AdmissionHook {
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
+        let now = tokio::time::Instant::now();
+        let hello_deadline = now.checked_add(HELLO_WINDOW).unwrap_or(now);
         if conn.side().is_client() {
             return AfterHandshakeOutcome::Accept;
         }
@@ -133,6 +137,7 @@ impl EndpointHooks for AdmissionHook {
             Live {
                 peer,
                 conn: conn.weak_handle(),
+                hello_deadline,
             },
         );
         AfterHandshakeOutcome::Accept
@@ -361,14 +366,10 @@ async fn host_accept(
         let guard = guard.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            let deadline = if cfg!(feature = "mutant-si23-no-handshake-deadline") {
-                std::time::Duration::from_secs(86_400)
-            } else {
-                HANDSHAKE_DEADLINE
-            };
-            let link = tokio::time::timeout(deadline, establish(incoming, pending, shared, guard));
-            if let Ok(Ok(link)) = link.await {
-                let _ = tx.try_send(link);
+            if let Ok(link) = establish(incoming, pending, shared, guard).await
+                && let Err(full) = tx.try_send(link)
+            {
+                full.into_inner().0.close();
             }
         });
     }
@@ -382,10 +383,15 @@ async fn establish(
     shared: Arc<Shared>,
     guard: Option<Arc<SendGuard>>,
 ) -> Result<(Link, CtlStream), NetError> {
-    let conn = incoming
-        .accept()
-        .map_err(|_| NetError::Closed)?
+    let handshake = incoming.accept().map_err(|_| NetError::Closed)?;
+    let limit = if cfg!(feature = "mutant-si23-no-handshake-deadline") {
+        std::time::Duration::from_secs(86_400)
+    } else {
+        HANDSHAKE_DEADLINE
+    };
+    let conn = tokio::time::timeout(limit, handshake)
         .await
+        .map_err(|_| NetError::Closed)?
         .map_err(|_| NetError::Closed)?;
     drop(pending);
     let key = conn.remote_id();
@@ -401,7 +407,45 @@ async fn establish(
     if let Some(guard) = &guard {
         guard.track(&conn);
     }
-    link::Link::accept(conn, key, peer, shared).await
+    let now = tokio::time::Instant::now();
+    let fresh = cfg!(feature = "mutant-si23-fresh-hello-deadline");
+    let window = if cfg!(feature = "mutant-si23-no-handshake-deadline") {
+        std::time::Duration::from_secs(86_400)
+    } else if fresh {
+        HANDSHAKE_DEADLINE
+    } else {
+        HELLO_WINDOW
+    };
+    let deadline = if fresh || cfg!(feature = "mutant-si23-no-handshake-deadline") {
+        now.checked_add(window).unwrap_or(now)
+    } else {
+        let deadline = shared.live().get(&key).map(|live| live.hello_deadline);
+        let Some(deadline) = deadline else {
+            conn.close(close::PROTOCOL, b"");
+            return Err(NetError::Closed);
+        };
+        deadline
+    };
+    let accepted = tokio::time::timeout_at(
+        deadline,
+        link::Link::accept(conn.clone(), key, peer, shared),
+    )
+    .await;
+    match accepted {
+        Ok(Ok((link, mut ctl))) => {
+            ctl.hello_deadline = Some(if fresh {
+                let now = tokio::time::Instant::now();
+                now.checked_add(HELLO_WINDOW).unwrap_or(now)
+            } else {
+                deadline
+            });
+            Ok((link, ctl))
+        }
+        _ => {
+            conn.close(close::PROTOCOL, b"");
+            Err(NetError::Closed)
+        }
+    }
 }
 
 /// Guests accept nothing (SI-21): every attempt is refused before TLS.

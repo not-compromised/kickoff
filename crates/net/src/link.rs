@@ -401,6 +401,7 @@ pub struct CtlStream {
     body: Option<(Vec<u8>, usize)>,
     msgs: Bucket,
     bytes: Bucket,
+    pub(crate) hello_deadline: Option<tokio::time::Instant>,
 }
 
 impl CtlStream {
@@ -416,7 +417,13 @@ impl CtlStream {
             body: None,
             msgs: Bucket::new(now, CTL_MSG_RATE, CTL_MSG_RATE),
             bytes: Bucket::new(now, CTL_BYTE_RATE, CTL_BYTE_RATE),
+            hello_deadline: None,
         }
+    }
+
+    /// Host-side absolute Hello deadline captured by the admission hook at TLS completion.
+    pub fn hello_deadline(&self) -> Option<tokio::time::Instant> {
+        self.hello_deadline
     }
 
     pub async fn send<M: WireMessage>(&mut self, msg: &M) -> Result<(), NetError> {

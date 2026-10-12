@@ -6,7 +6,6 @@
 //! flight), then the LAN's flow table, then the published admitted set and
 //! roster. A link task changes only its own seat, and only through the owner.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -27,8 +26,6 @@ use crate::budget::Bucket;
 use crate::routes::{Route, Routes};
 use crate::{Clock, Command, EndReason, HostOpts, InviteKind, SessionError, SessionEvent};
 
-/// From the link's arrival to its `Hello` (§3.4).
-const HELLO_DEADLINE: Duration = Duration::from_secs(2);
 /// The host pings each link this often, and closes one that has sent no
 /// `Pong` for `IDLE`, measured on the host clock (§4.5, PRIV-29).
 const PING: Duration = Duration::from_secs(5);
@@ -37,8 +34,9 @@ const IDLE: Duration = Duration::from_secs(15);
 /// close; the kick or end waiting on it allows a little longer.
 const FAREWELL: Duration = Duration::from_millis(500);
 const FAREWELL_WAIT: Duration = Duration::from_millis(750);
-/// Join requests being answered at once; the door queues the rest.
+/// Join requests being answered at once, including reserved priority replies.
 const REPLIES: usize = 16;
+const PRIORITY_REPLIES: usize = 8;
 /// How often the admission and reconnect windows are checked.
 const SWEEP: Duration = Duration::from_millis(250);
 /// Host fan-out (§6.3): 16 MB/s overall, charged per emitted copy.
@@ -61,9 +59,7 @@ pub(crate) struct Host {
     approvals: watch::Sender<Vec<Approval>>,
     roster: watch::Sender<(u64, HostMsg)>,
     events: broadcast::Sender<SessionEvent>,
-    /// Set once by whoever starts ending the session; `ended` follows after
-    /// the goodbyes, which is what stops the tasks.
-    ending: AtomicBool,
+    /// Follows the admission owner's ending transition after the goodbyes.
     ended: watch::Sender<bool>,
 }
 
@@ -100,7 +96,6 @@ pub(crate) fn start(
         approvals: watch::channel(Vec::new()).0,
         roster,
         events,
-        ending: AtomicBool::new(false),
         ended: watch::channel(false).0,
     });
     host.publish(&host.admission());
@@ -133,7 +128,7 @@ impl Host {
             InviteKind::Bearer => None,
         };
         let cap = {
-            let mut adm = self.admission();
+            let mut adm = self.live_admission()?;
             let cap = adm
                 .issue(&self.key, invitee, self.clock.now())
                 .map_err(SessionError::Invite)?;
@@ -151,7 +146,7 @@ impl Host {
         match command {
             Command::Kick(id) => self.kick(id).await,
             Command::Readmit(id) => {
-                let mut adm = self.admission();
+                let mut adm = self.live_admission()?;
                 adm.readmit(id);
                 self.publish(&adm);
                 Ok(())
@@ -177,16 +172,21 @@ impl Host {
     }
 
     fn live(&self) -> Result<(), SessionError> {
-        if self.ending.load(Ordering::Acquire) {
+        self.live_admission().map(|_| ())
+    }
+
+    fn live_admission(&self) -> Result<MutexGuard<'_, Admission>, SessionError> {
+        let adm = self.admission();
+        if adm.is_ending() {
             Err(SessionError::Ended)
         } else {
-            Ok(())
+            Ok(adm)
         }
     }
 
     async fn kick(&self, id: EndpointId) -> Result<(), SessionError> {
         let route = {
-            let mut adm = self.admission();
+            let mut adm = self.live_admission()?;
             let held = adm.kick(id).map_err(|_| SessionError::RevokedFull)?;
             held.and_then(|peer| self.unroute(peer))
         };
@@ -196,15 +196,14 @@ impl Host {
         }
         // Published after the farewell: until then the old connection is open,
         // so a redial is refused as a duplicate, and its route is already gone.
-        self.publish(&self.admission());
+        if let Ok(adm) = self.live_admission() {
+            self.publish(&adm);
+        }
         Ok(())
     }
 
     fn decide(&self, approval: ApprovalId, allow: bool) -> Result<(), SessionError> {
-        let mut adm = self.admission();
-        // `end` marks the session before it clears approvals under this
-        // lock, so a decision either lands before the end or not at all.
-        self.live()?;
+        let mut adm = self.live_admission()?;
         adm.decide(approval, allow, self.clock.now())
             .map_err(|_| SessionError::NoApproval)?;
         self.publish(&adm);
@@ -212,16 +211,20 @@ impl Host {
     }
 
     async fn end(&self, reason: EndReason) {
-        if self.ending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        {
+        let routes = {
             let mut adm = self.admission();
+            if adm.is_ending() {
+                return;
+            }
             adm.end();
+            // Admission -> routes -> LAN; delivery never takes admission.
+            // Drain waits out in-flight sends/deliveries before this boundary.
+            let routes = self.routes.drain();
             self.publish(&adm);
-        }
+            routes
+        };
         let mut goodbyes = JoinSet::new();
-        for route in self.routes.drain() {
+        for route in routes {
             goodbyes.spawn(farewell(route, HostMsg::End));
         }
         while goodbyes.join_next().await.is_some() {}
@@ -242,7 +245,9 @@ impl Host {
     }
 
     fn link_lost(&self, peer: PeerRef) {
-        let mut adm = self.admission();
+        let Ok(mut adm) = self.live_admission() else {
+            return;
+        };
         if adm.link_lost(peer, self.clock.now()).is_some() {
             drop(self.unroute(peer));
             self.publish(&adm);
@@ -250,7 +255,9 @@ impl Host {
     }
 
     fn evict(&self, peer: PeerRef) {
-        let mut adm = self.admission();
+        let Ok(mut adm) = self.live_admission() else {
+            return;
+        };
         if adm.evict(peer) {
             drop(self.unroute(peer));
             self.publish(&adm);
@@ -379,17 +386,25 @@ async fn farewell(route: Route<Arc<Link>, Farewell>, msg: HostMsg) {
 
 async fn join_loop(host: Arc<Host>) {
     let mut ended = host.ended.subscribe();
-    let replies = Arc::new(Semaphore::new(REPLIES));
+    let replies = Arc::new(Semaphore::new(REPLIES - PRIORITY_REPLIES));
+    let priority = Arc::new(Semaphore::new(PRIORITY_REPLIES));
     let mut answering = JoinSet::new();
     loop {
+        while answering.try_join_next().is_some() {}
         let attempt = tokio::select! {
             attempt = host.door.next_join() => attempt,
             _ = ended.wait_for(|ended| *ended) => break,
             Some(_) = answering.join_next(), if !answering.is_empty() => continue,
         };
         let Ok(attempt) = attempt else { break };
-        let Ok(permit) = Arc::clone(&replies).acquire_owned().await else {
-            break;
+        let pool = if attempt.is_priority() && !cfg!(feature = "mutant-si23-no-priority-replies") {
+            &priority
+        } else {
+            &replies
+        };
+        let Ok(permit) = Arc::clone(pool).try_acquire_owned() else {
+            drop(attempt);
+            continue;
         };
         let host = Arc::clone(&host);
         answering.spawn(async move {
@@ -420,16 +435,29 @@ async fn accept_loop(host: Arc<Host>) {
 async fn serve(host: Arc<Host>, link: Link, mut ctl: CtlStream) {
     let peer = link.peer();
     let link = Arc::new(link);
+    let now = tokio::time::Instant::now();
     let deadline = if cfg!(feature = "mutant-si23-no-hello-deadline") {
-        Duration::from_secs(86_400)
+        now.checked_add(Duration::from_secs(86_400)).unwrap_or(now)
     } else {
-        HELLO_DEADLINE
+        let Some(deadline) = ctl.hello_deadline() else {
+            link.close();
+            return;
+        };
+        deadline
     };
-    let hello = tokio::time::timeout(deadline, ctl.recv::<GuestMsg>()).await;
+    if deadline <= now {
+        link.close();
+        return;
+    }
+    let hello = tokio::time::timeout_at(deadline, ctl.recv::<GuestMsg>()).await;
     let Ok(Ok(GuestMsg::Hello { generation: pass })) = hello else {
         link.close();
         return;
     };
+    if tokio::time::Instant::now() >= deadline {
+        link.close();
+        return;
+    }
     let (farewell_tx, mut farewell_rx) = oneshot::channel();
     {
         let mut adm = host.admission();
@@ -454,8 +482,9 @@ async fn serve(host: Arc<Host>, link: Link, mut ctl: CtlStream) {
     let ended = tokio::select! {
         biased;
         said = &mut farewell_rx => Ended::Farewell(said.ok()),
-        ended = carry(&host, &link, peer) => ended,
+        // Arm control deadlines before any game delivery becomes observable.
         ended = control(&host, &mut ctl) => ended,
+        ended = carry(&host, &link, peer) => ended,
     };
     let farewell = match ended {
         Ended::Farewell(said) => said,
@@ -528,7 +557,12 @@ async fn control(host: &Host, ctl: &mut CtlStream) -> Ended {
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_pong = host.clock.now();
     loop {
+        let deadline = last_pong.checked_add(IDLE).unwrap_or(last_pong);
         tokio::select! {
+            biased;
+            _ = host.clock.until(deadline), if !cfg!(feature = "mutant-si23-no-idle-close") => {
+                return Ended::Lost;
+            }
             _ = ping.tick() => {
                 let silent = host.clock.now().saturating_duration_since(last_pong);
                 if silent >= IDLE && !cfg!(feature = "mutant-si23-no-idle-close") {
@@ -536,7 +570,7 @@ async fn control(host: &Host, ctl: &mut CtlStream) -> Ended {
                     // reconnect window under a new generation.
                     return Ended::Lost;
                 }
-                if ctl.send(&HostMsg::Ping).await.is_err() {
+                if send_control(host, ctl, &HostMsg::Ping, deadline).await.is_err() {
                     return Ended::Lost;
                 }
             }
@@ -545,7 +579,7 @@ async fn control(host: &Host, ctl: &mut CtlStream) -> Ended {
                     return Ended::Lost;
                 }
                 let msg = roster.borrow_and_update().1.clone();
-                if ctl.send(&msg).await.is_err() {
+                if send_control(host, ctl, &msg, deadline).await.is_err() {
                     return Ended::Lost;
                 }
             }
@@ -559,6 +593,22 @@ async fn control(host: &Host, ctl: &mut CtlStream) -> Ended {
                 Err(_) => return Ended::Lost,
             },
         }
+    }
+}
+
+/// A control write uses only the remaining Pong window, including while
+/// flow control blocks it. Status and roster updates cannot extend that window.
+async fn send_control(
+    host: &Host,
+    ctl: &mut CtlStream,
+    msg: &HostMsg,
+    deadline: Instant,
+) -> Result<(), NetError> {
+    tokio::select! {
+        biased;
+        _ = host.clock.until(deadline), if !cfg!(feature = "mutant-si23-no-idle-close")
+            && !cfg!(feature = "mutant-si23-pong-deadline-during-write") => Err(NetError::Closed),
+        sent = ctl.send(msg) => sent,
     }
 }
 
@@ -600,7 +650,9 @@ async fn sweep(host: Arc<Host>) {
             _ = tick.tick() => {}
             _ = ended.wait_for(|ended| *ended) => break,
         }
-        let mut adm = host.admission();
+        let Ok(mut adm) = host.live_admission() else {
+            continue;
+        };
         let now = host.clock.now();
         let retired = adm.expire_approvals(now);
         let due = adm.expired(now);

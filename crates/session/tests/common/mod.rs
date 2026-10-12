@@ -503,3 +503,58 @@ pub async fn drain_udp(game: &MemGame, quiet: Duration) -> Vec<Seen> {
     }
     all
 }
+
+#[derive(Debug)]
+struct FixtureGuard {
+    _registration: kickoff_send_guard::Registration,
+}
+impl iroh::endpoint::EndpointHooks for FixtureGuard {}
+struct Unfiltered;
+impl kickoff_send_guard::Guard for Unfiltered {
+    fn admit(&self, _: u64, _: std::net::SocketAddr) -> bool {
+        true
+    }
+}
+
+pub async fn raw_endpoint_with_window(ip: std::net::Ipv4Addr, window: u32) -> iroh::Endpoint {
+    let bind = std::net::UdpSocket::bind((ip, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let registration = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
+    iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr(bind)
+        .unwrap()
+        .hooks(FixtureGuard {
+            _registration: registration,
+        })
+        .relay_mode(iroh::RelayMode::Disabled)
+        .transport_config(
+            iroh::endpoint::QuicTransportConfig::builder()
+                .stream_receive_window(iroh::endpoint::VarInt::from_u32(window))
+                .receive_window(iroh::endpoint::VarInt::from_u32(window))
+                .keep_alive_interval(Duration::from_millis(100))
+                .build(),
+        )
+        .bind()
+        .await
+        .unwrap()
+}
+
+pub async fn loopback_host() -> HostNode {
+    let key = Secret::new(SecretKey::generate());
+    let door = Arc::new(kickoff_net::door_loopback(&key).await.unwrap());
+    host_as(Identity { key, door }, |_| {}).await
+}
+
+pub fn raw_request(ticket: &Secret<Ticket>, session_key: iroh::EndpointId) -> JoinRequest {
+    JoinRequest {
+        cap: copy_cap(ticket),
+        session_key,
+        name: name("raw"),
+        platform: Platform::Linux,
+        game_build: kickoff_wire::BuildId::new("test-build").unwrap(),
+        kickoff_version: KICKOFF_VERSION,
+    }
+}

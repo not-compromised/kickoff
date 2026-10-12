@@ -68,3 +68,63 @@ async fn si_23_link_silent_for_15_s_closed() {
     let got = next_udp(&host.game, WAIT).await.unwrap();
     assert_eq!((got.from, got.payload.as_slice()), (3, &b"still here"[..]));
 }
+
+/// A zero-credit transport keeps QUIC alive while blocking the first roster.
+/// The route's delivered datagram proves Hello was accepted before the clock moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_blocked_control_write_cannot_suspend_pong_expiry() {
+    let clock = Clock::system();
+    let host = host_with(|o| o.clock = clock.clone()).await;
+    let identity = Identity::new().await;
+    let raw = raw_endpoint_with_window(std::net::Ipv4Addr::LOCALHOST, 0).await;
+    let ticket = host.bound(identity.id());
+    let admitted = identity
+        .door
+        .request_join(&ticket, raw_request(&ticket, raw.id()))
+        .await
+        .unwrap();
+    let conn = raw
+        .connect(admitted.session_addr, kickoff_net::SESSION_ALPN)
+        .await
+        .unwrap();
+    let (mut send, _recv) = conn.open_bi().await.unwrap();
+    send.write_all(
+        &kickoff_wire::encode_framed(&kickoff_wire::GuestMsg::Hello {
+            generation: admitted.pass.generation,
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let packet = kickoff_wire::LanDatagram {
+        peer: kickoff_wire::PeerSlot::HOST,
+        bcast: false,
+        src_port: 50_000,
+        dst_port: GAME_PORT,
+        payload: b"route is live".to_vec().into(),
+    };
+    let fragments = kickoff_wire::encode_datagram(&packet, 1, 1000).unwrap();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            for fragment in &fragments {
+                conn.send_datagram(fragment.clone()).unwrap();
+            }
+            if next_udp(&host.game, Duration::from_millis(20))
+                .await
+                .is_some()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(conn.close_reason().is_none());
+    clock.advance(Duration::from_secs(15));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), conn.closed())
+            .await
+            .is_ok(),
+        "a blocked roster write suspended the absolute Pong deadline"
+    );
+}

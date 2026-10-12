@@ -123,6 +123,9 @@ async fn si_18_admission_is_rechecked_after_the_handshake() {
         Live {
             peer: peer(1),
             conn: recorded.weak_handle(),
+            hello_deadline: tokio::time::Instant::now()
+                .checked_add(HELLO_WINDOW)
+                .unwrap(),
         },
     );
     // The owner has since published a set without it.

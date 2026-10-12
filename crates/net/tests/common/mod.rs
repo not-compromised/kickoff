@@ -111,12 +111,23 @@ impl kickoff_send_guard::Guard for Unfiltered {
 
 /// The same on another loopback address, for a flood from many sources.
 pub async fn raw_endpoint_at(ip: std::net::Ipv4Addr) -> Endpoint {
+    raw_endpoint_with_window(ip, 512 * 1024).await
+}
+
+pub async fn raw_endpoint_with_window(ip: std::net::Ipv4Addr, window: u32) -> Endpoint {
     let bind = std::net::UdpSocket::bind((ip, 0))
         .unwrap()
         .local_addr()
         .unwrap();
     let registered = kickoff_send_guard::register(bind, std::sync::Arc::new(Unfiltered)).unwrap();
     Endpoint::builder(presets::Minimal)
+        .transport_config(
+            iroh::endpoint::QuicTransportConfig::builder()
+                .stream_receive_window(iroh::endpoint::VarInt::from_u32(window))
+                .receive_window(iroh::endpoint::VarInt::from_u32(window))
+                .keep_alive_interval(Duration::from_millis(100))
+                .build(),
+        )
         .clear_ip_transports()
         .bind_addr(bind)
         .unwrap()

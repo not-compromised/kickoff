@@ -227,11 +227,17 @@ pub struct JoinAttempt {
     conn: Connection,
     send: SendStream,
     limiter: Arc<Mutex<InvalidLimiter>>,
+    priority: bool,
 }
 
 impl JoinAttempt {
     pub fn id(&self) -> EndpointId {
         self.id
+    }
+
+    /// Uses the reserved queue and reply capacity for bound/trusted identities.
+    pub fn is_priority(&self) -> bool {
+        self.priority
     }
 
     pub fn request(&self) -> &JoinRequest {
@@ -250,10 +256,25 @@ impl JoinAttempt {
                 JoinReply::Refused(why)
             }
         };
-        write_message(&mut self.send, &reply).await?;
-        self.send.finish().map_err(|_| NetError::Closed)?;
-        let _ = tokio::time::timeout(ANSWER_LINGER, self.conn.closed()).await;
-        Ok(())
+        let answer = async {
+            write_message(&mut self.send, &reply).await?;
+            self.send.finish().map_err(|_| NetError::Closed)?;
+            let _ = self.conn.closed().await;
+            Ok(())
+        };
+        if cfg!(feature = "mutant-si23-door-unbounded-reply") {
+            answer.await
+        } else {
+            tokio::time::timeout(ANSWER_LINGER, answer)
+                .await
+                .unwrap_or(Err(NetError::Closed))
+        }
+    }
+}
+
+impl Drop for JoinAttempt {
+    fn drop(&mut self) {
+        self.conn.close(close::DONE, b"");
     }
 }
 
@@ -344,18 +365,24 @@ impl Acceptor {
             conn,
             send,
             limiter: Arc::clone(&self.limiter),
+            priority,
         })
     }
 
-    fn enqueue(&self, attempt: JoinAttempt) {
-        let queue = if self.priority_ids.load().contains(&attempt.id) {
+    fn enqueue(&self, mut attempt: JoinAttempt) {
+        attempt.priority = self.priority_ids.load().contains(&attempt.id);
+        let queue = if attempt.priority {
             &self.priority_tx
         } else {
             &self.general_tx
         };
         if let Err(full) = queue.try_send(attempt) {
             let attempt = full.into_inner();
-            tokio::spawn(attempt.answer(Err(JoinRefused::Busy)));
+            if cfg!(feature = "mutant-si23-door-unbounded-overflow") {
+                tokio::spawn(attempt.answer(Err(JoinRefused::Busy)));
+            } else {
+                attempt.conn.close(close::BUSY, b"");
+            }
         }
     }
 }
@@ -485,5 +512,99 @@ mod tests {
             l.record(t, key.public());
         }
         assert!(l.per_id.len() <= INVALID_TRACKED);
+    }
+
+    #[derive(Debug)]
+    struct FixtureGuard {
+        _registration: kickoff_send_guard::Registration,
+    }
+    impl iroh::endpoint::EndpointHooks for FixtureGuard {}
+    struct Unfiltered;
+    impl kickoff_send_guard::Guard for Unfiltered {
+        fn admit(&self, _: u64, _: std::net::SocketAddr) -> bool {
+            true
+        }
+    }
+
+    async fn blocked_client(ip: std::net::Ipv4Addr) -> Endpoint {
+        let bind = std::net::UdpSocket::bind((ip, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let registration = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
+        Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .bind_addr(bind)
+            .unwrap()
+            .hooks(FixtureGuard {
+                _registration: registration,
+            })
+            .relay_mode(RelayMode::Disabled)
+            .transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .stream_receive_window(iroh::endpoint::VarInt::from_u32(0))
+                    .receive_window(iroh::endpoint::VarInt::from_u32(0))
+                    .keep_alive_interval(Duration::from_millis(100))
+                    .build(),
+            )
+            .bind()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn si_23_door_overflow_closes_without_retaining_reply_tasks() {
+        let host = door_loopback(&Secret::new(SecretKey::generate()))
+            .await
+            .unwrap();
+        let request = JoinRequest {
+            cap: kickoff_wire::Cap {
+                session_id: kickoff_wire::SessionId([0; 16]),
+                invitee: None,
+                nonce: kickoff_wire::Nonce([0; 16]),
+                sig: SecretKey::generate().sign(b"fixture"),
+            },
+            session_key: SecretKey::generate().public(),
+            name: kickoff_wire::Name::new("raw").unwrap(),
+            platform: kickoff_wire::Platform::Linux,
+            game_build: kickoff_wire::BuildId::new("b").unwrap(),
+            kickoff_version: kickoff_wire::KickoffVersion {
+                major: 0,
+                minor: 1,
+                patch: 0,
+            },
+        };
+        let frame = kickoff_wire::encode_framed(&request).unwrap();
+        let mut held = Vec::new();
+        for n in 0..=GENERAL_QUEUE {
+            let ip = std::net::Ipv4Addr::new(127, 0, 3, u8::try_from(n).unwrap().wrapping_add(1));
+            let client = blocked_client(ip).await;
+            let conn = client.connect(host.addr(), JOIN_ALPN).await.unwrap();
+            let (mut send, recv) = conn.open_bi().await.unwrap();
+            send.write_all(&frame).await.unwrap();
+            send.finish().unwrap();
+            if n < GENERAL_QUEUE {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while host.queues.lock().await.general.len() != n.saturating_add(1) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                held.push((client, conn, send, recv));
+            } else {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(500), conn.closed())
+                        .await
+                        .is_ok(),
+                    "a full queue spawned and retained a blocked overflow reply"
+                );
+            }
+        }
+        assert_eq!(host.queues.lock().await.general.len(), GENERAL_QUEUE);
+        assert!(
+            held.iter()
+                .all(|(_, conn, _, _)| conn.close_reason().is_none())
+        );
     }
 }

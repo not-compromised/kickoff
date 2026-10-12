@@ -93,6 +93,7 @@ pub(crate) struct Admission {
     seats: [Option<Seat>; SEATS],
     last_generation: u64,
     epoch: u64,
+    ending: bool,
 }
 
 impl Admission {
@@ -118,7 +119,12 @@ impl Admission {
             seats: Default::default(),
             last_generation: 0,
             epoch: 1,
+            ending: false,
         })
+    }
+
+    pub(crate) fn is_ending(&self) -> bool {
+        self.ending
     }
 
     pub(crate) fn is_trusted(&self, id: EndpointId) -> bool {
@@ -150,6 +156,9 @@ impl Admission {
         request: &JoinRequest,
         now: Instant,
     ) -> Result<Joined, JoinRefused> {
+        if self.ending && !cfg!(feature = "mutant-si41-join-after-end") {
+            return Err(JoinRefused::Declined);
+        }
         let trust_wins =
             cfg!(feature = "mutant-si19-trust-overrides-kick") && self.trusted.contains(&id);
         if self.revoked.contains(&id) && !trust_wins {
@@ -283,6 +292,9 @@ impl Admission {
     /// A link arrived for `peer` and its first message was `Hello { pass }`.
     /// True if that makes the seat live.
     pub(crate) fn link_up(&mut self, peer: PeerRef, pass: Generation) -> bool {
+        if self.ending && !cfg!(feature = "mutant-si18-link-after-end") {
+            return false;
+        }
         if cfg!(feature = "mutant-si18-link-up-any") {
             return index_of(peer.slot)
                 .and_then(|i| self.seats.get(i))
@@ -348,8 +360,10 @@ impl Admission {
         self.approvals.expire(now)
     }
 
-    /// The session is ending: no approval may be decided from here on.
+    /// The runtime drains routes under this same lock before waiting for
+    /// farewells. Seats stay published so those existing links can say End.
     pub(crate) fn end(&mut self) {
+        self.ending = true;
         if !cfg!(feature = "mutant-si41-end-keeps-approvals") {
             self.approvals.clear();
         }
