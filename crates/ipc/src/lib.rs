@@ -91,11 +91,33 @@ pub struct PeerCred {
 }
 
 /// Client-side role markers: a `Client<Cli>` can only send `CliCommand`s.
+/// Only the built-in markers can implement `Role`.
+///
+/// ```compile_fail,E0277
+/// use kickoff_ipc::{ChannelRole, UiCommand, role::Role};
+/// struct ExternalRole;
+/// impl Role for ExternalRole {
+///     const ROLE: ChannelRole = ChannelRole::Overlay;
+///     type Command = UiCommand;
+/// }
+/// ```
+///
+/// External clients cannot supply their own seal either.
+///
+/// ```compile_fail,E0405
+/// use kickoff_ipc::{ChannelRole, UiCommand, role};
+/// struct ExternalRole;
+/// impl role::Sealed for ExternalRole {}
+/// impl role::Role for ExternalRole {
+///     const ROLE: ChannelRole = ChannelRole::Overlay;
+///     type Command = UiCommand;
+/// }
+/// ```
 pub mod role {
     use crate::command::{CliCommand, OverlayCommand, UiCommand};
     use crate::{ChannelRole, command};
 
-    pub trait Role: Sealed + Send + 'static {
+    pub trait Role: sealed::Sealed + Send + 'static {
         const ROLE: ChannelRole;
         type Command: Into<command::Op> + Send;
     }
@@ -119,10 +141,12 @@ pub mod role {
         type Command = OverlayCommand;
     }
 
-    pub trait Sealed {}
-    impl Sealed for Cli {}
-    impl Sealed for UiMain {}
-    impl Sealed for Overlay {}
+    mod sealed {
+        pub trait Sealed {}
+        impl Sealed for super::Cli {}
+        impl Sealed for super::UiMain {}
+        impl Sealed for super::Overlay {}
+    }
 }
 
 // Per-connection budgets (§6.3 "charge before allocate"). A request is at most
