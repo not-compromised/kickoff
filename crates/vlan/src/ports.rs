@@ -15,7 +15,8 @@ pub(crate) const GAME_PORTS: GamePorts = GamePorts {
     discovery: &[14001],
 };
 
-use kickoff_wire::{DENIED_PORTS as DENYLIST, denied_port as denied};
+use kickoff_wire::DENIED_PORTS as DENYLIST;
+pub(crate) use kickoff_wire::denied_port as denied;
 
 pub(crate) fn game(port: u16) -> bool {
     GAME_PORTS.game.contains(&port) || discovery(port)

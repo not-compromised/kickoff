@@ -54,6 +54,7 @@ thiserror.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+kickoff-send-guard.workspace = true
 iroh.workspace = true
 bytes.workspace = true
 proptest.workspace = true

@@ -14,31 +14,19 @@ use kickoff_wire::{Generation, MapId};
 /// An approval left unanswered this long authorizes nothing.
 pub(crate) const APPROVAL_TTL: Duration = Duration::from_secs(60);
 
-/// Opaque and 128-bit random. The UI receives it in an event and hands it
-/// back; it carries nothing a guess could exploit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ApprovalId([u8; 16]);
+pub use kickoff_wire::ApprovalId;
 
-impl ApprovalId {
-    /// For a local channel carrying an id back from the UI.
-    pub fn from_bytes(bytes: [u8; 16]) -> ApprovalId {
-        ApprovalId(bytes)
+fn new_id(peer: &EndpointId) -> Option<ApprovalId> {
+    if cfg!(feature = "mutant-si41-approve-by-peer") {
+        return peer
+            .as_bytes()
+            .first_chunk()
+            .copied()
+            .map(ApprovalId::from_bytes);
     }
-
-    pub fn to_bytes(self) -> [u8; 16] {
-        self.0
-    }
-
-    fn new(peer: &EndpointId) -> Option<ApprovalId> {
-        if cfg!(feature = "mutant-si41-approve-by-peer") {
-            // Draft 2's `Approve(id)`: the decision names the peer, so an
-            // old dialog's answer lands on that peer's newest request.
-            return peer.as_bytes().first_chunk().copied().map(ApprovalId);
-        }
-        let mut bytes = [0; 16];
-        getrandom::fill(&mut bytes).ok()?;
-        Some(ApprovalId(bytes))
-    }
+    let mut bytes = [0; 16];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(ApprovalId::from_bytes(bytes))
 }
 
 /// What the host's or player's native dialog shows, and the only thing a
@@ -96,7 +84,7 @@ impl Approvals {
             return Err(Refused::Busy);
         }
         let approval = Approval {
-            id: ApprovalId::new(&peer).ok_or(Refused::Entropy)?,
+            id: new_id(&peer).ok_or(Refused::Entropy)?,
             action,
             peer,
             generation,

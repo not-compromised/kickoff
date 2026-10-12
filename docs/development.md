@@ -11,7 +11,8 @@ Spec: [design.md](design.md). Standing security rules: [SECURITY-INVARIANTS.md](
 | `crates/net` | iroh door and session endpoints, fragmentation, egress policy | M2 |
 | `crates/session` | admission owner, roster, pump, budgets | M2 |
 | `crates/ipc` | authenticated, versioned local channels | M2 (Linux), M7 (Windows) |
-| `crates/secret` | `Secret<T>` | M2 |
+| `crates/secret` | `Secret<T>`, process hardening, Linux identity storage | M2 |
+| `crates/send-guard` | the registry called by vendored iroh before IP sends | M2 |
 | `crates/{store,parse,maps,game}`, `bins/{kickoffd,kickoff}` | placeholders | M5, M6 |
 | `xtask` | the SI-33 harness: mutant runner, release guard check, policy test | M2 |
 
@@ -25,7 +26,7 @@ until their milestone, so no stub can panic.
 scripts/check.sh
 ```
 
-Runs the unsafe guard, `cargo fmt --check`, clippy with `-D warnings`, the whole
+Runs the unsafe guard, the upstream-plus-patch vendor comparison, `cargo fmt --check`, clippy with `-D warnings`, the whole
 test suite (every `si_n_*` test and the SI-33 policy test), the design §7
 latency tests in a release build, `cargo deny check`, and then every mutant.
 Run cargo through `mise exec --` so the pinned toolchain
@@ -35,7 +36,9 @@ The release latency step asserts the §7 budgets that debug builds only
 approximate: game to game p50 ≤ 100 µs and p99 ≤ 500 µs
 (`kickoff-session --test budget`), net's share of it inside the same budget
 (`kickoff-net --test latency`), and codec plus filter ≤ 2 µs per datagram
-(`kickoff-vlan --test hot_path`).
+(`kickoff-vlan --test hot_path`), and the send guard on an approved
+destination ≤ 50 ns per send (`kickoff-net --lib
+send_guard_on_an_approved_destination_within_budget`).
 
 ### Mutants (SI-33)
 
@@ -53,7 +56,9 @@ when that is not `crate`. A feature may enable other crates' mutants when a
 test is held by two layers at once (`mutant-si23-unbudgeted-ingress`), so the
 test is proven against the removal of both. `[[unmutated]]` records an SI
 test no flag can falsify, with the reason; `[[pending]]` records an M2 row or
-named mutant whose code has not landed.
+named mutant whose code has not landed. No pending entries remain after
+integrating the M2 branches; that policy alone does not replace the design
+review or prove every budget is applied at the specified granularity.
 
 ```
 cargo run -p kickoff-xtask -- mutants [FILTER...]   # each test: pass plain, fail mutated
@@ -113,9 +118,11 @@ scaffolding M2.
    `&Secret<Ticket>`; `net::door` takes `&Secret<SecretKey>`. §6.4 and SI-30
    require it, and iroh's `SecretKey` implements both `Debug` and `Serialize`.
 3. **Shared value types live in `wire`.** `LanDatagram`, `PeerSlot`,
-   `Generation`, `PeerRef`, `MapId` and `AdmitPass` are in `wire`, not `vlan`:
+   `Generation`, `PeerRef`, `MapId`, `AdmitPass` and `ApprovalId` are in `wire`:
    `net` and `vlan` both need `LanDatagram`, and `net` should not depend on the
-   tap adapters.
+   tap adapters. `ApprovalId` is re-exported by session and IPC; only the
+   session owner mints it. The compiled denylist also has one owner in wire,
+   used by the LAN filter and IP send guard.
 4. **`Admitted { session_addr, pass: AdmitPass }`**, so a guest dials with
    `dial(admitted.session_addr, admitted.pass)`.
 5. **`Link::peer() -> PeerRef`** exposes the (identity, slot, generation) the
@@ -140,54 +147,44 @@ scaffolding M2.
     admission table. The cost is that any reachable panic is a remote crash,
     which the panic lints exist to prevent.
 
-### Open questions
+### Interface choices
 
-1. **Generation in the filter.** §3.1 keys filter flows by (identity,
-   generation, 5-tuple), but `LanDatagram` carries only `PeerSlot`, so `vlan`
-   cannot see a generation. Proposal: `LanDatagram.peer: PeerRef`.
-2. **How the host's session endpoint learns admissions.** The handshake hook
-   in `net` must accept only keys holding a live pass, but the admission owner
-   is in `session` and `net::session()` takes no handle to it. Proposal: pass
-   an admission gate (`Arc<dyn AdmissionGate>`) to `net::session` for
-   `Role::Host`.
-3. **Tickets across `ipc`.** `kickoff join <ticket>` must move a ticket from
-   the CLI to kickoffd, but `Secret` cannot be serialized. Proposal: `ipc` owns
-   the one function that writes a `Secret<Ticket>` into a channel frame.
-4. **"Only the single consumer can expose it" (§6.4).** `Secret::expose` is
-   public, so any holder can read any secret. Enforcing one consumer per
-   secret type needs a per-type wrapper whose `expose` is private to its
-   consumer's crate.
-5. **Lagging event receivers.** `Session::events` is a tokio broadcast, which
-   drops old events for a slow receiver. A dropped `JoinPrompt` would leave a
-   bearer guest waiting until its deadline; prompts may need their own channel.
-6. **`paste` (RUSTSEC-2024-0436, unmaintained)** arrives through iroh 1.3.0 →
-   netwatch → netdev → netlink-packet-core. It is a compile-time proc-macro, so
-   `deny.toml` ignores it with that reason. Revisit on each iroh bump.
+- LAN frames carry a `PeerSlot`; net and session authenticate its generation
+  before delivery, and `Lan::reset_peer` clears the slot's flows before reuse.
+- The host publishes the admission owner's current set through
+  `SessionNet::set_admitted`; the handshake hook and each later layer re-check it.
+- IPC owns the ticket-text channel encoding. `Secret` itself remains
+  unserializable. `Secret::expose` is available to any holder, so enforcing one
+  consumer per secret type remains a question for the later application API.
+- `Session::approvals()` holds the pending set in a watch receiver. Slow readers
+  can recover it even if they missed `ApprovalRequested` on the event stream.
+- `paste` (RUSTSEC-2024-0436, unmaintained) arrives through iroh 1.3.0 →
+  netwatch → netdev → netlink-packet-core. It is a compile-time proc-macro, so
+  `deny.toml` ignores it with that reason. Revisit on each iroh bump.
+- Linux identity storage is implemented in `secret::identity` for M2. Its
+  handle-relative writes and staged publication can move behind `store` in M5.
+  Daemon startup and session wiring still belong to the application milestones.
 
 ### Harness (SI-33) notes
 
-1. **Pending M2 rows.** The policy runs green only because `mutants.toml`
-   lists what draft 3 assigns to M2 but this branch does not implement:
-   SI-7's `SO_PEERPIDFD` check and ancillary-data refusal, SI-29's vendored
-   send guard, SI-30's `harden_process`, and SI-41's approval objects. M2 is
-   not done while `[[pending]]` has entries.
-2. **SI-22 in M2.** Its Held column says "M2 (local)", but no M2 crate stores
-   the identity key or the trust list (`store` is M5), so there is nothing to
-   test or mutate. Should SI-22's local half move to M5?
+1. All draft-3 M2 types and named mutants are integrated. The networking
+   review still must verify the per-remote candidate budget and per-connection
+   cache, the pending-handshake flood proof, and fail-closed send registration.
+2. SI-22's local half is covered by `kickoff-secret`: file and directory modes,
+   hostile names and damaged state, read isolation from another uid, and local
+   revocation before identity replacement. Remote revocation notices are M10.
 3. **Layered protections.** Where several layers each hold a rule alone, an
    end-to-end test survives any single layer's removal. Each layer then has
    its own mutant and a test that drives that layer alone (SI-18's six
    admission layers, SI-29's scope and connect guard); the end-to-end test is
    `[[unmutated]]` with that reason, or gets a feature that removes every
    layer at once.
-4. **Machine-dependent mutant.** `mutant-si31-unbound` fails its test only on
-   a machine with an interface address outside the bound one that the test
-   strips (a CGNAT or `10.75/16` address, such as Tailscale's). On a machine
-   with a single interface, bound and unbound advertise the same address and
-   the mutant survives, which fails the gate. CI needs such an interface, or
-   the test needs a synthetic one (netns, M3).
-5. **The `Hello` deadline** is 5 s in `session` and in `net`'s handshake
-   deadline; draft 3 says 2 s. The mutants and tests hold for either value.
+4. The SI-31 leaked-endpoint test binds separate loopback hosts and supplies
+   a synthetic host view. Its unbound mutant requires another non-loopback
+   IPv4 interface to expose address enumeration; the test fails if it cannot
+   establish that difference instead of skipping the mutant.
+5. Session's `Hello` deadline is 2 s. Net's 5 s control-stream deadline is a
+   separate limit before the session message is visible.
 6. **Hot-path bench.** §7 names criterion. A criterion bench measures but
    cannot fail the gate, so `vlan/tests/hot_path.rs` is a release-mode timing
    test with the same ≤ 2 µs budget instead, and no bench dependency was

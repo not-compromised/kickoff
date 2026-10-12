@@ -107,12 +107,10 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
     observed on the real socket. `si_7_credentials_close_the_channel` turns
     `SO_PASSCRED` on to prove that, if credentials ever arrived, the read
     would refuse them.
-12. **`ApprovalId` is defined here, 16 opaque bytes.** The session crate owns
-    approval objects (r2 M2 impact, session item 1) and is being changed in
-    parallel; `ipc` does not depend on it. kickoffd converts with
-    `ApprovalId::{from_bytes, to_bytes}`. Once session's type lands, one of
-    the two should become the only definition (for example, session
-    re-exports or wraps this one).
+12. `ApprovalId` is the shared opaque 16-byte type in `kickoff-wire`, re-exported
+    by `ipc` and `session`. Only session's admission owner mints an id and
+    decides whether it is still current. Its byte conversion is the local
+    channel encoding, with no effect on peer message formats.
 13. **`PROTOCOL_VERSION` is 2**: `UiCommand` changed (`Approve` out,
     `Decide` in). Tag 6 is retired, `Decide` is tag 11.
 

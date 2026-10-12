@@ -102,5 +102,4 @@ the same reader as our uid can.
      symlink checks share its code path and its mutant.
    - The key comes from `getrandom` into a zeroizing buffer rather than from
      `SecretKey::generate`, which leaves its seed on the stack.
-   - Open question: the `development.md` NOTES item "SI-22 in M2" (move the
-     local half to M5?) is answered by this crate if the design agrees.
+   - This supplies SI-22's local M2 storage. Remote revocation notices remain M10.

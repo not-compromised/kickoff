@@ -215,11 +215,9 @@ and open questions.
 19. **Refusals for approvals reuse existing codes** (wire has no change in
     draft 3): a second bearer join while one is pending gets `Busy`; a
     timed-out or session-ended approval answers `Declined`.
-20. **`ApprovalId::from_bytes`** exists for the local channel that carries an
-    id back from the native dialog (`ipc`'s `Decide`). Ids are 128-bit random,
-    so a constructed id authorizes nothing unless it was received. `ipc`
-    does not depend on `session`; whichever crate carries `Decide` needs a
-    16-byte id field and this conversion.
+20. `ApprovalId` comes from `kickoff-wire`, shared with IPC and re-exported
+    by session. The local channel carries its bytes; the admission owner
+    alone mints ids and checks that their objects remain current.
 21. **`InstallMap` approvals** are never created on the host and a guest
     creates none until M6; the type and its replacement rule (a newer pick
     retires the pending one) are unit-tested now. A guest's `Decide` gets

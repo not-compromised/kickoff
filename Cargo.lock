@@ -1436,6 +1436,7 @@ dependencies = [
  "iroh-base",
  "kickoff-net",
  "kickoff-secret",
+ "kickoff-send-guard",
  "kickoff-vlan",
  "kickoff-wire",
  "proptest",

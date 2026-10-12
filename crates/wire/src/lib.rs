@@ -8,6 +8,7 @@
 //! the bytes it came from.
 
 mod addr;
+mod approval;
 mod bounded;
 mod invite;
 mod lan;
@@ -18,6 +19,7 @@ mod ticket;
 #[cfg(test)]
 mod schema_tests;
 
+pub use approval::ApprovalId;
 pub use bounded::{BoundedStr, BoundedVec};
 pub use invite::{BEARER_TTL, InviteError, Invites, MAX_OUTSTANDING, Redeemed};
 pub use lan::{

@@ -567,3 +567,75 @@ async fn si_7_recycled_pid_refused() {
         "a caller whose pid was recycled by a trusted binary was admitted"
     );
 }
+
+const HARDENED_SERVER_ENV: &str = "KIPC_HARDENED_SERVER_BASE";
+
+#[test]
+fn hardened_server_helper() {
+    let Some(base) = std::env::var_os(HARDENED_SERVER_ENV) else {
+        return;
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = RuntimeDir::open_in(Path::new(&base)).unwrap();
+        let server = Server::bind(&dir, trust_me()).unwrap();
+        kickoff_secret::harden_process().unwrap();
+        println!("KIPC hardened-ready");
+        std::io::stdout().flush().unwrap();
+        if let Ok(Ok(mut channel)) =
+            tokio::time::timeout(Duration::from_secs(3), server.accept()).await
+        {
+            channel.recv().await.unwrap();
+            channel.reply(Reply::Done).await.unwrap();
+        }
+    });
+}
+
+/// Real daemon hardening and client authentication must hold together.
+#[tokio::test]
+async fn hardened_server_remains_authenticatable() {
+    use std::io::{BufRead, BufReader};
+    let base = TempBase::new();
+    let dir = base.dir();
+    let mut child = std::process::Command::new(me())
+        .args([
+            "--exact",
+            "hardened_server_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(HARDENED_SERVER_ENV, base.path())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut ready = false;
+    for _ in 0..10 {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        if line.contains("KIPC hardened-ready") {
+            ready = true;
+            break;
+        }
+    }
+    let result = if ready {
+        match connect::<Cli>(&dir, &trust_me()).await {
+            Ok(mut client) => client.call(CliCommand::Status).await,
+            Err(error) => Err(error),
+        }
+    } else {
+        Err(IpcError::Closed)
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        ready,
+        "the real hardened server did not reach its accept loop"
+    );
+    assert!(
+        matches!(result, Ok(Reply::Done)),
+        "hardened server refused: {result:?}"
+    );
+}
