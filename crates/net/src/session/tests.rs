@@ -25,16 +25,36 @@ fn peer(generation: u64) -> PeerRef {
     }
 }
 
+#[derive(Debug)]
+struct FixtureGuard {
+    _registration: kickoff_send_guard::Registration,
+}
+impl EndpointHooks for FixtureGuard {}
+struct Unfiltered;
+impl kickoff_send_guard::Guard for Unfiltered {
+    fn admit(&self, _: u64, _: SocketAddr) -> bool {
+        true
+    }
+}
+
 async fn endpoint(serve: bool, hook: Option<AdmissionHook>) -> Endpoint {
     let alpns = if serve {
         vec![SESSION_ALPN.to_vec()]
     } else {
         Vec::new()
     };
+    let bind = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let registered = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
     let builder = Endpoint::builder(presets::Minimal)
         .clear_ip_transports()
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .bind_addr(bind)
         .unwrap()
+        .hooks(FixtureGuard {
+            _registration: registered,
+        })
         .relay_mode(RelayMode::Disabled)
         .alpns(alpns)
         .transport_config(transport(HOST_BIDI, true));
@@ -197,10 +217,18 @@ async fn si_18_each_datagram_rechecks_the_generation() {
 
 /// A bare iroh endpoint on `ip`, with no Kickoff policy.
 async fn raw(ip: Ipv4Addr) -> Endpoint {
+    let bind = std::net::UdpSocket::bind((ip, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let registered = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
     Endpoint::builder(presets::Minimal)
         .clear_ip_transports()
-        .bind_addr((ip, 0))
+        .bind_addr(bind)
         .unwrap()
+        .hooks(FixtureGuard {
+            _registration: registered,
+        })
         .relay_mode(RelayMode::Disabled)
         .bind()
         .await
@@ -354,4 +382,166 @@ async fn si_29_send_guard_drops_what_iroh_sends_to_a_refused_destination() {
         guest.egress_denied() > 0,
         "no packet was refused at the send path"
     );
+}
+
+#[derive(Default)]
+struct ContextRecorder(std::sync::Mutex<std::collections::HashSet<u64>>);
+impl kickoff_send_guard::Guard for ContextRecorder {
+    fn admit(&self, context: u64, _: SocketAddr) -> bool {
+        self.0.lock().unwrap().insert(context);
+        true
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_29_transport_carries_distinct_connection_contexts() {
+    let bind = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let recorded = Arc::new(ContextRecorder::default());
+    let registered = kickoff_send_guard::register(bind, recorded.clone()).unwrap();
+    let client = Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr(bind)
+        .unwrap()
+        .hooks(FixtureGuard {
+            _registration: registered,
+        })
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .unwrap();
+    let host_one = endpoint(true, None).await;
+    let host_two = endpoint(true, None).await;
+    let first_client = client.clone();
+    let to = host_one.addr();
+    let (first, accepted) = tokio::join!(
+        async move { first_client.connect(to, SESSION_ALPN).await.unwrap() },
+        async { host_one.accept().await.unwrap().await.unwrap() }
+    );
+    let second_client = client.clone();
+    let to = host_two.addr();
+    let (second, accepted_two) = tokio::join!(
+        async move { second_client.connect(to, SESSION_ALPN).await.unwrap() },
+        async { host_two.accept().await.unwrap().await.unwrap() }
+    );
+    let first_context = first.send_context();
+    let second_context = second.send_context();
+    assert_ne!(first_context, second_context);
+    assert_ne!(accepted.send_context(), first_context);
+    assert_ne!(accepted_two.send_context(), second_context);
+    let contexts = recorded.0.lock().unwrap();
+    assert!(
+        contexts.contains(&first_context),
+        "first connection lost its context on the IP send path"
+    );
+    assert!(
+        contexts.contains(&second_context),
+        "second connection lost its context on the IP send path"
+    );
+}
+
+#[test]
+#[allow(clippy::panic)]
+fn si_23_guard_connection_snapshots_do_not_block_packets() {
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "session::tests::guard_connection_snapshot_worker",
+            "--nocapture",
+        ])
+        .env("KICKOFF_GUARD_STRESS", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            break;
+        }
+        if started.elapsed() >= Duration::from_secs(15) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("concurrent admission and game packets deadlocked");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn guard_connection_snapshot_worker() {
+    if std::env::var_os("KICKOFF_GUARD_STRESS").is_none() {
+        return;
+    }
+    for _ in 0..3 {
+        let host = Arc::new(
+            session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Host)
+                .await
+                .unwrap(),
+        );
+        let mut guests = Vec::new();
+        let mut admitted = AdmittedSet::new();
+        for slot in 2..=7 {
+            let guest = session(&RelayMap::empty(), IfaceAddr::loopback(), Role::Guest)
+                .await
+                .unwrap();
+            let mut p = peer(1);
+            p.slot = PeerSlot::new(slot).unwrap();
+            admitted.insert(guest.id(), p);
+            guests.push((guest, p));
+        }
+        host.set_admitted(admitted);
+        let mut tasks = Vec::new();
+        for (guest, p) in guests {
+            let accepting = Arc::clone(&host);
+            let to = host.addr();
+            tasks.push(tokio::spawn(async move {
+                let (link, mut ctl) = guest
+                    .dial(
+                        to,
+                        AdmitPass {
+                            slot: p.slot,
+                            generation: p.generation,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                ctl.send(&GuestMsg::Hello {
+                    generation: p.generation,
+                })
+                .await
+                .unwrap();
+                for _ in 0..64 {
+                    tokio::time::timeout(WAIT, link.recv_lan())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+            }));
+            tasks.push(tokio::spawn(async move {
+                let (link, _ctl) = accepting.accept().await.unwrap();
+                for _ in 0..64 {
+                    link.send_lan(&LanDatagram {
+                        peer: PeerSlot::HOST,
+                        bcast: false,
+                        src_port: 7777,
+                        dst_port: 7777,
+                        payload: bytes::Bytes::from_static(b"game"),
+                    });
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
 }

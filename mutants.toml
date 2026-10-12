@@ -190,3 +190,17 @@ note = "the policy stops checking that rows have registered mutants"
 [[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-admit-direct", test = "si_31_direct_host_refuses_a_bearer_capability_at_admission", note = "the host admission boundary accepts an untrusted bearer in direct mode"
 [[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-guest-direct", test = "si_31_direct_guests_refuse_bearer_before_requesting_admission", note = "the guest requests bearer admission with an IP transport"
 [[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-admitted-ip", test = "si_31_bearer_guest_refuses_a_host_advertising_ip_addresses", note = "a bearer guest accepts a direct address from the host"
+[[mutant]] si = "SI-29", crate = "kickoff-send-guard", feature = "mutant-si29-unregistered-sends", test = "si_29_a_registered_bind_answers_through_its_guard_until_dropped", note = "unregistered bind addresses bypass the send guard"
+
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-shared-remote-budget", test = "si_29_each_remote_keeps_its_probe_budget_and_cache", note = "all identities share one probe bucket and destination cache"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-pending-cap", test = "si_23_only_sixteen_incoming_handshakes_hold_slots", note = "prehandshake gate allows more than sixteen simultaneous incoming handshakes"
+
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-probe-any-destination", test = "si_29_qad_cannot_choose_another_destination", note = "QAD context may send to destinations other than its relay-map target"
+
+[[mutant]] si = "SI-29", crate = "kickoff-send-guard", feature = "mutant-si29-send-context-lost", test = "si_29_a_registered_bind_answers_through_its_guard_until_dropped", note = "send hook loses the stable connection context"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-send-context-lost", test = "si_29_transport_carries_distinct_connection_contexts", note = "IP hook loses the real connection token on initial and established sends"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-no-trusted-slots", test = "si_23_guard_preserves_slots_for_expected_or_admitted_peers", note = "unknown identities can consume every guard context and remote budget slot"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-locks-before-connection", test = "si_23_guard_connection_snapshots_do_not_block_packets", note = "tracking locks guard state before reading the transport connection, inverting the send-driver lock order"

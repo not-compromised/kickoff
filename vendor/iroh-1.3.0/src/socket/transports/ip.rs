@@ -322,12 +322,13 @@ impl IpSender {
         cx: &mut std::task::Context,
         dst: SocketAddr,
         src: Option<IpAddr>,
+        context: u64,
         transmit: &Transmit<'_>,
     ) -> Poll<io::Result<()>> {
         // Kickoff patch (design 3.4, R2-10): the send guard sees every
         // destination, including those iroh picks itself. Refused packets
         // are dropped as if lost.
-        if !kickoff_send_guard::admit(self.config.into(), Self::canonical_addr(dst)) {
+        if !kickoff_send_guard::admit(self.config.into(), context, Self::canonical_addr(dst)) {
             return Poll::Ready(Ok(()));
         }
         let total_bytes = transmit.contents.len() as u64;

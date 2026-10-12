@@ -27,6 +27,15 @@ pub(crate) struct Guarded {
     _task: AbortOnDrop,
 }
 
+#[derive(Debug)]
+struct Unfiltered;
+
+impl kickoff_send_guard::Guard for Unfiltered {
+    fn admit(&self, _: u64, _: SocketAddr) -> bool {
+        true
+    }
+}
+
 /// Binds `make()` with an IP transport on `ip` and a port chosen here, with
 /// the guard for `view` installed first. `ip` is the view's bind address
 /// except under `mutant-si31-unbound`.
@@ -39,15 +48,16 @@ pub(crate) async fn bind(
     let guard = Arc::new(SendGuard::new(view));
     for _ in 0..BIND_ATTEMPTS {
         let addr = SocketAddr::from((ip, free_port(ip)?));
-        let hooks = if cfg!(feature = "mutant-si29-no-send-guard") {
-            EgressGuard::new(egress.clone())
-        } else {
-            let as_hook: Arc<dyn kickoff_send_guard::Guard> = guard.clone();
-            let Some(registration) = kickoff_send_guard::register(addr, as_hook) else {
-                continue;
+        let as_hook: Arc<dyn kickoff_send_guard::Guard> =
+            if cfg!(feature = "mutant-si29-no-send-guard") {
+                Arc::new(Unfiltered)
+            } else {
+                guard.clone()
             };
-            EgressGuard::with_send_guard(egress.clone(), registration)
+        let Some(registration) = kickoff_send_guard::register(addr, as_hook) else {
+            continue;
         };
+        let hooks = EgressGuard::with_send_guard(egress.clone(), registration);
         let builder = make()
             .bind_addr(addr)
             .map_err(|_| NetError::Bind)?

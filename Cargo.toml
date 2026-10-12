@@ -50,10 +50,11 @@ rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs"
 # 1.1.5 has none. Only the `socket` module is enabled.
 nix = { version = "=0.31.3", default-features = false, features = ["socket"] }
 
-# iroh 1.3.0 plus one patch, the send-guard hook (design §3.4); checked against
-# the crates.io archive by scripts/check-vendor.sh.
+# iroh enforces egress policy; noq supplies stable per-connection send ownership.
+# Each is upstream 1.3.0 plus its audited patch, checked against pinned archives.
 [patch.crates-io]
 iroh = { path = "vendor/iroh-1.3.0" }
+noq = { path = "vendor/noq-1.3.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

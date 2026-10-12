@@ -1103,6 +1103,9 @@ impl<T: ConnectionState> Connection<T> {
         self.inner.stable_id()
     }
 
+    /// Stable owner of transport sends, including NAT probes and rebinding.
+    pub fn send_context(&self) -> u64 { self.inner.send_context() }
+
     /// Derives keying material from this connection's TLS session secrets.
     ///
     /// When both peers call this method with the same `label` and `context`

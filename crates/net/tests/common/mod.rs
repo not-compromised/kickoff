@@ -96,12 +96,33 @@ pub async fn raw_endpoint() -> Endpoint {
     raw_endpoint_at(std::net::Ipv4Addr::LOCALHOST).await
 }
 
+#[derive(Debug)]
+struct FixtureGuard {
+    _registration: kickoff_send_guard::Registration,
+}
+impl iroh::endpoint::EndpointHooks for FixtureGuard {}
+
+struct Unfiltered;
+impl kickoff_send_guard::Guard for Unfiltered {
+    fn admit(&self, _: u64, _: std::net::SocketAddr) -> bool {
+        true
+    }
+}
+
 /// The same on another loopback address, for a flood from many sources.
 pub async fn raw_endpoint_at(ip: std::net::Ipv4Addr) -> Endpoint {
+    let bind = std::net::UdpSocket::bind((ip, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let registered = kickoff_send_guard::register(bind, std::sync::Arc::new(Unfiltered)).unwrap();
     Endpoint::builder(presets::Minimal)
         .clear_ip_transports()
-        .bind_addr((ip, 0))
+        .bind_addr(bind)
         .unwrap()
+        .hooks(FixtureGuard {
+            _registration: registered,
+        })
         .relay_mode(RelayMode::Disabled)
         .bind()
         .await

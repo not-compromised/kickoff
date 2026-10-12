@@ -1,0 +1,42 @@
+noq 1.3.0: transport send-context and egress-guard patch.
+
+--- a/src/connection.rs
++++ b/src/connection.rs
+@@ -862,0 +863,5 @@
++    }
++
++    /// Stable transport-send owner, retained across rebinding.
++    pub fn send_context(&self) -> u64 {
++        self.0.state.lock("send_context").send_context
+@@ -1566,0 +1572,3 @@
++    send_context: u64,
++    send_initial_destination: SocketAddr,
++    send_is_client: bool,
+@@ -1587 +1595 @@
+-        sender: Pin<Box<dyn UdpSender>>,
++        mut sender: Pin<Box<dyn UdpSender>>,
+@@ -1589,0 +1598,9 @@
++        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
++        let send_context = NEXT.try_update(
++            std::sync::atomic::Ordering::Relaxed,
++            std::sync::atomic::Ordering::Relaxed,
++            |next| next.checked_add(1),
++        ).expect("connection context exhausted");
++        let send_initial_destination = inner.network_path(PathId::ZERO).expect("initial path").remote();
++        let send_is_client = inner.side().is_client();
++        sender.as_mut().set_connection_context(send_context, send_initial_destination, send_is_client);
+@@ -1607,0 +1625,3 @@
++            send_context,
++            send_initial_destination,
++            send_is_client,
+@@ -1692 +1712,3 @@
+-                Poll::Ready(Some(ConnectionEvent::Rebind(sender))) => {
++                Poll::Ready(Some(ConnectionEvent::Rebind(mut sender))) => {
++                    self.sender.as_mut().set_connection_context(0, self.send_initial_destination, self.send_is_client);
++                    sender.as_mut().set_connection_context(self.send_context, self.send_initial_destination, self.send_is_client);
+--- a/src/runtime/mod.rs
++++ b/src/runtime/mod.rs
+@@ -86,0 +87,3 @@
++    /// Assigns the stable owner of every send, including after a socket rebind.
++    fn set_connection_context(self: Pin<&mut Self>, _context: u64, _initial_destination: SocketAddr, _is_client: bool) {}
++

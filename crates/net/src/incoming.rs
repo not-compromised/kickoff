@@ -91,7 +91,13 @@ pub(crate) struct Gate {
 impl Gate {
     pub(crate) fn new(guard: Option<Arc<SendGuard>>) -> Gate {
         Gate {
-            pending: Arc::new(Semaphore::new(PENDING_INCOMING)),
+            pending: Arc::new(Semaphore::new(
+                if cfg!(feature = "mutant-si23-no-pending-cap") {
+                    256
+                } else {
+                    PENDING_INCOMING
+                },
+            )),
             rates: Mutex::new(Rates::new(Instant::now())),
             guard,
         }
@@ -178,5 +184,112 @@ mod tests {
             assert!(rates.sources.len() <= MAX_SOURCES);
         }
         assert!(admitted > MAX_SOURCES, "idle sources make room");
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+mod pending_tests {
+    use super::*;
+    use iroh::{
+        Endpoint, RelayMode,
+        endpoint::{EndpointHooks, presets},
+    };
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct Fixture {
+        _registration: kickoff_send_guard::Registration,
+    }
+    impl EndpointHooks for Fixture {}
+    struct Unfiltered;
+    impl kickoff_send_guard::Guard for Unfiltered {
+        fn admit(&self, _: u64, _: SocketAddr) -> bool {
+            true
+        }
+    }
+
+    async fn endpoint(ip: Ipv4Addr) -> Endpoint {
+        let bind = std::net::UdpSocket::bind((ip, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let registration = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
+        Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .bind_addr(bind)
+            .unwrap()
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![b"pending-test".to_vec()])
+            .hooks(Fixture {
+                _registration: registration,
+            })
+            .bind()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn si_23_only_sixteen_incoming_handshakes_hold_slots() {
+        let host = endpoint(Ipv4Addr::LOCALHOST).await;
+        let gate = Gate::new(None);
+        let mut clients = Vec::new();
+        let mut dialing = Vec::new();
+        let mut held = Vec::new();
+        for n in 1..=17 {
+            let client = endpoint(Ipv4Addr::new(127, 0, 1, n)).await;
+            let to = host.addr();
+            let ep = client.clone();
+            dialing.push(tokio::spawn(async move {
+                ep.connect(to, b"pending-test").await
+            }));
+            clients.push(client);
+            loop {
+                let incoming = tokio::time::timeout(Duration::from_secs(5), host.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let validated = incoming.remote_addr_validated();
+                let admitted = gate.admit(incoming);
+                if n == 17 {
+                    assert!(
+                        admitted.is_none(),
+                        "seventeenth handshake held a pending slot"
+                    );
+                    break;
+                }
+                if validated {
+                    held.push(admitted.expect("a free slot"));
+                    break;
+                }
+                assert!(admitted.is_none(), "unvalidated address needs retry");
+            }
+        }
+        assert_eq!(held.len(), 16);
+        let refused = dialing.pop().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), refused)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        for task in dialing {
+            task.abort();
+        }
+        for (incoming, permit) in held {
+            incoming.ignore();
+            drop(permit);
+        }
+        host.close().await;
+        for client in clients {
+            client.close().await;
+        }
     }
 }

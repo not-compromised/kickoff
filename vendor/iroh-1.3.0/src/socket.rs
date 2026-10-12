@@ -1358,6 +1358,9 @@ impl EndpointInner {
         conn: noq::Connection,
     ) -> impl Future<Output = Result<PathStateReceiver, RemoteStateActorStoppedError>> + Send + 'static
     {
+        for bind in self.sock.ip_bind_addrs() {
+            kickoff_send_guard::associate(*bind, conn.send_context(), *remote.as_bytes());
+        }
         let (tx, rx) = oneshot::channel();
         let sender = self.actor_sender.clone();
         async move {

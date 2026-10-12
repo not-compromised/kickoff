@@ -12,7 +12,7 @@ Changes from draft 2:
 - **Authority is enumerated at startup:** descriptor sweep, Landlock ABI 6 or later with every right handled, typed checks on received descriptors (R2-4).
 - **Game copies are immutable, manifest-validated generations** with leases. Windows copies use hardlinks where the user may create them (R2-8, §5.3).
 - **Windows LAN permits are bound to one game process and one user**, held by a service handle; WFP layers and arbitration are specified (R2-3). A **contained-game mode** (a separate low-integrity account) is proposed for Windows custom maps. Until it is verified, ban safety against a compromised game is not claimed on Windows (R2-1, §8.2).
-- **Transport egress guard** at the socket send path, through a vendored one-hook iroh patch; budgets on the session endpoint; the address-disclosure claim is narrowed (R2-9, R2-10).
+- **Transport egress guard** at the socket send path, through audited iroh and noq transport patches; budgets on the session endpoint; the address-disclosure claim is narrowed (R2-9, R2-10).
 - **Approvals** are immutable, single-use objects (R2-14).
 - **Release:** provenance approval is separate from reproduction; root epochs and freshness state; anti-rollback for manual installers (R2-11, R2-12). Distribution moves to GitHub Releases and a static landing page; the self-hosted download server of draft 2 hosts nothing.
 - **Relay:** vouchers charged to their issuer, revocation by restart, limits before admission, the shared-server option removed (R2-13).
@@ -147,7 +147,8 @@ kickoff/crates/
   game/     install discovery (read-only), copy generations, gamebox + display sandbox launch, state
   ipc/      local channels: peer authentication, versioned role-scoped commands
   secret/   Secret<T>, process hardening, diagnostics schema
-vendor/iroh-1.3.0/   upstream source plus one reviewed patch: the send-guard hook (§3.4)
+vendor/iroh-1.3.0/   upstream plus one audited send-guard patch (§3.4)
+vendor/noq-1.3.0/    upstream plus one audited stable send-context patch (§3.4)
 bins/  kickoffd  kickoff  kickoff-parse  kickoff-gamebox  kickoff-svc
 ui/  site/ (landing page)  packaging/  tests/
 ```
@@ -449,7 +450,7 @@ Rejected: Wintun (L3 only; its licence covers its API only, V), ovpn-dco-win (V)
 
 ### 3.4 Transport: iroh 1.3.0
 
-- Pinned `iroh = "=1.3.0"` and `iroh-relay = "=1.3.0"`, vendored with a committed `Cargo.lock` and built `--locked --offline` (PRIV-23). The vendored iroh carries exactly one patch, the send-guard hook below. A CI check compares the vendor tree to the upstream crate hash plus that patch.
+- Pinned `iroh = "=1.3.0"` and `iroh-relay = "=1.3.0"`, vendored with a committed `Cargo.lock` and built `--locked --offline` (PRIV-23). The vendored iroh carries one send-guard patch. Its noq 1.3.0 dependency carries one patch assigning a stable send context to each connection before its driver starts, preserving that context across socket rebinds. A CI check compares each vendor tree to its pinned upstream archive plus the audited patch. The dependency gate also checks these versions as registry packages because cargo deny omits path packages from RustSec and yanked checks.
 - **Door endpoint**: the persistent per-device identity. It is relay-only (`clear_ip_transports`, V iroh builder) and accepts only `kickoff/join/1`. It runs only while hosting, or while "friends may join" is on.
 - **Session endpoint**: a fresh key for each session.
   - `SessionBind::Direct(addr)` binds to the default-route interface address. With a specific bind, iroh reports only that address plus QAD's public address as candidates (V, `socket.rs:1922-1956`). The endpoint is recreated when the default route changes.
@@ -465,13 +466,13 @@ Rejected: Wintun (L3 only; its licence covers its API only, V), ovpn-dco-win (V)
   - Relays come only from the compiled `RelayMap`. A relay URL in a ticket is used only if it equals a map entry; otherwise it is ignored.
   - Direct addresses from tickets are used only if global, or inside a subnet directly connected to this host; loopback, link-local, 100.64/10, 10.75/16 and multicast are never used.
   - Importer and catalog HTTP follows §5.7. Relay credentials stay URL-scoped (V, iroh `actor.rs:1344`).
-- **Send guard (R2-10, PRIV-25, NET-15).** iroh chooses some destinations itself. QUIC NAT traversal sends probes to candidate addresses that the remote announces (V, `remote_state.rs:534, 947`), and no application `dial` sees them. iroh 1.3 has no send-path filter. Its custom-transport API is unstable and cannot wrap the IP transport (V, `endpoint.rs:814-827`). The vendored patch therefore calls `SendGuard::admit(dst)` in the IP transport's send path (`socket/transports/ip.rs`, `poll_send`) before the first packet to each destination.
+- **Send guard (R2-10, PRIV-25, NET-15).** iroh chooses some destinations itself. QUIC NAT traversal sends probes to candidate addresses that the remote announces (V, `remote_state.rs:534, 947`), and no application `dial` sees them. iroh 1.3 has no send-path filter. Its custom-transport API is unstable and cannot wrap the IP transport (V, `endpoint.rs:814-827`). The vendored patch therefore calls `SendGuard::admit(context, dst)` in the IP transport's send path (`socket/transports/ip.rs`, `poll_send`) before every packet. The context reaches this hook on ticket sends, NAT probes, path migration and QAD. Outbound peer contexts bind to their expected remote identity before the first send; inbound contexts bind to the verified identity before iroh registers candidate paths. QAD contexts may send only to their original relay-map destination. An unregistered transport refuses every send.
   - A new destination passes only if all of these hold:
     - it is global unicast or inside a directly connected subnet;
     - it is not this host's own address, the default gateway, a configured DNS resolver, loopback, link-local, 100.64/10, 10.75/16, multicast or broadcast;
     - its port is 1024 or higher and not on the §3.1 denylist;
     - the remote has fewer than 8 destinations that are not yet validated, and is under 4 new destinations per second.
-  - Approved destinations are cached per connection, so the hot path costs one hash lookup. Denied packets are dropped and counted. The policy is recomputed on route changes.
+  - Probe budgets belong to remote identities across concurrent connections and reconnects. Approved destinations are cached per connection context, so another connection cannot inherit the approval. A connection shutdown removes its approvals; its remote budget remains until expiry, preventing churn from resetting the rate. The hot path costs one cache lookup. Denied packets are dropped and counted. The policy is recomputed on route changes.
   - The guard runs where packets leave, so ticket addresses, NAT-traversal candidates, path migration and any future iroh path source all pass through it.
   - Residual risk: an admitted malicious peer can make your client send a bounded number of encrypted QUIC probes to UDP ports it chooses, on the internet or on your LAN. It cannot choose their content.
 - **Rebuttal conceded (NET-15).** Draft 2 said altered ticket addresses "can only break the dial". That was false. Dials have network effects before authentication. The send guard and the destination policy bound those effects, and §4.2 states what a ticket's authenticity rests on.
@@ -714,7 +715,7 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 | Control | 64 KiB per message, 32 messages/s, 256 KiB/s; streams 4 bidi, opened at most 4/s |
 | Map requests | 1 in flight per peer, 10 per minute |
 | Host fan-out | host egress at most 16 MB/s overall, charged per emitted copy; discovery broadcasts 10/s per sender, payload ≤ 1252 bytes |
-| Egress guard | at most 8 unvalidated destinations per remote, 4 new per second |
+| Egress guard | at most 8 unvalidated destinations per remote, 4 new per second; 256 unknown connection contexts, 16 reserved for expected or admitted peers, 16 separate QAD contexts |
 | Parse jobs | 2 concurrent, queue of 8; per job: memory cgroup or Job limit, CPU time, input and output byte caps counted by kickoffd, deadline |
 | Disk | before a transfer, reserve the size plus 64 MiB; before a refresh, reserve the files that cannot be shared plus 1 GiB; keep at least 5 GiB free; library quota 20 GiB with least-recently-used eviction of unpinned objects |
 | Game (Linux) | cgroup `memory.max` 12 GiB including the 4 GiB tmpfs prefix; `pids.max` 512; `RLIMIT_FSIZE` 4 GiB. Disk I/O bandwidth is not limited (the `io` controller is not delegated, V) |
@@ -818,7 +819,7 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
   - the frontend lockfile through `osv-scanner`;
   - pinned NSIS and WebView2 bootstrapper versions with recorded hashes, and an Authenticode check of the bootstrapper;
   - a watch of tap-windows6 advisories;
-  - the vendored-iroh diff check (§3.4);
+  - the vendored iroh and noq diff checks and registry advisory checks (§3.4);
   - the Windows import audit (§3.3).
 - **Response deadlines**: critical advisories fixed or mitigated within 7 days, high within 30. Exceptions are entries in `deny.toml` with an expiry date that CI enforces; none lasts more than 90 days.
 - Third-party notices: MIT and Apache crates, iroh's `LICENSE-BSD3`, and tap-windows6 (GPLv2) shipped byte-identical with COPYING and its source tarball, as a separate program aggregated with Kickoff (GPL-3.0).

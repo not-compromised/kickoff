@@ -15,9 +15,15 @@ step "unsafe guard"
 # a member crate that does not inherit the workspace lints at all.
 pattern='\bunsafe[[:space:]]*(\{|fn\b|impl\b|trait\b|extern\b)|(allow|expect|warn)\([^)]*\bunsafe_code\b|unsafe_code[[:space:]]*=[[:space:]]*"(allow|warn)"'
 if hits=$(grep -rnE --include='*.rs' --include='*.toml' "$pattern" \
-    --exclude-dir=target --exclude-dir=.git --exclude=check.sh . ); then
+    --exclude-dir=target --exclude-dir=.git --exclude-dir=vendor --exclude=check.sh . ); then
     printf '%s\n' "$hits"
     echo "unsafe guard: unsafe code or an unsafe_code override found" >&2
+    exit 1
+fi
+# Upstream dependencies may use unsafe; our audited patch may not add it.
+if hits=$(awk '/^\+[^+]/{print FILENAME ":" FNR ":" substr($0,2)}' vendor/*.patch | grep -E "$pattern"); then
+    printf '%s\n' "$hits"
+    echo "unsafe guard: a vendored patch adds unsafe code" >&2
     exit 1
 fi
 for manifest in crates/*/Cargo.toml bins/*/Cargo.toml xtask/Cargo.toml; do
@@ -28,8 +34,8 @@ for manifest in crates/*/Cargo.toml bins/*/Cargo.toml xtask/Cargo.toml; do
 done
 echo ok
 
-step "vendored iroh (design §3.4)"
-# Upstream iroh 1.3.0 plus the one reviewed patch, nothing else.
+step "vendored transport dependencies (design §3.4)"
+# Each dependency is upstream 1.3.0 plus its audited patch, nothing else.
 scripts/check-vendor.sh
 
 step "cargo fmt --check"
@@ -52,6 +58,7 @@ cargo test --release --locked -p kickoff-vlan --test hot_path
 
 step "cargo deny"
 cargo deny check --hide-inclusion-graph
+scripts/check-upstream-advisories.sh
 
 step "mutants (SI-33)"
 # Each registered mutant's test must pass on the plain build and fail with the

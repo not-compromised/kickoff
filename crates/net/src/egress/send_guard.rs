@@ -12,11 +12,11 @@
 //! Every destination passes `View::allows` first. Known destinations cost one
 //! hash lookup per packet; refused packets are dropped and counted.
 //!
-//! The IP send path carries no remote identity (iroh has already mapped the
-//! path to a socket address), so the unvalidated budget is per endpoint, not
-//! per remote. On a guest, whose one remote is the host, that is the same.
+//! The patched transport preserves a stable connection context across sends
+//! and rebinds. Probe budgets belong to remote identities; approved paths
+//! belong to connection contexts, even when peers share one destination.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -41,6 +41,8 @@ const MAX_ANSWERED: usize = 64;
 const ANSWER_TTL: Duration = Duration::from_secs(10);
 /// Connections whose paths count as validated.
 const MAX_TRACKED: usize = 256;
+const TRUSTED_RESERVED: usize = 16;
+const PROBE_RESERVED: usize = 16;
 
 /// The policy's inputs that change with the host's interfaces and routes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,34 +169,116 @@ fn resolvers() -> Vec<Ipv4Addr> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Known {
     Validated,
-    Answered { until: Instant },
     Unvalidated { until: Instant },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Owner {
+    Remote([u8; 32]),
+    Probe(u64),
+}
+
+#[derive(Debug)]
+struct RemoteBudget {
+    trusted: bool,
+    touched: Instant,
+    known: HashMap<SocketAddr, Instant>,
+    new: Bucket,
+}
+
+#[derive(Debug)]
+struct ContextState {
+    trusted: bool,
+    owner: Owner,
+    original_probe: Option<SocketAddr>,
+    known: HashMap<SocketAddr, Known>,
 }
 
 #[derive(Debug)]
 struct State {
     view: View,
-    known: HashMap<SocketAddr, Known>,
-    new: Bucket,
+    approved: HashSet<(u64, SocketAddr)>,
+    contexts: HashMap<u64, ContextState>,
+    remotes: HashMap<Owner, RemoteBudget>,
+    answered: HashMap<SocketAddr, Instant>,
 }
 
 impl State {
-    fn forget_expired(&mut self, now: Instant) {
-        self.known.retain(|_, k| match k {
-            Known::Validated => true,
-            Known::Answered { until } | Known::Unvalidated { until } => now < *until,
+    fn associate(
+        &mut self,
+        context: u64,
+        owner: Owner,
+        probe: Option<SocketAddr>,
+        trusted: bool,
+        now: Instant,
+    ) {
+        if context == 0 {
+            return;
+        }
+        if let Some(ctx) = self.contexts.get_mut(&context) {
+            if trusted && ctx.owner == owner {
+                ctx.trusted = true;
+                if let Some(remote) = self.remotes.get_mut(&owner) {
+                    remote.trusted = true;
+                }
+            }
+            return;
+        }
+        self.remotes.retain(|owner, budget| {
+            self.contexts.values().any(|ctx| ctx.owner == *owner)
+                || now.saturating_duration_since(budget.touched) < UNVALIDATED_TTL
         });
-    }
-
-    fn count(&self, f: impl Fn(&Known) -> bool) -> usize {
-        self.known.values().filter(|k| f(k)).count()
+        let trusted = trusted && !cfg!(feature = "mutant-si23-guard-no-trusted-slots");
+        let probe_owner = matches!(owner, Owner::Probe(_));
+        let capacity = if probe_owner {
+            PROBE_RESERVED
+        } else if trusted {
+            TRUSTED_RESERVED
+        } else {
+            MAX_TRACKED
+        };
+        let contexts = self
+            .contexts
+            .values()
+            .filter(|ctx| {
+                ctx.trusted == trusted && matches!(ctx.owner, Owner::Probe(_)) == probe_owner
+            })
+            .count();
+        let remotes = self
+            .remotes
+            .iter()
+            .filter(|(key, remote)| {
+                remote.trusted == trusted && matches!(key, Owner::Probe(_)) == probe_owner
+            })
+            .count();
+        if contexts >= capacity || (!self.remotes.contains_key(&owner) && remotes >= capacity) {
+            return;
+        }
+        self.remotes
+            .entry(owner)
+            .and_modify(|budget| budget.trusted |= trusted)
+            .or_insert_with(|| RemoteBudget {
+                trusted,
+                touched: now,
+                known: HashMap::new(),
+                new: Bucket::new(now, NEW_PER_SEC, NEW_PER_SEC),
+            });
+        self.contexts.insert(
+            context,
+            ContextState {
+                trusted,
+                owner,
+                original_probe: probe,
+                known: HashMap::new(),
+            },
+        );
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct SendGuard {
     state: Mutex<State>,
-    conns: Mutex<Vec<WeakConnectionHandle>>,
+    conns: Mutex<HashMap<u64, WeakConnectionHandle>>,
     denied: AtomicU64,
 }
 
@@ -203,10 +287,12 @@ impl SendGuard {
         SendGuard {
             state: Mutex::new(State {
                 view,
-                known: HashMap::new(),
-                new: Bucket::new(Instant::now(), NEW_PER_SEC, NEW_PER_SEC),
+                approved: HashSet::new(),
+                contexts: HashMap::new(),
+                remotes: HashMap::new(),
+                answered: HashMap::new(),
             }),
-            conns: Mutex::new(Vec::new()),
+            conns: Mutex::new(HashMap::new()),
             denied: AtomicU64::new(0),
         }
     }
@@ -217,105 +303,183 @@ impl SendGuard {
 
     /// One packet to `dst`. `now` is read only when the destination is not
     /// already validated.
-    pub(crate) fn decide(&self, dst: SocketAddr, now: impl FnOnce() -> Instant) -> bool {
+    pub(crate) fn decide(
+        &self,
+        context: u64,
+        dst: SocketAddr,
+        now: impl FnOnce() -> Instant,
+    ) -> bool {
         let mut state = self.state();
-        let now = match state.known.get(&dst) {
-            Some(Known::Validated) => return true,
-            Some(Known::Answered { until } | Known::Unvalidated { until }) => {
-                let now = now();
-                if now < *until {
-                    return true;
+        if state.approved.contains(&(context, dst)) {
+            return true;
+        }
+        let now = now();
+        if !state.view.allows(dst) {
+            self.denied.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        let Some(ctx) = state.contexts.get_mut(&context) else {
+            let allowed = state.answered.get(&dst).is_some_and(|until| now < *until);
+            if !allowed {
+                self.denied.fetch_add(1, Ordering::Relaxed);
+            }
+            return allowed;
+        };
+        if !ctx.trusted && state.answered.get(&dst).is_some_and(|until| now < *until) {
+            return true;
+        }
+        let Some(ctx) = state.contexts.get_mut(&context) else {
+            return false;
+        };
+        let owner = ctx.owner;
+        let probe_allowed = ctx.original_probe.is_none_or(|original| original == dst);
+        if !probe_allowed {
+            self.denied.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if ctx
+            .known
+            .get(&dst)
+            .is_some_and(|k| matches!(k, Known::Unvalidated { until } if now < *until))
+        {
+            return true;
+        }
+        let validated_elsewhere = state
+            .contexts
+            .values()
+            .any(|ctx| ctx.owner == owner && ctx.known.get(&dst) == Some(&Known::Validated));
+        let Some(budget) = state.remotes.get_mut(&owner) else {
+            return false;
+        };
+        budget.touched = now;
+        budget.known.retain(|_, until| now < *until);
+        let already_probing = budget.known.get(&dst).is_some_and(|until| now < *until);
+        let allowed = validated_elsewhere
+            || already_probing
+            || cfg!(feature = "mutant-si29-guard-no-destination-cap")
+            || (budget.known.len() < MAX_UNVALIDATED && budget.new.charge(now, 1));
+        if allowed {
+            let until = now.checked_add(UNVALIDATED_TTL).unwrap_or(now);
+            if !validated_elsewhere {
+                budget.known.insert(dst, until);
+            }
+            if let Some(ctx) = state.contexts.get_mut(&context) {
+                ctx.known.retain(|_, k| {
+                    *k == Known::Validated
+                        || matches!(k, Known::Unvalidated { until } if now < *until)
+                });
+                if ctx.known.len() < MAX_UNVALIDATED.saturating_add(MAX_UNVALIDATED) {
+                    ctx.known.insert(dst, Known::Unvalidated { until });
                 }
-                now
             }
-            None => now(),
-        };
-        let admitted = state.view.allows(dst) && {
-            state.forget_expired(now);
-            let budget = cfg!(feature = "mutant-si29-guard-no-destination-cap")
-                || (state.count(|k| matches!(k, Known::Unvalidated { .. })) < MAX_UNVALIDATED
-                    && state.new.charge(now, 1));
-            if budget {
-                let until = now.checked_add(UNVALIDATED_TTL).unwrap_or(now);
-                state.known.insert(dst, Known::Unvalidated { until });
-            }
-            budget
-        };
-        if !admitted {
+        } else {
             self.denied.fetch_add(1, Ordering::Relaxed);
         }
-        admitted
+        allowed
     }
 
-    /// `src` sent this endpoint an `Incoming` that it is about to answer. The
-    /// answer still has to pass the policy, but not the probe budget, so a
-    /// flood of spoofed sources cannot spend the budget peers' paths need.
     pub(crate) fn answer(&self, src: SocketAddr, now: Instant) {
         let mut state = self.state();
-        if !state.view.allows(src) || state.known.get(&src) == Some(&Known::Validated) {
+        if !state.view.allows(src) {
             return;
         }
-        state.forget_expired(now);
-        let answered = |k: &Known| matches!(k, Known::Answered { .. });
-        if !matches!(state.known.get(&src), Some(Known::Answered { .. }))
-            && state.count(answered) >= MAX_ANSWERED
-        {
-            let oldest = state
-                .known
+        state.answered.retain(|_, until| now < *until);
+        if !state.answered.contains_key(&src)
+            && state.answered.len() >= MAX_ANSWERED
+            && let Some(oldest) = state
+                .answered
                 .iter()
-                .filter_map(|(addr, k)| match k {
-                    Known::Answered { until } => Some((*until, *addr)),
-                    _ => None,
-                })
-                .min();
-            if let Some((_, addr)) = oldest {
-                state.known.remove(&addr);
-            }
+                .min_by_key(|(_, until)| *until)
+                .map(|(addr, _)| *addr)
+        {
+            state.answered.remove(&oldest);
         }
-        let until = now.checked_add(ANSWER_TTL).unwrap_or(now);
-        state.known.insert(src, Known::Answered { until });
+        state
+            .answered
+            .insert(src, now.checked_add(ANSWER_TTL).unwrap_or(now));
     }
 
     /// Counts `conn`'s IP paths as validated from the next `rescan` on.
     pub(crate) fn track(&self, conn: &Connection) {
-        let mut conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
-        if conns.len() >= MAX_TRACKED {
-            conns.retain(|c| c.upgrade().is_some_and(|c| c.close_reason().is_none()));
+        // Noq holds its mutex while invoking the guard. Snapshot connections
+        // before taking any guard lock, including the tracked-handle lock.
+        let context = conn.send_context();
+        let owner = Owner::Remote(*conn.remote_id().as_bytes());
+        let weak = conn.weak_handle();
+        if cfg!(feature = "mutant-si23-guard-locks-before-connection") {
+            self.state()
+                .associate(conn.send_context(), owner, None, true, Instant::now());
+        } else {
+            self.state()
+                .associate(context, owner, None, true, Instant::now());
         }
+        let full = self
+            .conns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+            >= MAX_TRACKED;
+        if full {
+            self.rescan();
+        }
+        let mut conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
         if conns.len() < MAX_TRACKED {
-            conns.push(conn.weak_handle());
+            conns.insert(context, weak);
         }
     }
 
-    /// Validated destinations become exactly the open IP paths of the tracked
-    /// connections that are still alive.
+    /// Validated destinations are exactly the open IP paths of live tracked
+    /// connections. Concurrently added handles wait for the next snapshot.
     pub(crate) fn rescan(&self) {
+        let snapshot = self
+            .conns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut dead = Vec::new();
         let mut paths = Vec::new();
-        {
-            let mut conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
-            conns.retain(|weak| {
-                let Some(conn) = weak.upgrade().filter(|c| c.close_reason().is_none()) else {
-                    return false;
-                };
-                paths.extend(conn.paths().iter().filter_map(|p| match p.remote_addr() {
-                    TransportAddr::Ip(sock) => Some(*sock),
-                    _ => None,
-                }));
-                true
-            });
+        for (context, weak) in snapshot {
+            let Some(conn) = weak.upgrade().filter(|c| c.close_reason().is_none()) else {
+                dead.push(context);
+                continue;
+            };
+            paths.extend(conn.paths().iter().filter_map(|p| match p.remote_addr() {
+                TransportAddr::Ip(sock) => Some((context, *sock)),
+                _ => None,
+            }));
         }
+        self.conns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|context, _| !dead.contains(context));
         self.set_validated(paths);
     }
 
-    fn set_validated(&self, paths: Vec<SocketAddr>) {
+    fn set_validated(&self, paths: Vec<(u64, SocketAddr)>) {
         let mut state = self.state();
-        state
-            .known
-            .retain(|addr, k| *k != Known::Validated || paths.contains(addr));
-        for addr in paths {
+        for (context, ctx) in &mut state.contexts {
+            ctx.known
+                .retain(|addr, k| *k != Known::Validated || paths.contains(&(*context, *addr)));
+        }
+        state.approved.clear();
+        for (context, addr) in paths {
             let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
-            if state.view.allows(addr) {
-                state.known.insert(addr, Known::Validated);
+            if !state.view.allows(addr) {
+                continue;
+            }
+            let Some(ctx) = state.contexts.get_mut(&context) else {
+                continue;
+            };
+            if ctx.known.len() >= MAX_UNVALIDATED.saturating_add(MAX_UNVALIDATED)
+                && !ctx.known.contains_key(&addr)
+            {
+                continue;
+            }
+            let owner = ctx.owner;
+            ctx.known.insert(addr, Known::Validated);
+            state.approved.insert((context, addr));
+            if let Some(remote) = state.remotes.get_mut(&owner) {
+                remote.known.remove(&addr);
             }
         }
     }
@@ -330,7 +494,14 @@ impl SendGuard {
         }
         state.view = view;
         if !cfg!(feature = "mutant-si29-guard-keeps-cache") {
-            state.known.clear();
+            state.approved.clear();
+            for ctx in state.contexts.values_mut() {
+                ctx.known.clear();
+            }
+            for remote in state.remotes.values_mut() {
+                remote.known.clear();
+            }
+            state.answered.clear();
         }
         true
     }
@@ -346,8 +517,39 @@ impl SendGuard {
 }
 
 impl kickoff_send_guard::Guard for SendGuard {
-    fn admit(&self, dst: SocketAddr) -> bool {
-        self.decide(dst, Instant::now)
+    fn admit(&self, context: u64, dst: SocketAddr) -> bool {
+        self.decide(context, dst, Instant::now)
+    }
+    fn associate(&self, context: u64, remote: [u8; 32]) {
+        let owner = if cfg!(feature = "mutant-si29-shared-remote-budget") {
+            Owner::Remote([0; 32])
+        } else {
+            Owner::Remote(remote)
+        };
+        self.state()
+            .associate(context, owner, None, false, Instant::now());
+    }
+    fn expect(&self, context: u64, remote: [u8; 32]) {
+        self.state()
+            .associate(context, Owner::Remote(remote), None, true, Instant::now());
+    }
+    fn probe(&self, context: u64, dst: SocketAddr) {
+        self.state().associate(
+            context,
+            Owner::Probe(context),
+            if cfg!(feature = "mutant-si29-probe-any-destination") {
+                None
+            } else {
+                Some(dst)
+            },
+            true,
+            Instant::now(),
+        );
+    }
+    fn forget(&self, context: u64) {
+        let mut state = self.state();
+        state.contexts.remove(&context);
+        state.approved.retain(|(owner, _)| *owner != context);
     }
 }
 
@@ -383,12 +585,14 @@ mod tests {
     }
 
     fn guard() -> SendGuard {
-        SendGuard::new(lan_view())
+        let guard = SendGuard::new(lan_view());
+        kickoff_send_guard::Guard::associate(&guard, 1, [1; 32]);
+        guard
     }
 
     /// One packet to `dst` at time `t`.
     fn admits(guard: &SendGuard, dst: SocketAddr, t: Instant) -> bool {
-        guard.decide(dst, || t)
+        guard.decide(1, dst, || t)
     }
 
     #[test]
@@ -451,6 +655,86 @@ mod tests {
     }
 
     #[test]
+    fn si_23_guard_preserves_slots_for_expected_or_admitted_peers() {
+        let g = guard();
+        let t = Instant::now();
+        for n in 1..=MAX_TRACKED {
+            let mut remote = [0; 32];
+            remote[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            kickoff_send_guard::Guard::associate(&g, n as u64, remote);
+            for port in 40000..40004 {
+                assert!(g.decide(n as u64, SocketAddr::from((ip("203.0.114.9"), port)), || t));
+            }
+        }
+        assert_eq!(g.state().contexts.len(), MAX_TRACKED);
+        kickoff_send_guard::Guard::expect(&g, u64::MAX, [254; 32]);
+        assert!(
+            g.decide(u64::MAX, sock("203.0.114.8:40000"), || t),
+            "invalid identities spent a locally expected peer's slots"
+        );
+        let admitted_context = u64::MAX - 1;
+        g.state()
+            .associate(admitted_context, Owner::Remote([253; 32]), None, true, t);
+        assert!(
+            g.decide(admitted_context, sock("203.0.114.7:40000"), || t),
+            "invalid identities spent an admitted peer's slots"
+        );
+    }
+
+    #[test]
+    fn si_29_qad_cannot_choose_another_destination() {
+        let g = guard();
+        let t = Instant::now();
+        let relay = sock("203.0.114.9:7842");
+        kickoff_send_guard::Guard::probe(&g, 99, relay);
+        assert!(g.decide(99, relay, || t));
+        assert!(!g.decide(99, sock("203.0.114.8:7842"), || t));
+        assert!(!g.decide(99, sock("203.0.114.9:7843"), || t));
+    }
+
+    #[test]
+    fn si_29_each_remote_keeps_its_probe_budget_and_cache() {
+        let g = guard();
+        kickoff_send_guard::Guard::associate(&g, 2, [2; 32]);
+        kickoff_send_guard::Guard::associate(&g, 3, [1; 32]);
+        let t = Instant::now();
+        let peer = |n: u32| SocketAddr::from((Ipv4Addr::from(0xCB00_7200 + n), 40000));
+        for n in 1..=4 {
+            assert!(g.decide(1, peer(n), || t));
+        }
+        for n in 5..=8 {
+            assert!(
+                g.decide(2, peer(n), || t),
+                "another peer lost its own budget"
+            );
+        }
+        assert!(
+            !g.decide(3, peer(9), || t),
+            "two connections bypassed one remote's rate"
+        );
+        let later = t + Duration::from_secs(1);
+        for n in 9..=12 {
+            assert!(g.decide(1, peer(n), || later));
+        }
+        assert!(
+            !g.decide(3, peer(13), || later),
+            "two connections bypassed one remote's destination cap"
+        );
+        g.set_validated(vec![(1, peer(1))]);
+        assert!(
+            !g.decide(2, peer(1), || t),
+            "one peer inherited another connection's approved cache"
+        );
+        assert!(g.decide(1, peer(1), || t));
+        kickoff_send_guard::Guard::forget(&g, 2);
+        kickoff_send_guard::Guard::associate(&g, 4, [2; 32]);
+        assert!(
+            !g.decide(4, peer(1), || t),
+            "reconnecting reset the remote's rate budget"
+        );
+    }
+
+    #[test]
     fn si_29_send_guard_caps_unvalidated_destinations() {
         let g = guard();
         let t = Instant::now();
@@ -468,7 +752,7 @@ mod tests {
         let t2 = t + Duration::from_secs(3);
         assert!(!admits(&g, peer(9), t2), "a ninth unvalidated destination");
         // Validation frees the slot.
-        g.set_validated(vec![peer(1), peer(2)]);
+        g.set_validated(vec![(1, peer(1)), (1, peer(2))]);
         assert!(admits(&g, peer(9), t2));
         assert!(admits(&g, peer(10), t2));
         assert!(!admits(&g, peer(11), t2));
@@ -489,7 +773,7 @@ mod tests {
         let public = sock("203.0.114.9:40000");
         assert!(admits(&g, peer, t));
         assert!(admits(&g, public, t));
-        g.set_validated(vec![peer]);
+        g.set_validated(vec![(1, peer)]);
 
         // Moved to another network: the old LAN peer is now off-subnet, and
         // the public peer's address is now our own router.
@@ -520,10 +804,10 @@ mod tests {
         for n in 0..(MAX_ANSWERED as u32 + 10) {
             let src = SocketAddr::from((Ipv4Addr::from(0xCB00_7300 + n), 40000));
             g.answer(src, t);
-            assert!(admits(&g, src, t), "an answered source");
+            assert!(g.decide(0, src, || t), "an answered source");
         }
         let state = g.state();
-        assert!(state.count(|k| matches!(k, Known::Answered { .. })) <= MAX_ANSWERED);
+        assert!(state.answered.len() <= MAX_ANSWERED);
         drop(state);
         let peer = |n: u32| SocketAddr::from((Ipv4Addr::from(0xCB00_7200 + n), 40000));
         assert!(
@@ -546,6 +830,7 @@ mod tests {
             Vec::new(),
         ));
         let t = Instant::now();
+        kickoff_send_guard::Guard::associate(&g, 1, [1; 32]);
         assert!(admits(&g, sock("127.0.0.1:40000"), t));
         assert!(!admits(&g, sock("127.0.0.1:53"), t));
         assert!(!admits(&g, sock("192.168.1.30:40000"), t));
@@ -570,7 +855,8 @@ mod hot_path {
         let peer: SocketAddr = "127.0.0.1:47002".parse().unwrap();
         let view = View::new(IfaceAddr::loopback(), Vec::new(), Vec::new(), Vec::new());
         let guard = Arc::new(SendGuard::new(view));
-        guard.set_validated(vec![peer]);
+        kickoff_send_guard::Guard::associate(guard.as_ref(), 1, [1; 32]);
+        guard.set_validated(vec![(1, peer)]);
         let as_hook: Arc<dyn kickoff_send_guard::Guard> = guard.clone();
         let _registration = kickoff_send_guard::register(bind, as_hook).unwrap();
         const SENDS: u32 = 1_000_000;
@@ -580,6 +866,7 @@ mod hot_path {
             for _ in 0..SENDS {
                 assert!(kickoff_send_guard::admit(
                     std::hint::black_box(bind),
+                    std::hint::black_box(1),
                     std::hint::black_box(peer)
                 ));
             }

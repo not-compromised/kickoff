@@ -471,6 +471,7 @@ impl Transports {
         let max_transmit_segments = self.max_transmit_segments();
 
         TransportsSender {
+            context: 0,
             #[cfg(not(wasm_browser))]
             ip,
             relay,
@@ -953,6 +954,7 @@ impl fmt::Display for FourTuple {
 /// A sender that sends to all our transports.
 #[derive(Debug, Clone)]
 pub(crate) struct TransportsSender {
+    context: u64,
     #[cfg(not(wasm_browser))]
     ip: IpTransportsSender,
     relay: Vec<RelaySender>,
@@ -968,6 +970,7 @@ impl TransportsSender {
         network_path: &FourTuple,
         transmit: &Transmit<'_>,
     ) -> Poll<io::Result<()>> {
+        let context = self.context;
         match network_path {
             #[cfg(wasm_browser)]
             FourTuple::Ip { .. } => {
@@ -984,12 +987,12 @@ impl TransportsSender {
                         .v4_iter_mut()
                         .find(|s| s.is_valid_send_addr(*src, dst_addr))
                     {
-                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, transmit);
+                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, context, transmit);
                     }
                     if let Some(sender) = self.ip.v4_default_mut()
                         && sender.is_valid_default_addr(*src, dst_addr)
                     {
-                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, transmit);
+                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, context, transmit);
                     }
                 }
                 SocketAddr::V6(_) => {
@@ -998,12 +1001,12 @@ impl TransportsSender {
                         .v6_iter_mut()
                         .find(|s| s.is_valid_send_addr(*src, dst_addr))
                     {
-                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, transmit);
+                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, context, transmit);
                     }
                     if let Some(sender) = self.ip.v6_default_mut()
                         && sender.is_valid_default_addr(*src, dst_addr)
                     {
-                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, transmit);
+                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, context, transmit);
                     }
                 }
             },
@@ -1138,7 +1141,7 @@ impl noq::AsyncUdpSocket for Transport {
 /// [`Socket`] which expands it back to one or more [`Addr`]s and sends it
 /// using the underlying [`Transports`].
 #[derive(Debug)]
-#[pin_project::pin_project]
+#[pin_project::pin_project(PinnedDrop)]
 pub(crate) struct Sender {
     sock: Arc<Socket>,
     #[pin]
@@ -1163,7 +1166,37 @@ impl Sender {
     }
 }
 
+#[pin_project::pinned_drop]
+impl PinnedDrop for Sender {
+    fn drop(self: Pin<&mut Self>) {
+        for bind in self.sock.ip_bind_addrs() {
+            kickoff_send_guard::forget(*bind, self.sender.context);
+        }
+    }
+}
+
 impl noq::UdpSender for Sender {
+    fn set_connection_context(mut self: Pin<&mut Self>, context: u64, initial_destination: SocketAddr, is_client: bool) {
+        self.sender.context = context;
+        if is_client {
+            match MultipathMappedAddr::from(initial_destination) {
+                MultipathMappedAddr::Mixed(mapped) => {
+                    if let Some(remote) = self.sock.mapped_addrs.endpoint_addrs.lookup(&mapped) {
+                        for bind in self.sock.ip_bind_addrs() {
+                            kickoff_send_guard::expect(*bind, context, *remote.as_bytes());
+                        }
+                    }
+                }
+                MultipathMappedAddr::Ip(dst) => {
+                    for bind in self.sock.ip_bind_addrs() {
+                        kickoff_send_guard::probe(*bind, context, SocketAddr::new(dst.ip().to_canonical(), dst.port()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn poll_send(
         self: Pin<&mut Self>,
         noq_transmit: &noq_udp::Transmit,
@@ -1326,6 +1359,7 @@ mod tests {
             use futures_util::StreamExt;
             let (sender, receiver) = RelaySender::bounded_for_test(capacity);
             let sender = TransportsSender {
+                context: 0,
                 #[cfg(not(wasm_browser))]
                 ip: IpTransports::bind(ip_configs, &EndpointMetrics::default())
                     .expect("test transports must bind")
