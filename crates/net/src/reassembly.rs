@@ -3,12 +3,13 @@
 //! each at most `MAX_FRAGMENTS` received datagrams, each dropped after
 //! `DEADLINE`. The tables are fixed arrays, so a fragment flood cannot grow them.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use kickoff_wire::{FragmentHeader, LanHeader, MAX_FRAGMENTS};
+use kickoff_wire::{FragmentHeader, LanHeader, MAX_FRAGMENTS, MAX_ROSTER, PeerSlot};
+
+use crate::Role;
 
 pub(crate) const PER_LINK: usize = if cfg!(feature = "mutant-si23-no-per-link-reassembly-cap") {
     GLOBAL
@@ -19,39 +20,93 @@ pub(crate) const GLOBAL: usize = 32;
 pub(crate) const DEADLINE: Duration = Duration::from_millis(50);
 const PARTS: usize = MAX_FRAGMENTS as usize;
 
-/// The endpoint-wide count of assemblies in flight, shared by its links.
+/// Counts stay charged until the owning assembly actually releases its chunks.
+#[derive(Debug)]
+pub(crate) struct GlobalBudget {
+    counts: Mutex<Counts>,
+    reserved: [bool; MAX_ROSTER as usize + 1],
+}
+
 #[derive(Debug, Default)]
-pub(crate) struct GlobalBudget(AtomicUsize);
+struct Counts {
+    total: usize,
+    peers: [usize; MAX_ROSTER as usize + 1],
+}
+
+impl Default for GlobalBudget {
+    fn default() -> Self {
+        Self::new(Role::Host)
+    }
+}
 
 impl GlobalBudget {
-    fn acquire(self: &Arc<Self>) -> Option<GlobalSlot> {
-        self.0
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (cfg!(feature = "mutant-si23-no-global-reassembly-cap") || n < GLOBAL)
-                    .then(|| n.saturating_add(1))
-            })
-            .ok()
-            .map(|_| GlobalSlot(Arc::clone(self)))
+    pub(crate) fn new(role: Role) -> Self {
+        let reserved = std::array::from_fn(|slot| match role {
+            Role::Host => slot > usize::from(PeerSlot::HOST.get()),
+            Role::Guest => slot == usize::from(PeerSlot::HOST.get()),
+        });
+        Self {
+            counts: Mutex::default(),
+            reserved,
+        }
+    }
+
+    fn acquire(self: &Arc<Self>, peer: PeerSlot) -> Option<GlobalSlot> {
+        let index = usize::from(peer.get());
+        if !self.reserved.get(index).copied().unwrap_or(false) {
+            return None;
+        }
+        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        // An idle peer keeps one place. Only the remaining capacity is borrowed.
+        let other_idle = self
+            .reserved
+            .iter()
+            .zip(&counts.peers)
+            .enumerate()
+            .filter(|(slot, (reserved, used))| *slot != index && **reserved && **used == 0)
+            .count();
+        if !cfg!(feature = "mutant-si23-no-global-reassembly-cap")
+            && (counts.total >= GLOBAL
+                || (!cfg!(feature = "mutant-si23-reassembly-no-peer-reserve")
+                    && counts.total >= GLOBAL.saturating_sub(other_idle)))
+        {
+            return None;
+        }
+        let used = counts.peers.get_mut(index)?;
+        *used = used.saturating_add(1);
+        counts.total = counts.total.saturating_add(1);
+        Some(GlobalSlot {
+            global: Arc::clone(self),
+            peer,
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn in_use(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .total
     }
 }
 
-/// One unit of `GlobalBudget`, returned when its assembly ends for any reason.
 #[derive(Debug)]
-struct GlobalSlot(Arc<GlobalBudget>);
+struct GlobalSlot {
+    global: Arc<GlobalBudget>,
+    peer: PeerSlot,
+}
 
 impl Drop for GlobalSlot {
     fn drop(&mut self) {
-        let _ = self
-            .0
-            .0
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                Some(n.saturating_sub(1))
-            });
+        let mut counts = self
+            .global
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(used) = counts.peers.get_mut(usize::from(self.peer.get())) {
+            *used = used.saturating_sub(1);
+        }
+        counts.total = counts.total.saturating_sub(1);
     }
 }
 
@@ -80,13 +135,15 @@ pub(crate) enum Outcome {
 pub(crate) struct Reassembler {
     slots: [Option<Assembly>; PER_LINK],
     global: Arc<GlobalBudget>,
+    peer: PeerSlot,
 }
 
 impl Reassembler {
-    pub(crate) fn new(global: Arc<GlobalBudget>) -> Reassembler {
+    pub(crate) fn new(global: Arc<GlobalBudget>, peer: PeerSlot) -> Reassembler {
         Reassembler {
             slots: Default::default(),
             global,
+            peer,
         }
     }
 
@@ -140,7 +197,7 @@ impl Reassembler {
         let Some(free) = self.slots.iter_mut().find(|s| s.is_none()) else {
             return Outcome::Full;
         };
-        let Some(global) = self.global.acquire() else {
+        let Some(global) = self.global.acquire(self.peer) else {
             return Outcome::Full;
         };
         let mut parts: [Option<Bytes>; PARTS] = Default::default();
@@ -183,7 +240,12 @@ impl Reassembler {
     }
 
     #[cfg(test)]
-    fn held(&self) -> (usize, usize) {
+    pub(crate) fn in_use(&self) -> usize {
+        self.global.in_use()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> (usize, usize) {
         let live = self.slots.iter().flatten();
         let bytes = live
             .clone()
@@ -235,7 +297,7 @@ mod tests {
 
     #[test]
     fn reassembles_out_of_order() {
-        let mut r = Reassembler::new(Arc::default());
+        let mut r = Reassembler::new(Arc::default(), PeerSlot::new(2).unwrap());
         let t = Instant::now();
         assert_eq!(
             r.accept(t, header(1), frag(9, 2, 3), chunk(3, 2)),
@@ -261,7 +323,7 @@ mod tests {
             (header(1), frag(5, 1, 3)),
             (header(1), frag(5, 0, 2)),
         ] {
-            let mut r = Reassembler::new(Arc::default());
+            let mut r = Reassembler::new(Arc::default(), PeerSlot::new(2).unwrap());
             assert_eq!(
                 r.accept(t, header(1), frag(5, 0, 2), chunk(1, 4)),
                 Outcome::Pending
@@ -274,7 +336,7 @@ mod tests {
     #[test]
     fn incomplete_assemblies_expire_after_the_deadline() {
         let global = Arc::new(GlobalBudget::default());
-        let mut r = Reassembler::new(Arc::clone(&global));
+        let mut r = Reassembler::new(Arc::clone(&global), PeerSlot::new(2).unwrap());
         let t = Instant::now();
         assert_eq!(
             r.accept(t, header(1), frag(1, 0, 2), chunk(1, 4)),
@@ -290,10 +352,68 @@ mod tests {
     }
 
     #[test]
+    fn every_roster_peer_can_complete_while_other_peers_hold_fragments() {
+        let global = Arc::new(GlobalBudget::new(Role::Host));
+        let mut peers: Vec<Reassembler> = (2..=MAX_ROSTER)
+            .map(|slot| Reassembler::new(Arc::clone(&global), PeerSlot::new(slot).unwrap()))
+            .collect();
+        let t = Instant::now();
+        for peer in peers.iter_mut().skip(1) {
+            for id in 0..8 {
+                peer.accept(t, header(7777), frag(id, 0, 2), chunk(1, 100));
+            }
+        }
+        assert_eq!(global.in_use(), 31);
+        let good = &mut peers[0];
+        assert_eq!(
+            good.accept(t, header(7777), frag(0, 0, 2), chunk(2, 100)),
+            Outcome::Pending
+        );
+        assert_eq!(global.in_use(), 32);
+        assert_eq!(
+            good.accept(t, header(7777), frag(0, 1, 2), chunk(3, 100)),
+            Outcome::Complete(header(7777), [vec![2; 100], vec![3; 100]].concat().into())
+        );
+        assert_eq!(global.in_use(), 31);
+        peers.clear();
+        assert_eq!(global.in_use(), 0, "all physical holders were dropped");
+        let mut replacement = Reassembler::new(Arc::clone(&global), PeerSlot::new(2).unwrap());
+        for id in 0..8 {
+            assert_eq!(
+                replacement.accept(t, header(7777), frag(id, 0, 2), chunk(1, 100)),
+                Outcome::Pending
+            );
+        }
+        replacement.expire(t + DEADLINE);
+        assert_eq!(global.in_use(), 0, "expiry returns the same peer's charges");
+    }
+
+    #[test]
+    fn guest_budget_has_eight_usable_host_places_and_no_guest_recipient() {
+        let global = Arc::new(GlobalBudget::new(Role::Guest));
+        let t = Instant::now();
+        let mut host = Reassembler::new(Arc::clone(&global), PeerSlot::HOST);
+        let mut guest = Reassembler::new(Arc::clone(&global), PeerSlot::new(2).unwrap());
+        assert_eq!(
+            guest.accept(t, header(7777), frag(0, 0, 2), chunk(1, 100)),
+            Outcome::Full
+        );
+        for id in 0..8 {
+            assert_eq!(
+                host.accept(t, header(7777), frag(id, 0, 2), chunk(1, 100)),
+                Outcome::Pending
+            );
+        }
+        assert_eq!(global.in_use(), 8);
+        drop(host);
+        assert_eq!(global.in_use(), 0);
+    }
+
+    #[test]
     fn si_23_reassembly_memory_cap_holds_under_a_hostile_fragment_flood() {
         let global = Arc::new(GlobalBudget::default());
         let mut links: Vec<Reassembler> = (0..12)
-            .map(|_| Reassembler::new(Arc::clone(&global)))
+            .map(|i| Reassembler::new(Arc::clone(&global), PeerSlot::new(2 + i % 7).unwrap()))
             .collect();
         let max_chunk = 1414;
         let cap_bytes = PER_LINK * (PARTS - 1) * max_chunk;

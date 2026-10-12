@@ -87,6 +87,14 @@ impl Live {
 }
 
 impl Shared {
+    fn new(role: Role) -> Self {
+        Self {
+            admitted: ArcSwap::default(),
+            live: Mutex::default(),
+            frags: Arc::new(GlobalBudget::new(role)),
+        }
+    }
+
     /// Whether `session_key` is still admitted as exactly `peer` (SI-18).
     pub(crate) fn is_current(&self, session_key: &EndpointId, peer: &PeerRef) -> bool {
         self.admitted.load().get(session_key).as_ref() == Some(peer)
@@ -196,7 +204,7 @@ async fn bind_session(
     } else {
         (Vec::new(), 0)
     };
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared::new(role));
     let make = || -> Builder {
         Endpoint::builder(presets::Minimal)
             .ca_tls_config(policy.tls.clone())

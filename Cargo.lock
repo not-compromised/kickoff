@@ -1641,6 +1641,7 @@ dependencies = [
  "kickoff-budget",
  "kickoff-secret",
  "kickoff-send-guard",
+ "kickoff-vlan",
  "kickoff-wire",
  "netwatch",
  "thiserror 2.0.21",

@@ -12,7 +12,7 @@ guard. iroh and noq come from pinned upstream archives plus audited patches;
 | `incoming` | the pre-handshake gate both endpoints share: 16 pending `Incoming`s, `retry` for unvalidated addresses, 8 handshakes/s per source and 64/s overall, `refuse` beyond |
 | `guarded` | the only way an endpoint gets an IP transport: registers the send guard for the exact bind address before iroh binds, then keeps the guard's view and validated paths current |
 | `link` | LAN datagrams (budget charged before decode and reassembly), the cancel-safe control stream, blob streams, path status, health counters |
-| `reassembly` | fixed tables: 8 assemblies per link, 32 per endpoint, 4 fragments, 50 ms, expired on a timer |
+| `reassembly` | fixed tables: 8 assemblies per link, 32 per endpoint, 4 fragments, 50 ms; one reserved place per authenticated peer with spare capacity borrowed, expired on a timer |
 | `egress` | `scope` (the only place peer data becomes a destination, SI-29) and `publishable` (the only filter on our own addresses, SI-31); an `EndpointHooks::before_connect` guard re-checks every dial; `SendGuard`, the policy behind the vendored hook: global or bound-subnet IPv4 only, never our own addresses, gateway, resolvers or the §3.4 ranges, port ≥ 1024 and off the shared §3.1 denylist; remote probe budgets and connection approvals follow [egress policy](#egress-policy), with the host view recomputed on route changes |
 | `budget` | token buckets and fixed windows |
 
@@ -56,7 +56,9 @@ Nothing leaves the host.
 | `si_19_removed_key_cannot_reconnect` | a key removed from the admitted set cannot dial back in |
 | `si_21_guest_session_endpoint_accepts_nothing` | guest endpoints refuse every connection, including another guest's |
 | `si_23_reassembly_memory_cap_holds_under_a_hostile_fragment_flood` | 300k random fragments across 12 links never exceed 8 per link, 32 overall, or the byte ceiling |
-| `si_23_fragment_flood_does_not_starve_a_legitimate_peer` | a guest flooding incomplete fragments over a real link leaves another guest's fragmented datagrams delivered |
+| `si_23_fragment_flood_does_not_starve_a_legitimate_peer` | positive single-peer real-link composition; the local ceiling and peer reservation have independent removal tests |
+| `si_23_one_link_holds_eight_assemblies_and_refuses_the_ninth` | a real receiver holds eight incomplete assemblies and refuses the ninth while global capacity remains available |
+| `si_23_denied_port_colluding_fragments_leave_peer_capacity` / `si_23_allowed_port_colluding_fragments_leave_peer_capacity` | four admitted peers hold incomplete fragments while another peer's fragmented game payload reaches Mem before any held assembly expires |
 | `si_23_datagram_budget_drops_then_disconnects_a_flooding_peer` | 3000/s burst 1000 is enforced; above 10x for 5 s disconnects |
 | `si_23_control_length_refused_before_allocation` | a `u32::MAX` length prefix is refused without allocating |
 | `si_23_control_messages_are_rate_limited` | 32 messages/s after the burst |
@@ -118,11 +120,13 @@ Current implementation notes and interface differences from design draft 2.
 5. **Control over budget is throttled, not disconnected.** Reads wait for
    tokens and QUIC flow control pushes back on the sender. Stream windows are
    512 KiB per stream and 2 MiB per connection.
-6. **Global reassembly cap.** 32 overall is below 7 guests x 8, so four
-   colluding guests can hold every global slot and drop other guests'
-   fragmented datagrams. Discovery broadcasts (payload ≤ 1252) exceed the
-   1156-byte single-datagram payload on a fresh relay path, so they fragment.
-   Suggest 56 overall, or a per-link reservation.
+6. **Reassembly isolation.** The 32-place owner reserves one place for
+   each possible remote roster slot: guests 2 through 8 on a host, HOST on
+   a guest. Spare places may be borrowed up to the eight-per-link ceiling.
+   The authenticated `Link::peer().slot` owns the charge; datagram bytes
+   cannot select another peer's reservation. Completion, conflict, expiry
+   and link destruction return charges only as their assemblies release
+   the held chunks. No rate credit is refilled by those returns.
 7. **Datagram attempts** are counted when iroh hands them over; iroh's
    256 KiB receive buffer drops the oldest before that. The abuse rule uses
    fixed 5 s windows.

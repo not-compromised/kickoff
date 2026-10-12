@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use iroh::EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use kickoff_wire::{
-    Inbound, LEN_PREFIX_LEN, LanDatagram, PeerRef, PublicWireMessage, WireMessage, decode,
-    decode_datagram, encode_datagram, encode_framed, frame_len,
+    Inbound, LEN_PREFIX_LEN, LanDatagram, PeerRef, PeerSlot, PublicWireMessage, WireMessage,
+    decode, decode_datagram, encode_datagram, encode_framed, frame_len,
 };
 
 use crate::budget::{Bucket, Window};
@@ -99,7 +99,7 @@ enum Charge {
 }
 
 impl Rx {
-    fn new(now: Instant, global: Arc<GlobalBudget>) -> Rx {
+    fn new(now: Instant, global: Arc<GlobalBudget>, peer: PeerSlot) -> Rx {
         let window = |rate: u64| {
             let limit = rate.saturating_mul(ABUSE_FACTOR).saturating_mul(ABUSE_SECS);
             Window::new(now, ABUSE_WINDOW, limit)
@@ -109,7 +109,7 @@ impl Rx {
             bytes: Bucket::new(now, BYTE_RATE, BYTE_BURST),
             abuse_datagrams: window(DATAGRAM_RATE),
             abuse_bytes: window(BYTE_RATE),
-            frags: Reassembler::new(global),
+            frags: Reassembler::new(global, peer),
         }
     }
 
@@ -146,6 +146,8 @@ pub struct Link {
     blobs: Mutex<Bucket>,
     next_frag: AtomicU16,
     counters: Counters,
+    #[cfg(test)]
+    reassembly_observer: Option<tokio::sync::mpsc::Sender<FragmentSeen>>,
 }
 
 impl Link {
@@ -194,10 +196,12 @@ impl Link {
             conn,
             peer,
             side,
-            rx: Mutex::new(Rx::new(now, frags)),
+            rx: Mutex::new(Rx::new(now, frags, peer.slot)),
             blobs: Mutex::new(Bucket::new(now, BLOB_OPEN_RATE, BLOB_OPEN_RATE)),
             next_frag: AtomicU16::new(0),
             counters: Counters::default(),
+            #[cfg(test)]
+            reassembly_observer: None,
         };
         (link, ctl)
     }
@@ -294,7 +298,24 @@ impl Link {
                     continue;
                 }
             };
-            match lock(&self.rx).frags.accept(now, header, fragment, chunk) {
+            let outcome = lock(&self.rx).frags.accept(now, header, fragment, chunk);
+            #[cfg(test)]
+            if let Some(observer) = &self.reassembly_observer {
+                let rx = lock(&self.rx);
+                let seen = FragmentSeen {
+                    id: fragment.frag_id,
+                    idx: fragment.idx,
+                    at: now,
+                    pending: matches!(outcome, Outcome::Pending),
+                    full: matches!(outcome, Outcome::Full),
+                    complete: matches!(outcome, Outcome::Complete(..)),
+                    held: rx.frags.held().0,
+                    total: rx.frags.in_use(),
+                };
+                drop(rx);
+                let _ = observer.try_send(seen);
+            }
+            match outcome {
                 Outcome::Complete(header, payload) => {
                     bump(&self.counters.received);
                     return Ok(LanDatagram {
@@ -509,7 +530,7 @@ mod tests {
     #[test]
     fn si_23_datagram_budget_drops_then_disconnects_a_flooding_peer() {
         let t = Instant::now();
-        let mut rx = Rx::new(t, Arc::default());
+        let mut rx = Rx::new(t, Arc::default(), PeerSlot::new(2).unwrap());
         let burst = (0..DATAGRAM_BURST).filter(|_| matches!(rx.charge(t, 100), Charge::Pass));
         assert_eq!(burst.count() as u64, DATAGRAM_BURST);
         assert!(
@@ -517,7 +538,7 @@ mod tests {
             "over the burst, at the same instant"
         );
 
-        let mut rx = Rx::new(t, Arc::default());
+        let mut rx = Rx::new(t, Arc::default(), PeerSlot::new(2).unwrap());
         let allowance = DATAGRAM_RATE * ABUSE_FACTOR * ABUSE_SECS;
         let mut verdicts = (0..=allowance).map(|i| {
             let now = t + Duration::from_nanos(i * 1_000_000_000 / (DATAGRAM_RATE * 12));
@@ -542,7 +563,7 @@ mod tests {
     #[test]
     fn datagram_byte_budget_is_charged_with_the_count() {
         let t = Instant::now();
-        let mut rx = Rx::new(t, Arc::default());
+        let mut rx = Rx::new(t, Arc::default(), PeerSlot::new(2).unwrap());
         let big = 1999;
         let fits = (BYTE_BURST / big as u64) as usize;
         assert!((0..fits).all(|_| matches!(rx.charge(t, big), Charge::Pass)));
@@ -553,3 +574,19 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[derive(Debug)]
+struct FragmentSeen {
+    id: u16,
+    idx: u8,
+    at: Instant,
+    pending: bool,
+    full: bool,
+    complete: bool,
+    held: usize,
+    total: usize,
+}
+
+#[cfg(test)]
+mod isolation_tests;

@@ -25,6 +25,7 @@ mutant-si23-ctl-length-unchecked = []
 mutant-si23-no-ctl-rate = []
 mutant-si23-no-per-link-reassembly-cap = []
 mutant-si23-no-global-reassembly-cap = []
+mutant-si23-reassembly-no-peer-reserve = []
 mutant-si23-door-no-invalid-limit = []
 mutant-si23-no-handshake-deadline = []
 mutant-si23-no-handshake-rate = []
@@ -66,4 +67,5 @@ netwatch.workspace = true
 arc-swap.workspace = true
 
 [dev-dependencies]
+kickoff-vlan.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
