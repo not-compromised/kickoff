@@ -15,6 +15,7 @@ mod lan;
 mod msg;
 mod ports;
 mod ticket;
+mod transport;
 
 #[cfg(test)]
 mod schema_tests;
@@ -29,13 +30,15 @@ pub use lan::{
 pub use msg::{
     AdmitPass, Admitted, BuildId, BundleBlob, GameState, GuestMsg, HostMsg, JoinRefused, JoinReply,
     JoinRequest, KickReason, KickoffVersion, LEN_PREFIX_LEN, MAX_CONTROL_LEN, MAX_HAVE,
-    MAX_JOIN_LEN, MAX_NAME_LEN, Member, Name, Platform, WireMessage, decode, encode, encode_framed,
-    frame_len,
+    MAX_JOIN_LEN, MAX_NAME_LEN, Member, Name, Platform, PublicWireMessage, WireMessage, decode,
+    encode, encode_framed, frame_len, prepare_message,
 };
 pub use ports::{DENIED_PORTS, denied_port};
 pub use ticket::{
     Cap, MAX_TICKET_LEN, Nonce, SessionId, Ticket, TicketTextValue, encode_ticket, parse_ticket,
 };
+
+pub use transport::{Transmission, TransmissionError};
 
 use iroh_base::EndpointId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -120,3 +123,17 @@ pub struct PeerRef {
 /// BLAKE3 of a map package's exact bytes (§5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MapId(pub [u8; 32]);
+
+#[cfg(test)]
+extern crate self as kickoff_wire;
+#[cfg(test)]
+#[path = "messages_tests.rs"]
+mod messages;
+#[cfg(test)]
+#[path = "tickets_tests.rs"]
+mod tickets;
+
+#[cfg(test)]
+#[path = "../tests/harness/mod.rs"]
+#[allow(clippy::arithmetic_side_effects)]
+mod test_harness;

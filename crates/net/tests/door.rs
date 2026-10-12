@@ -32,9 +32,11 @@ async fn door() -> Door {
 
 fn ticket(to: EndpointAddr, invitee: Option<iroh::EndpointId>) -> Secret<Ticket> {
     let signer = SecretKey::generate();
+    let issuer = to.id;
     Secret::new(Ticket {
         door: to,
-        cap: Cap::new(
+        cap: Cap::new_for_door(
+            issuer,
             SessionId([1; 16]),
             invitee,
             Nonce([2; 16]),
@@ -43,9 +45,10 @@ fn ticket(to: EndpointAddr, invitee: Option<iroh::EndpointId>) -> Secret<Ticket>
     })
 }
 
-fn request(session_key: iroh::EndpointId) -> JoinRequest {
+fn request(session_key: iroh::EndpointId, issuer: iroh::EndpointId) -> JoinRequest {
     JoinRequest {
-        cap: Cap::new(
+        cap: Cap::new_for_door(
+            issuer,
             SessionId([1; 16]),
             None,
             Nonce([2; 16]),
@@ -78,7 +81,7 @@ async fn join_exchange_carries_the_authenticated_id_and_the_answer() {
     };
 
     let t = ticket(host_door.addr(), Some(guest_door.id()));
-    let guest = guest_door.request_join(&t, request(guest_session.id()));
+    let guest = guest_door.request_join(&t, request(guest_session.id(), host_door.id()));
     let host = async {
         let attempt = tokio::time::timeout(WAIT, host_door.next_join())
             .await
@@ -94,7 +97,7 @@ async fn join_exchange_carries_the_authenticated_id_and_the_answer() {
     assert_eq!(got.unwrap(), admitted);
 
     let t = ticket(host_door.addr(), None);
-    let guest = guest_door.request_join(&t, request(guest_session.id()));
+    let guest = guest_door.request_join(&t, request(guest_session.id(), host_door.id()));
     let host = async {
         let attempt = host_door.next_join().await.unwrap();
         attempt.answer(Err(JoinRefused::Declined)).await
@@ -131,7 +134,7 @@ async fn si_29_ticket_destinations_outside_the_policy_are_never_dialed() {
         let t = ticket(EndpointAddr::from_parts(id, addrs), None);
         let start = Instant::now();
         let got = guest_door
-            .request_join(&t, request(SecretKey::generate().public()))
+            .request_join(&t, request(SecretKey::generate().public(), host_door.id()))
             .await;
         assert_eq!(got.err(), Some(NetError::Egress));
         assert!(
@@ -272,11 +275,11 @@ async fn si_23_door_reply_write_and_linger_share_one_deadline() {
     let host = door().await;
     let guest = raw_endpoint_with_window(Ipv4Addr::LOCALHOST, 0).await;
     let conn = guest.connect(host.addr(), JOIN_ALPN).await.unwrap();
-    let (mut send, _recv) = conn.open_bi().await.unwrap();
-    send.write_all(&kickoff_wire::encode_framed(&request(guest.id())).unwrap())
+    let _recv = kickoff_wire::prepare_message(&request(guest.id(), host.id()))
+        .unwrap()
+        .transmit_quic(&conn)
         .await
         .unwrap();
-    send.finish().unwrap();
     let attempt = tokio::time::timeout(WAIT, host.next_join())
         .await
         .unwrap()
@@ -297,4 +300,85 @@ async fn si_23_door_reply_write_and_linger_share_one_deadline() {
         "zero reply credit held the answer beyond its complete lifetime"
     );
     assert!(tokio::time::timeout(WAIT, conn.closed()).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_30_join_transmission_requires_its_issuing_door_before_opening_a_stream() {
+    let issuer_key = SecretKey::generate();
+    let issuer = receiving_endpoint(issuer_key.clone()).await;
+    let attacker = receiving_endpoint(SecretKey::generate()).await;
+    let guest = raw_endpoint().await;
+    let (dialed, accepted) = tokio::join!(guest.connect(attacker.addr(), JOIN_ALPN), async {
+        attacker.accept().await.unwrap().await.unwrap()
+    });
+    let wrong = dialed.unwrap();
+    let identity = IdentityKey::new(issuer_key.clone());
+    let mut invites = kickoff_wire::Invites::new(&identity).unwrap();
+    let mut outbound = request(guest.id(), issuer.id());
+    outbound.cap = invites.issue(&identity, None, Instant::now()).unwrap();
+    assert!(
+        kickoff_wire::prepare_message(&outbound)
+            .unwrap()
+            .transmit_quic(&wrong)
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), accepted.accept_bi())
+            .await
+            .is_err(),
+        "wrong door observed an opened secret stream"
+    );
+    wrong.close(iroh::endpoint::VarInt::from_u32(0), b"");
+    let (dialed, accepted) = tokio::join!(guest.connect(issuer.addr(), JOIN_ALPN), async {
+        issuer.accept().await.unwrap().await.unwrap()
+    });
+    let right = dialed.unwrap();
+    let (sent, received) = tokio::join!(
+        kickoff_wire::prepare_message(&outbound)
+            .unwrap()
+            .transmit_quic(&right),
+        async {
+            let (_send, mut recv) = accepted.accept_bi().await.unwrap();
+            let mut prefix = [0; 4];
+            recv.read_exact(&mut prefix).await.unwrap();
+            let mut body = kickoff_secret::SecretBuffer::zeroed(
+                kickoff_wire::frame_len::<JoinRequest>(prefix).unwrap(),
+            );
+            recv.read_exact(&mut body).await.unwrap();
+            kickoff_wire::decode::<JoinRequest>(&body).unwrap()
+        }
+    );
+    let _reply = sent.unwrap();
+    assert_eq!(received.name.as_str(), outbound.name.as_str());
+    assert!(
+        kickoff_wire::prepare_message(&received)
+            .unwrap()
+            .transmit_quic(&right)
+            .await
+            .is_err(),
+        "receiving a raw join minted retransmission authority"
+    );
+    // Receiving the valid capability cannot regain export authority by
+    // wrapping it in a Ticket and round-tripping through the text encoder.
+    let address =
+        EndpointAddr::new(issuer.id()).with_relay_url("https://relay.example./".parse().unwrap());
+    let original = Secret::new(Ticket {
+        door: address.clone(),
+        cap: outbound.cap.copy_for_join(),
+    });
+    let text = kickoff_wire::encode_ticket(&original).unwrap();
+    assert!(kickoff_wire::TicketTextValue::parse(&text).is_ok());
+    let received_ticket = Secret::new(Ticket {
+        door: address,
+        cap: received.cap.copy_for_join(),
+    });
+    assert!(
+        kickoff_wire::encode_ticket(&received_ticket).is_err(),
+        "a received capability regained export authority through a Ticket"
+    );
+    right.close(iroh::endpoint::VarInt::from_u32(0), b"");
+    guest.close().await;
+    attacker.close().await;
+    issuer.close().await;
 }

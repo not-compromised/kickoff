@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use iroh::EndpointId;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use kickoff_wire::{
-    Inbound, LEN_PREFIX_LEN, LanDatagram, PeerRef, WireMessage, decode, decode_datagram,
-    encode_datagram, encode_framed, frame_len,
+    Inbound, LEN_PREFIX_LEN, LanDatagram, PeerRef, PublicWireMessage, WireMessage, decode,
+    decode_datagram, encode_datagram, encode_framed, frame_len,
 };
 
 use crate::budget::{Bucket, Window};
@@ -426,7 +426,7 @@ impl CtlStream {
         self.hello_deadline
     }
 
-    pub async fn send<M: WireMessage>(&mut self, msg: &M) -> Result<(), NetError> {
+    pub async fn send<M: PublicWireMessage>(&mut self, msg: &M) -> Result<(), NetError> {
         self.flush().await?;
         self.unsent = Some((encode_framed(msg).map_err(wire)?, 0));
         self.flush().await

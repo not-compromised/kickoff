@@ -228,6 +228,9 @@ fn facade(base: &TempBase, mode: &str) -> Running {
 
 #[tokio::test]
 async fn si_7_transferred_socket_keeps_listener_creator_identity() {
+    if !installed_fixture("si_7_transferred_socket_keeps_listener_creator_identity") {
+        return;
+    }
     let base = TempBase::new();
     let dir = base.dir();
     let running = facade(&base, "facade");

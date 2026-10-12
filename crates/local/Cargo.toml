@@ -1,0 +1,28 @@
+[package]
+name = "kickoff-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
+
+[lints]
+workspace = true
+
+[features]
+mutant-si7-no-uid-check = []
+mutant-si7-no-exe-check = []
+mutant-si7-pid-not-pidfd = []
+mutant-si7-accept-ancillary = []
+mutant-si30-local-self-recipient = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
+rustix = { workspace = true, features = ["event", "net", "stdio"] }
+tokio = { workspace = true, features = ["io-util", "net"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+rustix = { workspace = true, features = ["net", "pipe"] }

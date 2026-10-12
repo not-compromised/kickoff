@@ -21,19 +21,19 @@ async fn si_23_zero_credit_replies_preserve_priority_capacity() {
             .connect(host.identity.door.addr(), JOIN_ALPN)
             .await
             .unwrap();
-        let (mut send, recv) = conn.open_bi().await.unwrap();
-        send.write_all(&kickoff_wire::encode_framed(&raw_request(&invalid, raw.id())).unwrap())
+        let recv = kickoff_wire::prepare_message(&raw_request(&invalid, raw.id()))
+            .unwrap()
+            .transmit_quic(&conn)
             .await
             .unwrap();
-        send.finish().unwrap();
-        held.push((raw, conn, send, recv));
+        held.push((raw, conn, recv));
     }
     // Extra general requests close rather than waiting outside the door's
     // event loop. Eight of the sixteen reply places remain reserved.
     tokio::time::timeout(Duration::from_secs(1), async {
         while held
             .iter()
-            .filter(|(_, conn, _, _)| conn.close_reason().is_some())
+            .filter(|(_, conn, _)| conn.close_reason().is_some())
             .count()
             < 8
         {
@@ -44,7 +44,7 @@ async fn si_23_zero_credit_replies_preserve_priority_capacity() {
     .expect("general requests occupied the reserved priority capacity");
     assert!(
         held.iter()
-            .any(|(_, conn, _, _)| conn.close_reason().is_none()),
+            .any(|(_, conn, _)| conn.close_reason().is_none()),
         "the fixture did not retain any blocked replies"
     );
 
@@ -55,11 +55,11 @@ async fn si_23_zero_credit_replies_preserve_priority_capacity() {
             .connect(host.identity.door.addr(), JOIN_ALPN)
             .await
             .unwrap();
-        let (mut send, mut recv) = conn.open_bi().await.unwrap();
-        send.write_all(&kickoff_wire::encode_framed(&raw_request(&ticket, friend.id())).unwrap())
+        let mut recv = kickoff_wire::prepare_message(&raw_request(&ticket, friend.id()))
+            .unwrap()
+            .transmit_quic(&conn)
             .await
             .unwrap();
-        send.finish().unwrap();
         let mut prefix = [0u8; LEN_PREFIX_LEN];
         recv.read_exact(&mut prefix).await.unwrap();
         let len = kickoff_wire::frame_len::<JoinReply>(prefix).unwrap();

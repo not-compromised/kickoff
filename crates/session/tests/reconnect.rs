@@ -140,7 +140,8 @@ async fn guest_redials_after_a_drop_and_carries_on() {
     let alice_id = alice.id();
     let ticket = Secret::new(Ticket {
         door: host_identity.door.addr(),
-        cap: Cap::new(
+        cap: Cap::new_for_door(
+            host_identity.door.id(),
             SessionId([1; 16]),
             Some(alice_id),
             Nonce([2; 16]),
@@ -257,7 +258,8 @@ async fn guest_reports_host_lost_after_the_reconnect_window() {
     let alice_id = alice.id();
     let ticket = Secret::new(Ticket {
         door: host_identity.door.addr(),
-        cap: Cap::new(
+        cap: Cap::new_for_door(
+            host_identity.door.id(),
             SessionId([1; 16]),
             Some(alice_id),
             Nonce([2; 16]),

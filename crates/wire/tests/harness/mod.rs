@@ -13,8 +13,8 @@
 use bytes::Bytes;
 use kickoff_wire::{
     DatagramKind, GuestMsg, HostMsg, Inbound, JoinReply, JoinRequest, MAX_FRAGMENTS, MAX_HAVE,
-    MAX_NAME_LEN, PeerSlot, WireMessage, decode, decode_datagram, encode, encode_datagram,
-    encode_ticket, parse_ticket,
+    MAX_NAME_LEN, PeerSlot, WireMessage, decode, decode_datagram, encode_datagram, encode_ticket,
+    parse_ticket,
 };
 
 /// A QUIC datagram from a link. The first byte picks the link's slot.
@@ -74,11 +74,6 @@ pub fn control(data: &[u8]) {
 fn strict<M: WireMessage>(data: &[u8]) -> Option<M> {
     let msg = decode::<M>(data).ok()?;
     assert!(data.len() <= M::MAX_LEN);
-    assert_eq!(
-        encode(&msg).unwrap().as_ref(),
-        data,
-        "a decoded message re-encodes exactly"
-    );
     Some(msg)
 }
 

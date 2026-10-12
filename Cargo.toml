@@ -12,6 +12,7 @@ license = "GPL-3.0-only"
 publish = false
 
 [workspace.dependencies]
+kickoff-local = { path = "crates/local" }
 kickoff-budget = { path = "crates/budget" }
 kickoff-wire = { path = "crates/wire" }
 kickoff-vlan = { path = "crates/vlan" }

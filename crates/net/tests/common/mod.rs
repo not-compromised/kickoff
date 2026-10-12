@@ -187,3 +187,24 @@ pub async fn settled_max(link: &Link) -> usize {
 pub fn raw_bytes(parts: &[&[u8]]) -> Bytes {
     parts.concat().into()
 }
+
+pub async fn receiving_endpoint(key: SecretKey) -> Endpoint {
+    let bind = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let registered = kickoff_send_guard::register(bind, std::sync::Arc::new(Unfiltered)).unwrap();
+    Endpoint::builder(presets::Minimal)
+        .secret_key(key)
+        .clear_ip_transports()
+        .bind_addr(bind)
+        .unwrap()
+        .hooks(FixtureGuard {
+            _registration: registered,
+        })
+        .relay_mode(RelayMode::Disabled)
+        .alpns(vec![kickoff_net::JOIN_ALPN.to_vec()])
+        .bind()
+        .await
+        .unwrap()
+}

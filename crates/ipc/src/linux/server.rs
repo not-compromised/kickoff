@@ -133,7 +133,7 @@ pub(super) async fn admit_stream(
         Ok(peer) => peer,
         Err(e) => {
             Counters::bump(&health.peers_rejected);
-            return Err(e);
+            return Err(e.into());
         }
     };
     let mut stream = DataOnly::new(stream);
@@ -303,7 +303,9 @@ impl Channel {
                     max: MAX_REPLY_FRAME,
                 });
             }
-            write_frame(&mut self.stream, &bytes).await
+            bytes
+                .send(&mut self.stream, kickoff_local::PeerKind::Client)
+                .await
         }
         .await;
         if result.is_err() {

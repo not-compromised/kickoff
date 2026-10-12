@@ -7,7 +7,9 @@ use kickoff_secret::SecretBuffer;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ticket::CapRepr;
-use crate::{BoundedStr, BoundedVec, Cap, Generation, MAX_ROSTER, MapId, PeerSlot, WireError};
+use crate::{
+    BoundedStr, BoundedVec, Cap, Generation, MAX_ROSTER, MapId, PeerSlot, Transmission, WireError,
+};
 
 pub const MAX_JOIN_LEN: usize = 4 * 1024;
 pub const MAX_CONTROL_LEN: usize = 64 * 1024;
@@ -186,15 +188,17 @@ impl JoinRequestRepr {
 
 pub(crate) mod sealed {
     use crate::WireError;
-    use kickoff_secret::SecretBuffer;
 
     /// The encoding of each message, reachable only through `encode` and
     /// `decode`, so every decode goes through the strict path.
     pub trait Sealed: Sized {
         /// The number of top-level variants, for an enum.
         const VARIANTS: Option<u32>;
-        fn write(&self) -> Result<SecretBuffer, WireError>;
+        fn write(&self) -> Result<super::Transmission, WireError>;
         fn read(bytes: &[u8]) -> Result<(Self, &[u8]), WireError>;
+    }
+    pub trait Public {
+        fn write_public(&self) -> Result<super::SecretBuffer, WireError>;
     }
 }
 
@@ -203,6 +207,10 @@ pub(crate) mod sealed {
 pub trait WireMessage: Sized + sealed::Sealed {
     const MAX_LEN: usize;
 }
+
+/// Messages whose complete encoding contains no protected secret. The sealed
+/// supertrait prevents another crate from adding a secret-bearing message.
+pub trait PublicWireMessage: WireMessage + sealed::Public {}
 
 pub(crate) fn postcard_write<T: Serialize>(
     value: &T,
@@ -225,8 +233,8 @@ macro_rules! wire_message {
     ($($ty:ty => $max:expr, $variants:expr);+ $(;)?) => {$(
         impl sealed::Sealed for $ty {
             const VARIANTS: Option<u32> = Some($variants);
-            fn write(&self) -> Result<SecretBuffer, WireError> {
-                postcard_write(self, <Self as WireMessage>::MAX_LEN)
+            fn write(&self) -> Result<Transmission, WireError> {
+                Transmission::new(postcard_write(self, <Self as WireMessage>::MAX_LEN)?)
             }
             fn read(bytes: &[u8]) -> Result<(Self, &[u8]), WireError> {
                 postcard_read(bytes)
@@ -235,6 +243,12 @@ macro_rules! wire_message {
         impl WireMessage for $ty {
             const MAX_LEN: usize = $max;
         }
+        impl sealed::Public for $ty {
+            fn write_public(&self) -> Result<SecretBuffer, WireError> {
+                postcard_write(self, <Self as WireMessage>::MAX_LEN)
+            }
+        }
+        impl PublicWireMessage for $ty {}
     )+};
 }
 
@@ -247,8 +261,11 @@ wire_message! {
 impl sealed::Sealed for JoinRequest {
     const VARIANTS: Option<u32> = None;
 
-    fn write(&self) -> Result<SecretBuffer, WireError> {
-        postcard_write(&JoinRequestRepr::from_request(self), Self::MAX_LEN)
+    fn write(&self) -> Result<Transmission, WireError> {
+        Transmission::join(
+            postcard_write(&JoinRequestRepr::from_request(self), Self::MAX_LEN)?,
+            self.cap.issuing_door(),
+        )
     }
 
     fn read(bytes: &[u8]) -> Result<(Self, &[u8]), WireError> {
@@ -270,8 +287,8 @@ impl WireMessage for JoinRequest {
 }
 
 /// The message body, without the length prefix.
-pub fn encode<M: WireMessage>(msg: &M) -> Result<SecretBuffer, WireError> {
-    let body = msg.write()?;
+pub fn encode<M: PublicWireMessage>(msg: &M) -> Result<SecretBuffer, WireError> {
+    let body = msg.write_public()?;
     if !cfg!(feature = "mutant-si23-no-message-cap") && body.len() > M::MAX_LEN {
         return Err(WireError::TooLong { max: M::MAX_LEN });
     }
@@ -293,14 +310,14 @@ pub fn decode<M: WireMessage>(bytes: &[u8]) -> Result<M, WireError> {
         return Err(WireError::Version);
     }
     let (msg, rest) = M::read(bytes)?;
-    if !rest.is_empty() || msg.write()?.as_ref() != bytes {
+    if !rest.is_empty() || !msg.write()?.matches(bytes) {
         return Err(WireError::Malformed);
     }
     Ok(msg)
 }
 
 /// `len:u32 | body`, ready to write to a join or control stream.
-pub fn encode_framed<M: WireMessage>(msg: &M) -> Result<SecretBuffer, WireError> {
+pub fn encode_framed<M: PublicWireMessage>(msg: &M) -> Result<SecretBuffer, WireError> {
     let body = encode(msg)?;
     let len = u32::try_from(body.len()).map_err(|_| WireError::TooLong { max: M::MAX_LEN })?;
     let mut framed = SecretBuffer::with_capacity(LEN_PREFIX_LEN.saturating_add(body.len()));
@@ -321,4 +338,27 @@ pub fn frame_len<M: WireMessage>(prefix: [u8; LEN_PREFIX_LEN]) -> Result<usize, 
         return Err(WireError::Malformed);
     }
     Ok(len)
+}
+
+/// Prepares a bounded frame without exposing its serialized body to holders.
+pub fn prepare_message<M: WireMessage>(msg: &M) -> Result<Transmission, WireError> {
+    let transmission = msg.write()?;
+    if !cfg!(feature = "mutant-si23-no-message-cap") && transmission.body_len() > M::MAX_LEN {
+        return Err(WireError::TooLong { max: M::MAX_LEN });
+    }
+    Ok(transmission)
+}
+
+#[cfg(feature = "mutant-si30-public-join-encoder")]
+impl sealed::Public for JoinRequest {
+    fn write_public(&self) -> Result<SecretBuffer, WireError> {
+        postcard_write(&JoinRequestRepr::from_request(self), Self::MAX_LEN)
+    }
+}
+#[cfg(feature = "mutant-si30-public-join-encoder")]
+impl PublicWireMessage for JoinRequest {}
+
+#[cfg(test)]
+pub(crate) fn encode_owned<M: WireMessage>(msg: &M) -> Result<SecretBuffer, WireError> {
+    Ok(prepare_message(msg)?.copy_body())
 }

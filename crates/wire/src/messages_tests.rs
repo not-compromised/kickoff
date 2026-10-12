@@ -5,17 +5,18 @@
     clippy::cast_possible_truncation
 )]
 
-mod harness;
+use crate::test_harness as harness;
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
+use crate::msg::encode_owned as encode;
 use bytes::Bytes;
 use iroh_base::{EndpointAddr, EndpointId, RelayUrl, SecretKey, Signature, TransportAddr};
 use kickoff_wire::{
     AdmitPass, Admitted, BoundedVec, BuildId, BundleBlob, Cap, GameState, Generation, GuestMsg,
     HostMsg, JoinRefused, JoinReply, JoinRequest, KickReason, KickoffVersion, MAX_CONTROL_LEN,
     MAX_JOIN_LEN, MapId, Member, Name, Nonce, PeerSlot, Platform, SessionId, WireError, decode,
-    encode, encode_framed, frame_len,
+    encode_framed, frame_len,
 };
 use proptest::prelude::*;
 

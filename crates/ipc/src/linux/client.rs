@@ -88,7 +88,9 @@ impl<R: Role> Client<R> {
                 max: MAX_REQUEST_FRAME,
             });
         }
-        write_frame(&mut self.stream, &bytes).await?;
+        bytes
+            .send(&mut self.stream, kickoff_local::PeerKind::Daemon)
+            .await?;
         let frame = read_frame(&mut self.stream, MAX_REPLY_FRAME).await?;
         let reply = codec::decode_reply(&frame)?;
         if !reply.allowed_for(R::ROLE) {

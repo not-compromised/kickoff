@@ -57,7 +57,12 @@ async fn started() -> (TempBase, kickoff_ipc::RuntimeDir, Arc<Server>, Seen) {
 
 #[tokio::test]
 async fn each_role_calls_its_own_commands() {
-    let (_base, dir, _server, mut seen) = started().await;
+    if !installed_fixture("each_role_calls_its_own_commands") {
+        return;
+    }
+    let base = TempBase::new();
+    let dir = base.dir();
+    let daemon = InstalledDaemon::start(&base, "roles");
     let mut cli = connect::<Cli>(&dir, &trust_me()).await.unwrap();
     assert!(matches!(
         cli.call(CliCommand::Status).await.unwrap(),
@@ -90,10 +95,7 @@ async fn each_role_calls_its_own_commands() {
         overlay.call(OverlayCommand::Status).await.unwrap(),
         Reply::Done
     ));
-    let mut got = Vec::new();
-    while let Ok(s) = seen.try_recv() {
-        got.push(s);
-    }
+    let got = daemon.finish().await;
     assert_eq!(got.len(), 5, "{got:?}");
     assert!(got[2].starts_with("UiMain(Kick("));
     assert_eq!(

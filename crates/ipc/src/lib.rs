@@ -83,12 +83,7 @@ pub enum ChannelRole {
     ServiceClient,
 }
 
-/// Kernel-reported identity of the process on the other end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PeerCred {
-    pub uid: u32,
-    pub pid: i32,
-}
+pub use kickoff_local::PeerCred;
 
 /// Client-side role markers: a `Client<Cli>` can only send `CliCommand`s.
 /// Only the built-in markers can implement `Role`.
@@ -187,6 +182,17 @@ impl From<std::io::Error> for IpcError {
             | std::io::ErrorKind::BrokenPipe
             | std::io::ErrorKind::ConnectionReset => IpcError::Closed,
             kind => IpcError::Io(kind),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<kickoff_local::Error> for IpcError {
+    fn from(error: kickoff_local::Error) -> Self {
+        match error {
+            kickoff_local::Error::PeerRejected => Self::PeerRejected,
+            kickoff_local::Error::Ancillary => Self::Ancillary,
+            kickoff_local::Error::Io(kind) => std::io::Error::from(kind).into(),
         }
     }
 }

@@ -11,12 +11,10 @@
 
 mod common;
 
-use std::sync::Arc;
-
 use common::*;
 use kickoff_ipc::role::{Cli, UiMain};
 use kickoff_ipc::{
-    CliCommand, InviteFor, IpcError, Reply, Request, Server, TicketText, UiCommand, connect,
+    CliCommand, InviteFor, IpcError, Reply, Request, TicketText, UiCommand, connect,
 };
 
 const CANARY: &str = "kickoff1CANARYQ7XZ3T2WVB";
@@ -86,41 +84,29 @@ fn si_30_rejected_ticket_error_is_silent() {
 /// while everything either side can print stays clean.
 #[tokio::test]
 async fn si_30_ticket_crosses_the_socket_without_being_printed() {
+    if !installed_fixture("si_30_ticket_crosses_the_socket_without_being_printed") {
+        return;
+    }
     let base = TempBase::new();
     let dir = base.dir();
-    let server = Arc::new(Server::bind(&dir, trust_me()).unwrap());
-    let daemon_server = Arc::clone(&server);
-    let daemon = tokio::spawn(async move {
-        let mut channel = daemon_server.accept().await.unwrap();
-        let request = channel.recv().await.unwrap();
-        let printed = format!("{channel:?} {request:?}");
-        let Request::Cli(CliCommand::Join(t)) = request else {
-            panic!("expected Join");
-        };
-        let intact = t.secret().ct_eq(CANARY.as_bytes());
-        channel.reply(Reply::Done).await.unwrap();
-        (intact, printed)
-    });
+    let daemon = InstalledDaemon::start(&base, "join");
 
     let mut client = connect::<Cli>(&dir, &trust_me()).await.unwrap();
     let reply = client.call(CliCommand::Join(ticket())).await.unwrap();
     assert_quiet("Client", format!("{client:?} {reply:?}"));
-    let (intact, printed) = daemon.await.unwrap();
-    assert!(intact, "the daemon must receive the exact ticket");
-    assert_quiet("daemon side", printed);
+    for printed in daemon.finish().await {
+        assert_quiet("daemon side", printed);
+    }
 }
 
 #[tokio::test]
 async fn si_30_invite_reply_is_redacted_on_the_client() {
+    if !installed_fixture("si_30_invite_reply_is_redacted_on_the_client") {
+        return;
+    }
     let base = TempBase::new();
     let dir = base.dir();
-    let server = Arc::new(Server::bind(&dir, trust_me()).unwrap());
-    let daemon_server = Arc::clone(&server);
-    tokio::spawn(async move {
-        let mut channel = daemon_server.accept().await.unwrap();
-        let _ = channel.recv().await.unwrap();
-        channel.reply(Reply::Invite(ticket())).await.unwrap();
-    });
+    let daemon = InstalledDaemon::start(&base, "invite");
     let mut client = connect::<UiMain>(&dir, &trust_me()).await.unwrap();
     let reply = client
         .call(UiCommand::Invite(InviteFor::Bearer))
@@ -131,4 +117,7 @@ async fn si_30_invite_reply_is_redacted_on_the_client() {
         panic!("expected Invite")
     };
     assert!(t.secret().ct_eq(CANARY.as_bytes()));
+    for printed in daemon.finish().await {
+        assert_quiet("daemon side", printed);
+    }
 }

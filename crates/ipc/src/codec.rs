@@ -152,13 +152,39 @@ enum ReplyRepr<T> {
     Report(ReportRepr),
 }
 
-struct TicketRef<'a>(&'a TicketText);
-impl Serialize for TicketRef<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let text = TicketTextValue::transport(self.0.secret());
-        let text = std::str::from_utf8(&text).map_err(serde::ser::Error::custom)?;
-        serializer.serialize_str(text)
+pub(crate) enum Payload {
+    Plain(Zeroizing<Vec<u8>>),
+    Ticket(kickoff_wire::Transmission),
+}
+impl Payload {
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Plain(body) => body.len(),
+            Self::Ticket(frame) => frame.body_len(),
+        }
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn send(
+        self,
+        stream: &mut kickoff_local::DataOnly,
+        kind: kickoff_local::PeerKind,
+    ) -> Result<(), IpcError> {
+        match self {
+            Self::Plain(body) => crate::frame::write_frame(stream, &body).await,
+            Self::Ticket(frame) => {
+                let mut peer = stream.installed_peer(kind)?;
+                tokio::time::timeout(crate::WRITE_DEADLINE, frame.transmit_local(&mut peer))
+                    .await
+                    .map_err(|_| IpcError::Timeout)?
+                    .map_err(|_| IpcError::Closed)
+            }
+        }
+    }
+}
+fn ticket_payload(ticket: &TicketText) -> Result<Payload, IpcError> {
+    TicketTextValue::postcard_frame(ticket.secret(), 2)
+        .map(Payload::Ticket)
+        .map_err(|_| IpcError::Malformed)
 }
 
 fn write<T: Serialize>(value: &T, max: usize) -> Result<Zeroizing<Vec<u8>>, IpcError> {
@@ -169,9 +195,12 @@ fn write<T: Serialize>(value: &T, max: usize) -> Result<Zeroizing<Vec<u8>>, IpcE
     out.truncate(len);
     Ok(out)
 }
-fn read<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, IpcError> {
+fn read<'a, T: Deserialize<'a> + Serialize>(bytes: &'a [u8]) -> Result<T, IpcError> {
     let (value, rest) = postcard::take_from_bytes(bytes).map_err(|_| IpcError::Malformed)?;
     if !rest.is_empty() {
+        return Err(IpcError::Malformed);
+    }
+    if write(&value, bytes.len())?.as_slice() != bytes {
         return Err(IpcError::Malformed);
     }
     Ok(value)
@@ -198,26 +227,26 @@ fn get_ticket(text: &str) -> Result<TicketText, IpcError> {
     TicketText::new(TicketTextValue::protect(text.to_owned()))
 }
 
-pub(crate) fn encode_op(role: ChannelRole, op: &Op) -> Result<Zeroizing<Vec<u8>>, IpcError> {
+pub(crate) fn encode_op(role: ChannelRole, op: &Op) -> Result<Payload, IpcError> {
     match role {
         ChannelRole::Cli => {
-            let repr = match op {
+            let repr: CliRepr<()> = match op {
                 Op::Status => CliRepr::Status,
                 Op::Host => CliRepr::Host,
-                Op::Join(t) => CliRepr::Join(TicketRef(t)),
+                Op::Join(t) => return ticket_payload(t),
                 Op::Invite(i) => CliRepr::Invite(invite(*i)),
                 Op::Leave => CliRepr::Leave,
                 Op::Doctor => CliRepr::Doctor,
                 Op::ToggleOverlay => CliRepr::ToggleOverlay,
                 _ => return Err(IpcError::Role),
             };
-            write(&repr, MAX_REQUEST_FRAME)
+            write(&repr, MAX_REQUEST_FRAME).map(Payload::Plain)
         }
         ChannelRole::UiMain => {
-            let repr = match op {
+            let repr: UiRepr<()> = match op {
                 Op::Status => UiRepr::Status,
                 Op::Host => UiRepr::Host,
-                Op::Join(t) => UiRepr::Join(TicketRef(t)),
+                Op::Join(t) => return ticket_payload(t),
                 Op::Invite(i) => UiRepr::Invite(invite(*i)),
                 Op::Kick(id) => UiRepr::Kick(*id.as_bytes()),
                 Op::Decide { approval, allow } => UiRepr::Decide {
@@ -229,10 +258,10 @@ pub(crate) fn encode_op(role: ChannelRole, op: &Op) -> Result<Zeroizing<Vec<u8>>
                 Op::Doctor => UiRepr::Doctor,
                 _ => return Err(IpcError::Role),
             };
-            write(&repr, MAX_REQUEST_FRAME)
+            write(&repr, MAX_REQUEST_FRAME).map(Payload::Plain)
         }
         ChannelRole::Overlay if matches!(op, Op::Status) => {
-            write(&OverlayRepr::Status, MAX_REQUEST_FRAME)
+            write(&OverlayRepr::Status, MAX_REQUEST_FRAME).map(Payload::Plain)
         }
         _ => Err(IpcError::Role),
     }
@@ -268,9 +297,6 @@ pub(crate) fn decode_op(role: ChannelRole, bytes: &[u8]) -> Result<Op, IpcError>
         }
         _ => return Err(IpcError::Role),
     };
-    if encode_op(role, &op)?.as_slice() != bytes {
-        return Err(IpcError::Malformed);
-    }
     Ok(op)
 }
 fn refusal(r: Refusal) -> RefusalRepr {
@@ -289,14 +315,14 @@ fn get_refusal(r: RefusalRepr) -> Refusal {
         RefusalRepr::Failed => Refusal::Failed,
     }
 }
-pub(crate) fn encode_reply(reply: &Reply) -> Result<Zeroizing<Vec<u8>>, IpcError> {
-    let repr = match reply {
+pub(crate) fn encode_reply(reply: &Reply) -> Result<Payload, IpcError> {
+    let repr: ReplyRepr<()> = match reply {
         Reply::Done => ReplyRepr::Done,
         Reply::Refused(r) => ReplyRepr::Refused(refusal(*r)),
-        Reply::Invite(t) => ReplyRepr::Invite(TicketRef(t)),
+        Reply::Invite(t) => return ticket_payload(t),
         Reply::Report(r) => ReplyRepr::Report(ReportRepr(r.clone())),
     };
-    write(&repr, MAX_REPLY_FRAME)
+    write(&repr, MAX_REPLY_FRAME).map(Payload::Plain)
 }
 pub(crate) fn decode_reply(bytes: &[u8]) -> Result<Reply, IpcError> {
     let reply = match read::<ReplyRepr<&str>>(bytes)? {
@@ -305,9 +331,6 @@ pub(crate) fn decode_reply(bytes: &[u8]) -> Result<Reply, IpcError> {
         ReplyRepr::Invite(t) => Reply::Invite(get_ticket(t)?),
         ReplyRepr::Report(r) => Reply::Report(r.0),
     };
-    if encode_reply(&reply)?.as_slice() != bytes {
-        return Err(IpcError::Malformed);
-    }
     Ok(reply)
 }
 
@@ -459,11 +482,14 @@ mod tests {
     fn ops_round_trip_and_reject_every_truncation_and_trailing_byte() {
         for role in [ChannelRole::Cli, ChannelRole::UiMain, ChannelRole::Overlay] {
             for op in every_op() {
-                let Ok(bytes) = encode_op(role, &op) else {
+                let Ok(Payload::Plain(bytes)) = encode_op(role, &op) else {
                     continue;
                 };
                 let got = decode_op(role, &bytes).unwrap();
-                assert_eq!(encode_op(role, &got).unwrap().as_slice(), bytes.as_slice());
+                let Payload::Plain(again) = encode_op(role, &got).unwrap() else {
+                    panic!("nonsecret control");
+                };
+                assert_eq!(again.as_slice(), bytes.as_slice());
                 assert_eq!(format!("{got:?}"), format!("{op:?}"));
                 for cut in 0..bytes.len() {
                     assert_eq!(
@@ -551,16 +577,20 @@ mod tests {
         let replies = [
             Reply::Done,
             Reply::Report(report),
-            Reply::Invite(ticket("kickoff1XYZ")),
             Reply::Refused(Refusal::Unknown),
             Reply::Refused(Refusal::Busy),
             Reply::Refused(Refusal::NotHost),
             Reply::Refused(Refusal::Failed),
         ];
         for reply in replies {
-            let bytes = encode_reply(&reply).unwrap();
+            let Payload::Plain(bytes) = encode_reply(&reply).unwrap() else {
+                panic!("nonsecret control");
+            };
             let got = decode_reply(&bytes).unwrap();
-            assert_eq!(encode_reply(&got).unwrap().as_slice(), bytes.as_slice());
+            let Payload::Plain(again) = encode_reply(&got).unwrap() else {
+                panic!("nonsecret control");
+            };
+            assert_eq!(again.as_slice(), bytes.as_slice());
             for cut in 0..bytes.len() {
                 assert_eq!(decode_reply(&bytes[..cut]).err(), Some(IpcError::Malformed));
             }
@@ -568,6 +598,20 @@ mod tests {
             longer.push(0);
             assert!(decode_reply(&longer).is_err());
         }
+    }
+    #[test]
+    fn borrowed_ticket_fixtures_decode_before_protecting() {
+        let expected = "kickoff1ABC234";
+        let join = postcard::to_allocvec(&CliRepr::Join(expected)).unwrap();
+        let Op::Join(ticket) = decode_op(ChannelRole::Cli, &join).unwrap() else {
+            panic!("join");
+        };
+        assert!(ticket.secret().ct_eq(expected.as_bytes()));
+        let invite = postcard::to_allocvec(&ReplyRepr::Invite(expected)).unwrap();
+        let Reply::Invite(ticket) = decode_reply(&invite).unwrap() else {
+            panic!("invite");
+        };
+        assert!(ticket.secret().ct_eq(expected.as_bytes()));
     }
     #[test]
     fn report_count_is_checked_before_reading_fields() {

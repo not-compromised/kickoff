@@ -397,12 +397,25 @@ async fn si_7_descriptors_from_a_caller_close_the_channel_and_are_closed() {
         assert!(seen.try_recv().is_err(), "the daemon saw a request");
         assert_eq!(server.health().frames_refused, 1);
         rustix::io::ioctl_fionbio(&pipe_r, true).unwrap();
+        // Concurrent process fixtures may hold a fork-inherited CLOEXEC copy
+        // until exec. Observe EOF within the same bound instead of assuming
+        // socket closure and all unrelated execs occur in one scheduling turn.
+        let pipe = tokio::io::unix::AsyncFd::new(pipe_r).unwrap();
         let mut sink = [0u8; 1];
-        assert_eq!(
-            rustix::io::read(&pipe_r, &mut sink).unwrap(),
-            0,
-            "a copy of the descriptor is still open"
-        );
+        let read = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let mut ready = pipe.readable().await.unwrap();
+                match ready.try_io(|fd| {
+                    rustix::io::read(fd.get_ref(), &mut sink).map_err(std::io::Error::from)
+                }) {
+                    Ok(result) => break result.unwrap(),
+                    Err(_) => continue,
+                }
+            }
+        })
+        .await
+        .expect("a copy of the descriptor is still open");
+        assert_eq!(read, 0, "a copy of the descriptor is still open");
     }
 }
 

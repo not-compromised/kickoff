@@ -26,8 +26,16 @@ mutant-si29-door-with-ip = []
 mutant-si30-cap-debug = []
 mutant-si30-open-owner = []
 mutant-si30-cap-repr-no-wipe = []
+mutant-si30-readable-transmission = []
+mutant-si30-public-join-encoder = []
+mutant-si30-ticket-transport = []
+mutant-si30-recipient-unbound = []
+mutant-si30-ticket-issuer-unchecked = []
 
 [dependencies]
+kickoff-local.workspace = true
+iroh.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }
 iroh-base.workspace = true
 kickoff-secret.workspace = true
 bytes.workspace = true
@@ -39,5 +47,7 @@ getrandom.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+kickoff-send-guard.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 proptest.workspace = true
 serde-reflection.workspace = true

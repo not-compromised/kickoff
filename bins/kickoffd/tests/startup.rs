@@ -44,6 +44,23 @@ fn client_helper() {
             client.call(kickoff_ipc::CliCommand::Status).await,
             Ok(kickoff_ipc::Reply::Refused(kickoff_ipc::Refusal::Failed))
         ));
+        let identity =
+            kickoff_secret::key::IdentityKey::new(iroh_base::SecretKey::from_bytes(&[7; 32]));
+        let mut invites = kickoff_wire::Invites::new(&identity).unwrap();
+        let ticket = kickoff_secret::Secret::new(kickoff_wire::Ticket {
+            door: iroh_base::EndpointAddr::new(identity.public())
+                .with_relay_url("https://relay.example./".parse().unwrap()),
+            cap: invites.issue(&identity, None, Instant::now()).unwrap(),
+        });
+        let text =
+            kickoff_ipc::TicketText::new(kickoff_wire::encode_ticket(&ticket).unwrap()).unwrap();
+        assert!(
+            matches!(
+                client.call(kickoff_ipc::CliCommand::Join(text)).await,
+                Ok(kickoff_ipc::Reply::Refused(kickoff_ipc::Refusal::Failed))
+            ),
+            "the installed facade/worker must receive a genuine protected ticket command"
+        );
     });
 }
 

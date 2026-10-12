@@ -162,3 +162,133 @@ pub async fn closed_within(stream: &mut UnixStream, wait: Duration) -> bool {
         Ok(Ok(0) | Err(_))
     )
 }
+
+/// Runs the same regression from a private installation. Both transport ends
+/// execute the installed helper, so canonical kernel authentication is real.
+pub fn installed_fixture(test: &str) -> bool {
+    if std::env::var("KIPC_INSTALLED_TEST").ok().as_deref() == Some(test) {
+        return true;
+    }
+    let base = TempBase::new();
+    let client = base.path().join("kickoff");
+    std::fs::copy(me(), &client).unwrap();
+    std::fs::hard_link(&client, base.path().join("kickoffd")).unwrap();
+    let output = std::process::Command::new(client)
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .env("KIPC_INSTALLED_TEST", test)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "installed regression {test}: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+/// A real second installed process; its checks use the production kernel path.
+pub struct InstalledDaemon {
+    child: std::process::Child,
+    transcript: PathBuf,
+    _stdout: std::process::ChildStdout,
+}
+
+impl InstalledDaemon {
+    pub fn start(base: &TempBase, mode: &str) -> Self {
+        use std::io::BufRead;
+        let transcript = base.path().join("seen");
+        let mut child = std::process::Command::new(me())
+            .args([
+                "--exact",
+                "common::installed_daemon_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("KIPC_DAEMON_BASE", base.path())
+            .env("KIPC_DAEMON_MODE", mode)
+            .env("KIPC_DAEMON_TRANSCRIPT", &transcript)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut lines = (&mut reader).lines();
+        assert!(
+            lines.any(|line| line.unwrap().contains("KIPC_READY")),
+            "daemon did not bind"
+        );
+        Self {
+            child,
+            transcript,
+            _stdout: reader.into_inner(),
+        }
+    }
+
+    pub async fn finish(mut self) -> Vec<String> {
+        let status = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(status.success(), "installed daemon failed");
+        std::fs::read_to_string(&self.transcript)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+impl Drop for InstalledDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[tokio::test]
+async fn installed_daemon_helper() {
+    let Some(base) = std::env::var_os("KIPC_DAEMON_BASE") else {
+        return;
+    };
+    let mode = std::env::var("KIPC_DAEMON_MODE").unwrap();
+    let dir = RuntimeDir::open_in(Path::new(&base)).unwrap();
+    let server = Server::bind(&dir, trust_me()).unwrap();
+    println!("KIPC_READY");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    let channel_sizes: &[usize] = if mode == "roles" { &[2, 2, 1] } else { &[1] };
+    let mut seen = Vec::new();
+    for &count in channel_sizes {
+        let mut channel = server.accept().await.unwrap();
+        for _ in 0..count {
+            let request = channel.recv().await.unwrap();
+            seen.push(format!("{request:?}"));
+            let reply = match (&*mode, request) {
+                ("join", Request::Cli(kickoff_ipc::CliCommand::Join(t))) => {
+                    assert!(t.secret().ct_eq(b"kickoff1CANARYQ7XZ3T2WVB"));
+                    Reply::Done
+                }
+                ("invite", Request::UiMain(kickoff_ipc::UiCommand::Invite(_))) => {
+                    Reply::Invite(canary_ticket("kickoff1CANARYQ7XZ3T2WVB"))
+                }
+                ("roles", Request::Cli(kickoff_ipc::CliCommand::Invite(_))) => {
+                    Reply::Invite(canary_ticket("kickoff1INVITE"))
+                }
+                ("roles", _) => Reply::Done,
+                _ => panic!("unexpected installed daemon request"),
+            };
+            channel.reply(reply).await.unwrap();
+        }
+    }
+    std::fs::write(
+        std::env::var_os("KIPC_DAEMON_TRANSCRIPT").unwrap(),
+        seen.join("\n"),
+    )
+    .unwrap();
+}

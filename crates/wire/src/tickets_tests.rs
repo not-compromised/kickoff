@@ -5,7 +5,7 @@
     clippy::string_slice
 )]
 
-mod harness;
+use crate::test_harness as harness;
 
 use kickoff_secret::key::IdentityKey;
 use std::fmt::{Debug, Display};
@@ -427,7 +427,7 @@ proptest! {
         };
         #[derive(serde::Deserialize)]
         struct Fields { session_id: [u8; 16], invitee: Option<EndpointId>, nonce: [u8; 16], sig: Signature }
-        let bytes = kickoff_wire::encode(&request).unwrap();
+        let bytes = crate::msg::encode_owned(&request).unwrap();
         let (mut forged, _) = postcard::take_from_bytes::<Fields>(&bytes).unwrap();
         match field {
             0 => forged.session_id[bit % 128 / 8] ^= 1 << (bit % 8),
@@ -473,4 +473,29 @@ proptest! {
         }
         harness::ticket(&bytes);
     }
+}
+
+#[test]
+fn si_30_ticket_cannot_reassign_an_existing_capability_to_another_door() {
+    let issuer = key(1);
+    let attacker = key(2);
+    let mut invites = Invites::new(&issuer).unwrap();
+    let cap = invites.issue(&issuer, None, Instant::now()).unwrap();
+    let redirected = Secret::new(Ticket {
+        door: door(&attacker),
+        cap: cap.copy_for_join(),
+    });
+    assert_eq!(encode_ticket(&redirected).err(), Some(WireError::Malformed));
+    let original = ticket_text(&issuer, &cap);
+    let mut raw = data_encoding::BASE32_NOPAD
+        .decode(original[8..].to_ascii_uppercase().as_bytes())
+        .unwrap();
+    raw[1..33].copy_from_slice(attacker.public().as_bytes());
+    let edited = format!(
+        "kickoff1{}",
+        data_encoding::BASE32_NOPAD
+            .encode(&raw)
+            .to_ascii_lowercase()
+    );
+    assert_eq!(parse_ticket(&edited).err(), Some(WireError::Malformed));
 }

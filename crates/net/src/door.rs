@@ -212,9 +212,11 @@ fn busy(err: &ConnectionError) -> bool {
 }
 
 async fn exchange(conn: &Connection, request: &JoinRequest) -> Result<JoinReply, NetError> {
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|_| NetError::Closed)?;
-    write_message(&mut send, request).await?;
-    send.finish().map_err(|_| NetError::Closed)?;
+    let mut recv = kickoff_wire::prepare_message(request)
+        .map_err(crate::stream::wire)?
+        .transmit_quic(conn)
+        .await
+        .map_err(|_| NetError::Closed)?;
     read_message(&mut recv).await
 }
 
@@ -558,7 +560,8 @@ mod tests {
             .await
             .unwrap();
         let request = JoinRequest {
-            cap: kickoff_wire::Cap::new(
+            cap: kickoff_wire::Cap::new_for_door(
+                host.id(),
                 kickoff_wire::SessionId([0; 16]),
                 None,
                 kickoff_wire::Nonce([0; 16]),
@@ -574,15 +577,16 @@ mod tests {
                 patch: 0,
             },
         };
-        let frame = kickoff_wire::encode_framed(&request).unwrap();
         let mut held = Vec::new();
         for n in 0..=GENERAL_QUEUE {
             let ip = std::net::Ipv4Addr::new(127, 0, 3, u8::try_from(n).unwrap().wrapping_add(1));
             let client = blocked_client(ip).await;
             let conn = client.connect(host.addr(), JOIN_ALPN).await.unwrap();
-            let (mut send, recv) = conn.open_bi().await.unwrap();
-            send.write_all(&frame).await.unwrap();
-            send.finish().unwrap();
+            let recv = kickoff_wire::prepare_message(&request)
+                .unwrap()
+                .transmit_quic(&conn)
+                .await
+                .unwrap();
             if n < GENERAL_QUEUE {
                 tokio::time::timeout(Duration::from_secs(2), async {
                     while host.queues.lock().await.general.len() != n.saturating_add(1) {
@@ -591,7 +595,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-                held.push((client, conn, send, recv));
+                held.push((client, conn, recv));
             } else {
                 assert!(
                     tokio::time::timeout(Duration::from_millis(500), conn.closed())
@@ -604,7 +608,7 @@ mod tests {
         assert_eq!(host.queues.lock().await.general.len(), GENERAL_QUEUE);
         assert!(
             held.iter()
-                .all(|(_, conn, _, _)| conn.close_reason().is_none())
+                .all(|(_, conn, _)| conn.close_reason().is_none())
         );
     }
 }

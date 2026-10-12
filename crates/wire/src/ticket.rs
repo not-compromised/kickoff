@@ -37,6 +37,7 @@ pub struct Cap {
 }
 
 pub(crate) struct CapValue {
+    issuer: Option<EndpointId>,
     pub(crate) session_id: SessionId,
     pub(crate) invitee: Option<EndpointId>,
     pub(crate) nonce: Nonce,
@@ -90,6 +91,7 @@ impl Cap {
     ) -> Self {
         Self {
             value: Secret::new(CapValue {
+                issuer: None,
                 session_id,
                 invitee,
                 nonce,
@@ -97,12 +99,35 @@ impl Cap {
             }),
         }
     }
+    /// Caller-owned raw inputs can identify their intended door. Existing
+    /// protected capabilities have no operation that changes this authority.
+    pub fn new_for_door(
+        issuer: EndpointId,
+        session_id: SessionId,
+        invitee: Option<EndpointId>,
+        nonce: Nonce,
+        sig: Signature,
+    ) -> Self {
+        Self {
+            value: Secret::new(CapValue {
+                issuer: Some(issuer),
+                session_id,
+                invitee,
+                nonce,
+                sig: sig.to_bytes(),
+            }),
+        }
+    }
+    pub(crate) fn issuing_door(&self) -> Option<EndpointId> {
+        self.read(|cap| cap.issuer)
+    }
     pub fn invitee(&self) -> Option<EndpointId> {
         self.read(|cap| cap.invitee)
     }
     pub fn copy_for_join(&self) -> Self {
         self.read(|cap| Self {
             value: Secret::new(CapValue {
+                issuer: cap.issuer,
                 session_id: cap.session_id,
                 invitee: cap.invitee,
                 nonce: cap.nonce,
@@ -120,7 +145,13 @@ impl Cap {
         nonce: Nonce,
     ) -> Self {
         let msg = signed_message(&door_key.public(), &session_id, invitee.as_ref(), &nonce);
-        Self::new(session_id, invitee, nonce, door_key.sign(&msg))
+        Self::new_for_door(
+            door_key.public(),
+            session_id,
+            invitee,
+            nonce,
+            door_key.sign(&msg),
+        )
     }
     pub(crate) fn verify(&self, door: &EndpointId) -> bool {
         self.read(|cap| {
@@ -182,8 +213,8 @@ impl Ticket {
     }
 }
 
-/// Protected textual encoding shared by wire and IPC. Operations return
-/// protected transport bytes or parsed tickets, never an arbitrary closure.
+/// Protected textual encoding shared by wire and IPC. Plaintext remains
+/// inside the wire consumer during parsing and designated transmission.
 pub struct TicketTextValue(String);
 impl Wipe for TicketTextValue {
     fn wipe(&mut self) {
@@ -208,9 +239,36 @@ impl TicketTextValue {
                 && t.0.bytes().all(|b| b.is_ascii_alphanumeric())
         })
     }
+    #[cfg(feature = "mutant-si30-ticket-transport")]
     pub fn transport(text: &Secret<Self>) -> SecretBuffer {
         text.expose(&OWNER, |t| SecretBuffer::copy_from(t.0.as_bytes()))
     }
+    #[cfg(all(test, not(feature = "mutant-si30-ticket-transport")))]
+    pub(crate) fn transport(text: &Secret<Self>) -> SecretBuffer {
+        text.expose(&OWNER, |t| SecretBuffer::copy_from(t.0.as_bytes()))
+    }
+
+    /// The sole string field of a postcard enum variant, framed for IPC.
+    /// The borrowed representation stays within the designated wire consumer.
+    pub fn postcard_frame(
+        text: &Secret<Self>,
+        variant: u32,
+    ) -> Result<crate::Transmission, WireError> {
+        text.expose(&OWNER, |t| {
+            if t.0.len() > MAX_TICKET_LEN {
+                return Err(WireError::TooLong {
+                    max: MAX_TICKET_LEN,
+                });
+            }
+            // Postcard enums encode the variant index followed by its fields.
+            let body = crate::msg::postcard_write(
+                &(variant, t.0.as_str()),
+                MAX_TICKET_LEN.saturating_add(10),
+            )?;
+            crate::Transmission::local(body)
+        })
+    }
+
     pub fn parse(text: &Secret<Self>) -> Result<Secret<Ticket>, WireError> {
         text.expose(&OWNER, |t| parse_ticket(&t.0))
     }
@@ -277,6 +335,7 @@ impl CapRepr {
     pub(crate) fn into_cap(self) -> Cap {
         Cap {
             value: Secret::new(CapValue {
+                issuer: None,
                 session_id: SessionId(self.session_id),
                 invitee: self.invitee,
                 nonce: Nonce(self.nonce),
@@ -368,10 +427,21 @@ pub fn parse_ticket(text: &str) -> Result<Secret<Ticket>, WireError> {
     if !rest.is_empty() {
         return Err(WireError::Malformed);
     }
-    let ticket = Ticket {
-        door: repr.door.to_addr()?,
-        cap: repr.cap.into_cap(),
-    };
+    let door = repr.door.to_addr()?;
+    let cap = repr.cap.into_cap();
+    if !cfg!(feature = "mutant-si30-ticket-issuer-unchecked") && !cap.verify(&door.id) {
+        return Err(WireError::Malformed);
+    }
+    let cap = cap.read(|raw| {
+        Cap::new_for_door(
+            door.id,
+            raw.session_id,
+            raw.invitee,
+            raw.nonce,
+            Signature::from_bytes(&raw.sig),
+        )
+    });
+    let ticket = Ticket { door, cap };
     if ticket_bytes(&ticket)?.as_ref() != bytes.as_ref() {
         return Err(WireError::Malformed);
     }
@@ -381,6 +451,12 @@ pub fn parse_ticket(text: &str) -> Result<Secret<Ticket>, WireError> {
 /// Refuses a door address with a direct address or no relay.
 pub fn encode_ticket(ticket: &Secret<Ticket>) -> Result<Secret<TicketTextValue>, WireError> {
     ticket.expose(&OWNER, |ticket| {
+        if !cfg!(feature = "mutant-si30-ticket-issuer-unchecked")
+            && (ticket.cap.issuing_door() != Some(ticket.door.id)
+                || !ticket.cap.verify(&ticket.door.id))
+        {
+            return Err(WireError::Malformed);
+        }
         let bytes = ticket_bytes(ticket)?;
         let len = TICKET_PREFIX
             .len()
@@ -435,7 +511,7 @@ mod tests {
                 patch: 0,
             },
         };
-        let mut body = crate::encode(&request).unwrap();
+        let mut body = crate::prepare_message(&request).unwrap().copy_body();
         let decoded = crate::decode::<crate::JoinRequest>(&body).unwrap();
         drop(decoded);
         body.push(0);
@@ -485,8 +561,8 @@ mod tests {
             let cap = Cap::sign(&door_key, SessionId([7; 16]), invitee, Nonce([9; 16]));
             prop_assert!(cap.verify(&door));
 
-            let cap = cap.read(|c| CapValue { session_id: c.session_id, invitee: c.invitee, nonce: c.nonce, sig: c.sig });
-            let mut forged = CapValue { session_id: cap.session_id, invitee, nonce: cap.nonce, sig: cap.sig };
+            let cap = cap.read(|c| CapValue { issuer: c.issuer, session_id: c.session_id, invitee: c.invitee, nonce: c.nonce, sig: c.sig });
+            let mut forged = CapValue { issuer: cap.issuer, session_id: cap.session_id, invitee, nonce: cap.nonce, sig: cap.sig };
             let mut checked_door = door;
             match field {
                 0 => forged.session_id = SessionId(flip(cap.session_id.0, bit)),

@@ -28,13 +28,25 @@ fn configured_features() -> Vec<&'static str> {
     feature!("mutant-si30-cap-debug");
     feature!("mutant-si30-open-owner");
     feature!("mutant-si30-cap-repr-no-wipe");
+    feature!("mutant-si30-readable-transmission");
+    feature!("mutant-si30-public-join-encoder");
+    feature!("mutant-si30-ticket-transport");
+    feature!("mutant-si30-recipient-unbound");
+    feature!("mutant-si30-ticket-issuer-unchecked");
     features
 }
 
 fn compile(source: &str) -> std::process::Output {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _serial = SERIAL.lock().unwrap();
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let wire = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = wire.parent().unwrap().parent().unwrap();
-    let temp = std::env::temp_dir().join(format!("kickoff-secret-owner-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!(
+        "kickoff-secret-owner-{}-{sequence}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(temp.join("src")).unwrap();
     let features = configured_features()
         .iter()
@@ -51,11 +63,15 @@ edition = "2024"
 [dependencies]
 kickoff-wire = {{ path = {wire:?}, features = [{features}] }}
 kickoff-secret = {{ path = {secret:?} }}
+kickoff-local = {{ path = {local:?} }}
+iroh = {{ version = "=1.3.0", default-features = false, features = ["tls-ring"] }}
+tokio = {{ version = "=1.53.2", default-features = false, features = ["net"] }}
 [patch.crates-io]
 iroh = {{ path = {iroh:?} }}
 noq = {{ path = {noq:?} }}
 "#,
         secret = root.join("crates/secret"),
+        local = root.join("crates/local"),
         iroh = root.join("vendor/iroh-1.3.0"),
         noq = root.join("vendor/noq-1.3.0")
     );
@@ -274,4 +290,158 @@ fn si_30_unrelated_consumers_cannot_expose_or_replace_secret_owners() {
         "{}",
         String::from_utf8_lossy(&identity_owner.stderr)
     );
+}
+
+#[test]
+fn si_30_unrelated_holders_cannot_copy_serialized_secrets() {
+    let controls = compile(
+        r#"
+        use kickoff_secret::Secret;
+        use kickoff_wire::{Ticket, TicketTextValue, JoinRequest, HostMsg, WireError};
+        fn ordinary(msg: &HostMsg) { let _ = kickoff_wire::encode(msg).unwrap().to_vec(); }
+        async fn authorized(ticket: &Secret<Ticket>, request: &JoinRequest,
+            local: &mut kickoff_local::InstalledPeer<'_>, quic: &iroh::endpoint::Connection)
+            -> Result<(), Box<dyn std::error::Error>> {
+            let text = kickoff_wire::encode_ticket(ticket)?;
+            TicketTextValue::postcard_frame(&text, 2)?.transmit_local(local).await?;
+            kickoff_wire::prepare_message(request)?.transmit_quic(quic).await?;
+            Ok(())
+        }
+    "#,
+    );
+    assert!(
+        controls.status.success(),
+        "{}",
+        String::from_utf8_lossy(&controls.stderr)
+    );
+    for (source, diagnostic) in [
+        (
+            r#"
+            use kickoff_secret::Secret;
+            use kickoff_wire::{Ticket, TicketTextValue, WireError, encode_ticket};
+            fn copy(ticket: &Secret<Ticket>) -> Result<Vec<u8>, WireError> {
+                let text = encode_ticket(ticket)?;
+                Ok(TicketTextValue::transport(&text).to_vec())
+            }
+        "#,
+            "transport",
+        ),
+        (
+            r#"
+            use kickoff_wire::JoinRequest;
+            fn copy(request: &JoinRequest) -> Vec<u8> {
+                kickoff_wire::encode(request).unwrap().to_vec()
+            }
+        "#,
+            "PublicWireMessage",
+        ),
+        (
+            r#"
+            use kickoff_wire::JoinRequest;
+            fn copy(request: &JoinRequest) -> Vec<u8> {
+                kickoff_wire::encode_framed(request).unwrap().to_vec()
+            }
+        "#,
+            "PublicWireMessage",
+        ),
+        (
+            r#"
+            use kickoff_wire::JoinRequest;
+            fn copy(request: &JoinRequest) -> Vec<u8> {
+                kickoff_wire::prepare_message(request).unwrap().to_vec()
+            }
+        "#,
+            "to_vec",
+        ),
+        (
+            r#"
+            use kickoff_wire::WireMessage;
+            fn copy<M: WireMessage>(request: &M) -> Vec<u8> {
+                request.write().unwrap().to_vec()
+            }
+        "#,
+            "to_vec",
+        ),
+        (
+            r#"
+            use kickoff_wire::JoinRequest;
+            fn copy(request: &JoinRequest) {
+                let frame = kickoff_wire::prepare_message(request).unwrap();
+                let _ = std::ops::Deref::deref(&frame);
+            }
+        "#,
+            "Deref",
+        ),
+        (
+            r#"
+            use kickoff_wire::JoinRequest;
+            fn copy(request: &JoinRequest) {
+                let frame = kickoff_wire::prepare_message(request).unwrap();
+                let _ = frame.body;
+            }
+        "#,
+            "private",
+        ),
+        (
+            r#"
+            use kickoff_wire::JoinRequest;
+            impl kickoff_wire::PublicWireMessage for JoinRequest {}
+        "#,
+            "E0117",
+        ),
+        (
+            r#"
+            use kickoff_local::{InstalledPeer, DataOnly};
+            fn fake(stream: &mut DataOnly) {
+                let _ = InstalledPeer { transport: stream, _pidfd: None };
+            }
+        "#,
+            "private",
+        ),
+        (
+            r#"
+            use kickoff_local::InstalledPeer;
+            fn raw(peer: &InstalledPeer<'_>) { let _ = std::ops::Deref::deref(peer); }
+        "#,
+            "Deref",
+        ),
+        (
+            r#"
+            use kickoff_local::DataOnly;
+            fn raw(peer: &mut DataOnly) { let _ = peer.unix_mut(); }
+        "#,
+            "unix_mut",
+        ),
+        (
+            r#"
+            use kickoff_secret::Secret;
+            use kickoff_wire::TicketTextValue;
+            fn callback(text: &Secret<TicketTextValue>) {
+                let _ = TicketTextValue::postcard_frame(text, |raw: &str| raw.to_owned());
+            }
+        "#,
+            "u32",
+        ),
+        (
+            r#"
+            use kickoff_wire::JoinRequest;
+            async fn copy(request: &JoinRequest) {
+                let mut raw = Vec::new();
+                kickoff_wire::prepare_message(request).unwrap().transmit_local(&mut raw).await.unwrap();
+            }
+        "#,
+            "InstalledPeer",
+        ),
+    ] {
+        let output = compile(source);
+        assert!(
+            !output.status.success(),
+            "an unrelated holder can copy serialized secrets: {source}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(diagnostic),
+            "wrong compiler boundary: {stderr}"
+        );
+    }
 }

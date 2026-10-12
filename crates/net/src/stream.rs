@@ -4,7 +4,9 @@
 
 use iroh::endpoint::{RecvStream, SendStream};
 use kickoff_secret::SecretBuffer;
-use kickoff_wire::{LEN_PREFIX_LEN, WireError, WireMessage, decode, encode_framed, frame_len};
+use kickoff_wire::{
+    LEN_PREFIX_LEN, PublicWireMessage, WireError, WireMessage, decode, encode_framed, frame_len,
+};
 
 use crate::NetError;
 
@@ -21,7 +23,7 @@ pub(crate) async fn read_message<M: WireMessage>(recv: &mut RecvStream) -> Resul
     decode(&body).map_err(wire)
 }
 
-pub(crate) async fn write_message<M: WireMessage>(
+pub(crate) async fn write_message<M: PublicWireMessage>(
     send: &mut SendStream,
     msg: &M,
 ) -> Result<(), NetError> {

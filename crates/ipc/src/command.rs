@@ -44,7 +44,8 @@ impl TicketText {
 
 impl fmt::Debug for TicketText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if cfg!(feature = "mutant-si30-ticket-text-debug") {
+        #[cfg(feature = "mutant-si30-ticket-text-debug")]
+        {
             return write!(
                 f,
                 "TicketText({})",
