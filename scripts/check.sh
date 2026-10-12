@@ -64,7 +64,7 @@ cargo test --release --locked -p kickoff-vlan --test hot_path -- --nocapture
 
 step "cargo deny"
 python3 scripts/advisory-exceptions.py --output "$deny_config"
-cargo deny check --config "$deny_config" --hide-inclusion-graph
+cargo deny --config "$deny_config" check --hide-inclusion-graph
 scripts/check-upstream-advisories.sh
 
 step "mutants (SI-33)"

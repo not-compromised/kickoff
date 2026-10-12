@@ -39,10 +39,16 @@ class AdvisoryExceptions(unittest.TestCase):
 import os
 from pathlib import Path
 import sys
+import subprocess
 args = sys.argv[1:]
 with Path(os.environ["CARGO_CALLS"]).open("a") as calls:
     calls.write(" ".join(args) + "\\n")
 if args[0] == "deny":
+    # Parse the recorded arguments with the installed CLI, without doing a scan.
+    parsed = subprocess.run([os.environ["REAL_CARGO"], *args, "--help"], capture_output=True, text=True)
+    if parsed.returncode:
+        sys.stderr.write(parsed.stderr)
+        sys.exit(parsed.returncode)
     if "--config" in args:
         config = Path(args[args.index("--config") + 1])
     else:
@@ -50,7 +56,7 @@ if args[0] == "deny":
     Path(os.environ["CARGO_SNAPSHOT"]).write_text(config.read_text())
 """)
         fake.chmod(0o755)
-        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", CARGO_CALLS=str(self.root / "calls"), CARGO_SNAPSHOT=str(self.root / "deny-snapshot"))
+        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", CARGO_CALLS=str(self.root / "calls"), CARGO_SNAPSHOT=str(self.root / "deny-snapshot"), REAL_CARGO=shutil.which("cargo"))
 
     def prepare(self, entries, today=TODAY):
         (self.root / "advisory-exceptions.toml").write_text(metadata(entries))
@@ -128,7 +134,13 @@ if args[0] == "deny":
                     self.assertIn("metadata --manifest-path", calls)
                     self.assertNotIn("--offline", calls)
                 else:
-                    self.assertIn("deny check --config", calls)
+                    self.assertIn("deny --config", calls)
+
+    def test_recording_cargo_rejects_misplaced_global_config(self):
+        result = subprocess.run([str(self.root / "cargo"), "deny", "check", "--config", str(self.root / "deny.toml"), "--hide-inclusion-graph"], cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("unexpected argument '--config'", result.stderr)
+        self.assertFalse((self.root / "deny-snapshot").exists())
 
     def test_both_gates_refuse_invalid_exceptions_before_cargo(self):
         today = datetime.now(timezone.utc).date()
