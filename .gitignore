@@ -1,0 +1,8 @@
+target/
+*.part
+.env
+
+# Agent context, linked in by the maintainer's tooling; never committed
+/AGENTS.md
+/CLAUDE.md
+/context
