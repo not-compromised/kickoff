@@ -1707,7 +1707,9 @@ version = "0.0.0"
 name = "kickoffd"
 version = "0.0.0"
 dependencies = [
+ "kickoff-ipc",
  "kickoff-secret",
+ "tokio",
 ]
 
 [[package]]

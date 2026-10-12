@@ -13,12 +13,14 @@ Spec: [design.md](design.md). Standing security rules: [SECURITY-INVARIANTS.md](
 | `crates/ipc` | authenticated, versioned local channels | M2 (Linux), M7 (Windows) |
 | `crates/secret` | `Secret<T>`, process hardening, Linux identity storage | M2 |
 | `crates/send-guard` | the registry called by vendored iroh before IP sends | M2 |
-| `crates/{store,parse,maps,game}`, `bins/{kickoffd,kickoff}` | placeholders | M5, M6 |
+| `bins/kickoffd` | Linux listener facade and hardened IPC worker; commands refuse until adapters exist | M2 startup, M6 adapters |
+| `crates/{store,parse,maps,game}`, `bins/kickoff` | placeholders | M5, M6 |
 | `xtask` | the SI-33 harness: mutant runner, release guard check, policy test | M2 |
 
-M2 crates are implemented; placeholder crates (store, parse, maps, game) and
-the binaries return a typed `NotImplemented` error and hold `Infallible`
-until their milestone, so no stub can panic.
+M2 crates and Linux daemon IPC startup are implemented. Game, map and session
+application adapters are not wired; the daemon refuses their commands. The
+store, parse, maps and game crates remain placeholders, and the CLI reports
+that it is not implemented yet.
 
 ## Checks
 

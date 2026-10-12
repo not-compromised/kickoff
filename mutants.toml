@@ -204,3 +204,155 @@ note = "the policy stops checking that rows have registered mutants"
 [[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-no-trusted-slots", test = "si_23_guard_preserves_slots_for_expected_or_admitted_peers", note = "unknown identities can consume every guard context and remote budget slot"
 
 [[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-locks-before-connection", test = "si_23_guard_connection_snapshots_do_not_block_packets", note = "tracking locks guard state before reading the transport connection, inverting the send-driver lock order"
+
+[[mutant]]
+si = "SI-10"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si10-control-skips-version"
+test = "si_10_control_ready_version_refused_before_serving"
+note = "private control accepts another protocol version before using descriptors"
+
+[[mutant]]
+si = "SI-10"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si10-control-skips-version"
+test = "si_10_control_version_refused_before_descriptor_use"
+note = "private control accepts another protocol version before using descriptors"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-probe-fd-unchecked"
+test = "si_30_facade_crash_probe_refuses_inherited_capabilities"
+note = "the startup crash probe accepts extra inherited descriptors"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-facade-no-probe"
+test = "si_30_facade_core_probe_timeout_reaps_child_and_scratch"
+note = "the facade starts without observing kernel crash suppression"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-facade-core-zero"
+test = "si_30_facade_crash_suppression_is_verified_before_listening"
+note = "the facade uses zero core limits, which Linux ignores for piped handlers"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-facade-no-probe"
+test = "si_30_facade_requires_kernel_crash_probe"
+note = "the facade starts without observing kernel crash suppression"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-unchecked"
+test = "si_7_worker_refuses_rogue_facade_executable"
+note = "the worker skips authentication of the private control creator"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-unchecked"
+test = "si_7_worker_refuses_control_not_created_by_parent"
+note = "the worker skips authentication of the private control creator"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-fd-unchecked"
+test = "si_7_worker_refuses_datagram_control_capability"
+note = "the worker accepts a named or non-stream private control capability"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-fd-unchecked"
+test = "si_7_worker_refuses_named_control_capability"
+note = "the worker accepts a named or non-stream private control capability"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-count-unchecked"
+test = "si_7_worker_refuses_extra_control_descriptor"
+note = "the worker accepts extra descriptors in a control message"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-worker-exe-unchecked"
+test = "si_7_facade_refuses_substituted_worker_executable"
+note = "the facade spawns a substituted worker executable"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-facade-lifetime-unchecked"
+test = "si_7_facade_death_closes_transferred_channels"
+note = "transferred channels survive the facade that authenticated them"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si23-facade-unbounded"
+test = "si_23_facade_bounds_outstanding_channels"
+note = "the facade bypasses its outstanding-channel cap"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-no-exe-check"
+test = "si_7_facade_refuses_rogue_clients_before_worker_payload"
+note = "the facade skips the caller executable check before handing off its socket"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-accept-ancillary"
+test = "si_7_transferred_client_still_refuses_ancillary"
+note = "the transferred client channel accepts ancillary descriptors"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-secret"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-dumpable"
+test = "si_30_facade_and_worker_keep_core_hard_limits"
+note = "the secret worker remains dumpable"
+
+[[unmutated]]
+test = "si_7_hardened_server_remains_authenticatable"
+reason = "positive hardened composition regression; hardening removal is checked separately by the SI-30 worker mutant"
+
+[[unmutated]]
+test = "si_7_transferred_socket_keeps_listener_creator_identity"
+reason = "positive kernel transfer and ticket round trip; validates composition rather than removing a mitigation"
+
+[[unmutated]]
+test = "si_7_worker_closes_wrong_descriptor_count_and_type"
+reason = "layered count, type and lease checks; independent count and descriptor mutants use dedicated tests"
+
+[[unmutated]]
+test = "si_7_installed_daemon_modes_authenticate_with_hardening"
+reason = "installed executable startup composition; negative protections have independent IPC mutants"
