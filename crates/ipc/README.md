@@ -49,7 +49,8 @@ once. Lease EOF releases a facade slot. The worker watches both control EOF and
 the facade pidfd even while clients are idle; either closes every transferred
 stream. Dropping the facade kills and reaps its direct worker. The facade alone
 owns socket-path cleanup, guarded by the inode it created. Abrupt facade death
-can leave its dead pathname, reclaimed by the existing exclusive-bind checks.
+can leave its dead pathname; a later bind refuses it until it is explicitly
+removed.
 
 The facade stays dumpable so clients can inspect its actual executable. Its
 core soft and hard limits are **one byte**, not zero: Linux's piped core handler
@@ -120,11 +121,10 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
    `Trust::clients()`, clients pass `Trust::kickoffd()`. Tests use
    `same_user` and `for_uid` to stand in for installed binaries and for a
    second uid.
-2. **A dead socket of ours is replaced.** §2.7 says "no unlink-and-retry".
-   Taken literally, a kickoffd killed with SIGKILL (which SI-12 tests do)
-   leaves a socket that blocks every later start. `bind` removes only a
-   socket that we own, inside our 0700 directory, that refuses connections;
-   a live server, a file, a symlink or another owner's socket is `Squatted`.
+2. **Every name collision fails closed.** `bind` never unlinks an existing
+   name, including a dead socket left by a killed process. A graceful owner
+   removes only its own socket inode on drop. Recovery from an ungraceful exit
+   requires explicit removal of the stale name before starting a daemon.
 3. **`SO_PEERPIDFD` comes from `nix`, liveness from `poll`.** rustix 1.1.5
    has no `SO_PEERPIDFD` wrapper; `nix` 0.31.3 (`socket` feature only) has a
    safe one, so it is a new dependency of this crate. The design names
@@ -134,9 +134,12 @@ Deviations from draft 2 and the M2 scaffold, and open questions.
    refuses a zombie). Kernels before 6.5 have no `SO_PEERPIDFD`: every peer
    is refused there. A caller whose pid is not visible (another pid
    namespace) is refused.
-4. **Hand-written codec instead of postcard.** Keeps `Serialize` off every
-   type that holds a `Secret` (SI-30), and gives strict decoding (no trailing
-   bytes, canonical booleans, counts checked before reading) in one file.
+4. **Private postcard representations.** Each implemented role has its own
+   fixed enum. Public secret-bearing commands implement no serde traits.
+   Tickets borrow the protected receiving frame during decode; enum payloads
+   reject trailing bytes, noncanonical values, unknown diagnostic keys and
+   over-limit reports. The fixed version handshake precedes postcard decoding.
+   Protocol version 3 replaces the earlier custom command layout.
 5. **A ticket does cross this channel.** `kickoff join <ticket>` and the UI's
    join flow must hand the ticket to kickoffd. It travels as `TicketText`; the
    overlay can neither send nor receive one. SI-9's "no raw ticket" applies to

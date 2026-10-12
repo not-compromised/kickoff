@@ -22,13 +22,13 @@ use kickoff_ipc::{
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-const STATUS: u8 = 1;
-const KICK: u8 = 5;
-const RETIRED_APPROVE: u8 = 6;
-const PICK_MAP: u8 = 7;
-const DECIDE: u8 = 11;
-const DONE: [u8; 1] = [1];
-const REFUSED_UNKNOWN: [u8; 2] = [2, 1];
+const STATUS: u8 = 0;
+const KICK: u8 = 4;
+const RETIRED_APPROVE: u8 = 0xee;
+const PICK_MAP: u8 = 6;
+const DECIDE: u8 = 5;
+const DONE: [u8; 1] = [0];
+const REFUSED_UNKNOWN: [u8; 2] = [1, 0];
 
 fn decide(allow: bool) -> Vec<u8> {
     let mut out = vec![DECIDE];
@@ -128,7 +128,7 @@ async fn commands_outside_the_role_and_unknown_tags_refused() {
                 decide(true),
                 with_32(RETIRED_APPROVE),
                 with_32(PICK_MAP),
-                vec![0],
+                vec![0xff],
             ],
         ),
         (
@@ -278,4 +278,25 @@ async fn si_23_channel_slots_are_bounded() {
         .unwrap()
         .unwrap();
     assert_eq!(welcome[2], 0);
+}
+
+/// Independent postcard unit-variant fixtures: Status is the first variant
+/// of each specified role enum; Done is the first reply variant.
+#[tokio::test]
+async fn si_10_role_commands_use_postcard() {
+    let (_base, dir, _server, mut seen) = started().await;
+    for (role, expected) in [
+        (CLI, "Cli(Status)"),
+        (UI_MAIN, "UiMain(Status)"),
+        (OVERLAY, "Overlay(Status)"),
+    ] {
+        let mut stream = raw_channel(&dir, role).await;
+        stream.write_all(&frame(&[0])).await.unwrap();
+        assert_eq!(
+            read_frame(&mut stream).await.unwrap(),
+            [0],
+            "postcard Done reply"
+        );
+        assert_eq!(seen.recv().await.unwrap(), expected);
+    }
 }

@@ -1,7 +1,7 @@
 //! The role-scoped command enums and the replies. Every role's commands map
-//! into one internal `Op` set with fixed tags; a role decodes only its own
-//! subset, so a byte sequence naming another role's command is as unknown as
-//! a tag nobody defined.
+//! into one internal `Op` set; each role decodes its own fixed postcard
+//! enum. Decoding uses the authenticated channel role; commands outside
+//! that role are refused before dispatch.
 
 use std::fmt;
 
@@ -132,7 +132,7 @@ impl Reply {
     }
 }
 
-/// The union of every role's commands. Its tags are the wire format.
+/// The internal union of role commands, independent of their wire enums.
 #[derive(Debug)]
 pub enum Op {
     Status,

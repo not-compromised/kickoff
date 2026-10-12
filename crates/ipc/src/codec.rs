@@ -8,7 +8,10 @@ use kickoff_secret::diag::{
     Component, Counter, Field, Flag, MAX_FIELDS, PathKind, PathRole, Report, StateKey, StateValue,
     Version,
 };
-use kickoff_wire::{MAX_TICKET_LEN, MapId, TicketTextValue};
+use kickoff_wire::{MapId, TicketTextValue};
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroizing;
 
 use crate::command::{ApprovalId, InviteFor, Op, Refusal, Reply, TicketText};
@@ -102,266 +105,301 @@ pub(crate) fn decode_welcome(bytes: &[u8]) -> Result<(), IpcError> {
     }
 }
 
-// Op tags. Retired tags are never reused; a new command takes a new tag and
-// bumps PROTOCOL_VERSION.
-const OP_STATUS: u8 = 1;
-const OP_HOST: u8 = 2;
-const OP_JOIN: u8 = 3;
-const OP_INVITE: u8 = 4;
-const OP_KICK: u8 = 5;
-// 6 was draft 2's `Approve(EndpointId)`, retired with protocol version 1.
-const OP_PICK_MAP: u8 = 7;
-const OP_LEAVE: u8 = 8;
-const OP_DOCTOR: u8 = 9;
-const OP_TOGGLE_OVERLAY: u8 = 10;
-const OP_DECIDE: u8 = 11;
-
-const INVITE_FRIEND: u8 = 1;
-const INVITE_BEARER: u8 = 2;
-
-/// Zeroized on drop: a `Join` carries a ticket. The buffer is allocated at
-/// its frame maximum so no push reallocates and leaves a ticket copy behind.
-pub(crate) fn encode_op(op: &Op) -> Result<Zeroizing<Vec<u8>>, IpcError> {
-    let mut out = Zeroizing::new(Vec::with_capacity(MAX_REQUEST_FRAME));
-    match op {
-        Op::Status => out.push(OP_STATUS),
-        Op::Host => out.push(OP_HOST),
-        Op::Join(ticket) => {
-            out.push(OP_JOIN);
-            put_ticket(&mut out, ticket)?;
-        }
-        Op::Invite(InviteFor::Friend(id)) => {
-            out.extend_from_slice(&[OP_INVITE, INVITE_FRIEND]);
-            out.extend_from_slice(id.as_bytes());
-        }
-        Op::Invite(InviteFor::Bearer) => out.extend_from_slice(&[OP_INVITE, INVITE_BEARER]),
-        Op::Kick(id) => {
-            out.push(OP_KICK);
-            out.extend_from_slice(id.as_bytes());
-        }
-        Op::Decide { approval, allow } => {
-            out.push(OP_DECIDE);
-            out.extend_from_slice(&approval.to_bytes());
-            out.push(u8::from(*allow));
-        }
-        Op::PickMap(map) => {
-            out.push(OP_PICK_MAP);
-            out.extend_from_slice(&map.0);
-        }
-        Op::Leave => out.push(OP_LEAVE),
-        Op::Doctor => out.push(OP_DOCTOR),
-        Op::ToggleOverlay => out.push(OP_TOGGLE_OVERLAY),
-    }
-    Ok(out)
+// These private representations keep serde off public secret-bearing types.
+#[derive(Serialize, Deserialize)]
+enum CliRepr<T> {
+    Status,
+    Host,
+    Join(T),
+    Invite(InviteRepr),
+    Leave,
+    Doctor,
+    ToggleOverlay,
+}
+#[derive(Serialize, Deserialize)]
+enum UiRepr<T> {
+    Status,
+    Host,
+    Join(T),
+    Invite(InviteRepr),
+    Kick([u8; 32]),
+    Decide { approval: [u8; 16], allow: bool },
+    PickMap([u8; 32]),
+    Leave,
+    Doctor,
+}
+#[derive(Serialize, Deserialize)]
+enum OverlayRepr {
+    Status,
+}
+#[derive(Serialize, Deserialize)]
+enum InviteRepr {
+    Friend([u8; 32]),
+    Bearer,
+}
+#[derive(Serialize, Deserialize)]
+enum RefusalRepr {
+    Unknown,
+    Busy,
+    NotHost,
+    Failed,
+}
+#[derive(Serialize, Deserialize)]
+enum ReplyRepr<T> {
+    Done,
+    Refused(RefusalRepr),
+    Invite(T),
+    Report(ReportRepr),
 }
 
-pub(crate) fn decode_op(bytes: &[u8]) -> Result<Op, IpcError> {
-    let mut r = Reader::new(bytes);
-    let op = match r.u8()? {
-        OP_STATUS => Op::Status,
-        OP_HOST => Op::Host,
-        OP_JOIN => Op::Join(get_ticket(&mut r)?),
-        OP_INVITE => match r.u8()? {
-            INVITE_FRIEND => Op::Invite(InviteFor::Friend(get_id(&mut r)?)),
-            INVITE_BEARER => Op::Invite(InviteFor::Bearer),
-            _ => return Err(IpcError::Malformed),
+struct TicketRef<'a>(&'a TicketText);
+impl Serialize for TicketRef<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = TicketTextValue::transport(self.0.secret());
+        let text = std::str::from_utf8(&text).map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(text)
+    }
+}
+
+fn write<T: Serialize>(value: &T, max: usize) -> Result<Zeroizing<Vec<u8>>, IpcError> {
+    let mut out = Zeroizing::new(vec![0; max]);
+    let len = postcard::to_slice(value, &mut out)
+        .map_err(|_| IpcError::Malformed)?
+        .len();
+    out.truncate(len);
+    Ok(out)
+}
+fn read<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, IpcError> {
+    let (value, rest) = postcard::take_from_bytes(bytes).map_err(|_| IpcError::Malformed)?;
+    if !rest.is_empty() {
+        return Err(IpcError::Malformed);
+    }
+    Ok(value)
+}
+fn invite(i: InviteFor) -> InviteRepr {
+    match i {
+        InviteFor::Friend(id) => InviteRepr::Friend(*id.as_bytes()),
+        InviteFor::Bearer => InviteRepr::Bearer,
+    }
+}
+fn get_id(bytes: [u8; 32]) -> Result<EndpointId, IpcError> {
+    EndpointId::from_bytes(&bytes).map_err(|_| IpcError::Malformed)
+}
+fn get_invite(i: InviteRepr) -> Result<InviteFor, IpcError> {
+    Ok(match i {
+        InviteRepr::Friend(bytes) => InviteFor::Friend(get_id(bytes)?),
+        InviteRepr::Bearer => InviteFor::Bearer,
+    })
+}
+fn get_ticket(text: &str) -> Result<TicketText, IpcError> {
+    if !TicketText::alphabet_ok(text.as_bytes()) {
+        return Err(IpcError::Malformed);
+    }
+    TicketText::new(TicketTextValue::protect(text.to_owned()))
+}
+
+pub(crate) fn encode_op(role: ChannelRole, op: &Op) -> Result<Zeroizing<Vec<u8>>, IpcError> {
+    match role {
+        ChannelRole::Cli => {
+            let repr = match op {
+                Op::Status => CliRepr::Status,
+                Op::Host => CliRepr::Host,
+                Op::Join(t) => CliRepr::Join(TicketRef(t)),
+                Op::Invite(i) => CliRepr::Invite(invite(*i)),
+                Op::Leave => CliRepr::Leave,
+                Op::Doctor => CliRepr::Doctor,
+                Op::ToggleOverlay => CliRepr::ToggleOverlay,
+                _ => return Err(IpcError::Role),
+            };
+            write(&repr, MAX_REQUEST_FRAME)
+        }
+        ChannelRole::UiMain => {
+            let repr = match op {
+                Op::Status => UiRepr::Status,
+                Op::Host => UiRepr::Host,
+                Op::Join(t) => UiRepr::Join(TicketRef(t)),
+                Op::Invite(i) => UiRepr::Invite(invite(*i)),
+                Op::Kick(id) => UiRepr::Kick(*id.as_bytes()),
+                Op::Decide { approval, allow } => UiRepr::Decide {
+                    approval: approval.to_bytes(),
+                    allow: *allow,
+                },
+                Op::PickMap(map) => UiRepr::PickMap(map.0),
+                Op::Leave => UiRepr::Leave,
+                Op::Doctor => UiRepr::Doctor,
+                _ => return Err(IpcError::Role),
+            };
+            write(&repr, MAX_REQUEST_FRAME)
+        }
+        ChannelRole::Overlay if matches!(op, Op::Status) => {
+            write(&OverlayRepr::Status, MAX_REQUEST_FRAME)
+        }
+        _ => Err(IpcError::Role),
+    }
+}
+pub(crate) fn decode_op(role: ChannelRole, bytes: &[u8]) -> Result<Op, IpcError> {
+    let op = match role {
+        ChannelRole::Cli => match read::<CliRepr<&str>>(bytes)? {
+            CliRepr::Status => Op::Status,
+            CliRepr::Host => Op::Host,
+            CliRepr::Join(t) => Op::Join(get_ticket(t)?),
+            CliRepr::Invite(i) => Op::Invite(get_invite(i)?),
+            CliRepr::Leave => Op::Leave,
+            CliRepr::Doctor => Op::Doctor,
+            CliRepr::ToggleOverlay => Op::ToggleOverlay,
         },
-        OP_KICK => Op::Kick(get_id(&mut r)?),
-        OP_DECIDE => Op::Decide {
-            approval: ApprovalId::from_bytes(r.array::<16>()?),
-            allow: get_bool(&mut r)?,
+        ChannelRole::UiMain => match read::<UiRepr<&str>>(bytes)? {
+            UiRepr::Status => Op::Status,
+            UiRepr::Host => Op::Host,
+            UiRepr::Join(t) => Op::Join(get_ticket(t)?),
+            UiRepr::Invite(i) => Op::Invite(get_invite(i)?),
+            UiRepr::Kick(id) => Op::Kick(get_id(id)?),
+            UiRepr::Decide { approval, allow } => Op::Decide {
+                approval: ApprovalId::from_bytes(approval),
+                allow,
+            },
+            UiRepr::PickMap(map) => Op::PickMap(MapId(map)),
+            UiRepr::Leave => Op::Leave,
+            UiRepr::Doctor => Op::Doctor,
         },
-        OP_PICK_MAP => Op::PickMap(MapId(r.array::<32>()?)),
-        OP_LEAVE => Op::Leave,
-        OP_DOCTOR => Op::Doctor,
-        OP_TOGGLE_OVERLAY => Op::ToggleOverlay,
-        _ => return Err(IpcError::Malformed),
+        ChannelRole::Overlay => {
+            let OverlayRepr::Status = read(bytes)?;
+            Op::Status
+        }
+        _ => return Err(IpcError::Role),
     };
-    r.finish()?;
+    if encode_op(role, &op)?.as_slice() != bytes {
+        return Err(IpcError::Malformed);
+    }
     Ok(op)
 }
-
-const REPLY_DONE: u8 = 1;
-const REPLY_REFUSED: u8 = 2;
-const REPLY_INVITE: u8 = 3;
-const REPLY_REPORT: u8 = 4;
-
-fn refusal_tag(refusal: Refusal) -> u8 {
-    match refusal {
-        Refusal::Unknown => 1,
-        Refusal::Busy => 2,
-        Refusal::NotHost => 3,
-        Refusal::Failed => 4,
+fn refusal(r: Refusal) -> RefusalRepr {
+    match r {
+        Refusal::Unknown => RefusalRepr::Unknown,
+        Refusal::Busy => RefusalRepr::Busy,
+        Refusal::NotHost => RefusalRepr::NotHost,
+        Refusal::Failed => RefusalRepr::Failed,
     }
 }
-
-fn refusal_from_tag(tag: u8) -> Option<Refusal> {
-    [
-        Refusal::Unknown,
-        Refusal::Busy,
-        Refusal::NotHost,
-        Refusal::Failed,
-    ]
-    .into_iter()
-    .find(|r| refusal_tag(*r) == tag)
+fn get_refusal(r: RefusalRepr) -> Refusal {
+    match r {
+        RefusalRepr::Unknown => Refusal::Unknown,
+        RefusalRepr::Busy => Refusal::Busy,
+        RefusalRepr::NotHost => Refusal::NotHost,
+        RefusalRepr::Failed => Refusal::Failed,
+    }
 }
-
-const FIELD_COUNT: u8 = 1;
-const FIELD_FLAG: u8 = 2;
-const FIELD_VERSION: u8 = 3;
-const FIELD_STATE: u8 = 4;
-const FIELD_PATH_TYPE: u8 = 5;
-
 pub(crate) fn encode_reply(reply: &Reply) -> Result<Zeroizing<Vec<u8>>, IpcError> {
-    let mut out = Zeroizing::new(Vec::with_capacity(MAX_REPLY_FRAME));
-    match reply {
-        Reply::Done => out.push(REPLY_DONE),
-        Reply::Refused(refusal) => out.extend_from_slice(&[REPLY_REFUSED, refusal_tag(*refusal)]),
-        Reply::Invite(ticket) => {
-            out.push(REPLY_INVITE);
-            put_ticket(&mut out, ticket)?;
-        }
-        Reply::Report(report) => {
-            out.push(REPLY_REPORT);
-            let count = u16::try_from(report.fields().len()).map_err(|_| IpcError::Malformed)?;
-            out.extend_from_slice(&count.to_be_bytes());
-            for field in report.fields() {
-                put_field(&mut out, field);
-            }
-        }
-    }
-    Ok(out)
-}
-
-pub(crate) fn decode_reply(bytes: &[u8]) -> Result<Reply, IpcError> {
-    let mut r = Reader::new(bytes);
-    let reply = match r.u8()? {
-        REPLY_DONE => Reply::Done,
-        REPLY_REFUSED => Reply::Refused(refusal_from_tag(r.u8()?).ok_or(IpcError::Malformed)?),
-        REPLY_INVITE => Reply::Invite(get_ticket(&mut r)?),
-        REPLY_REPORT => {
-            let count = usize::from(r.u16()?);
-            if count > MAX_FIELDS {
-                return Err(IpcError::Malformed);
-            }
-            let mut report = Report::new();
-            for _ in 0..count {
-                report
-                    .push(get_field(&mut r)?)
-                    .map_err(|_| IpcError::Malformed)?;
-            }
-            Reply::Report(report)
-        }
-        _ => return Err(IpcError::Malformed),
+    let repr = match reply {
+        Reply::Done => ReplyRepr::Done,
+        Reply::Refused(r) => ReplyRepr::Refused(refusal(*r)),
+        Reply::Invite(t) => ReplyRepr::Invite(TicketRef(t)),
+        Reply::Report(r) => ReplyRepr::Report(ReportRepr(r.clone())),
     };
-    r.finish()?;
+    write(&repr, MAX_REPLY_FRAME)
+}
+pub(crate) fn decode_reply(bytes: &[u8]) -> Result<Reply, IpcError> {
+    let reply = match read::<ReplyRepr<&str>>(bytes)? {
+        ReplyRepr::Done => Reply::Done,
+        ReplyRepr::Refused(r) => Reply::Refused(get_refusal(r)),
+        ReplyRepr::Invite(t) => Reply::Invite(get_ticket(t)?),
+        ReplyRepr::Report(r) => Reply::Report(r.0),
+    };
+    if encode_reply(&reply)?.as_slice() != bytes {
+        return Err(IpcError::Malformed);
+    }
     Ok(reply)
 }
 
-fn put_ticket(out: &mut Vec<u8>, ticket: &TicketText) -> Result<(), IpcError> {
-    let text = TicketTextValue::transport(ticket.secret());
-    let len = u16::try_from(text.len()).map_err(|_| IpcError::Malformed)?;
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(&text);
-    Ok(())
+#[derive(Serialize, Deserialize)]
+enum FieldRepr {
+    Count(u8, u64),
+    Flag(u8, bool),
+    Version(u8, u16, u16, u16),
+    State(u8, u8),
+    PathType(u8, u8),
 }
-
-fn get_ticket(r: &mut Reader<'_>) -> Result<TicketText, IpcError> {
-    let len = usize::from(r.u16()?);
-    if len > MAX_TICKET_LEN {
-        return Err(IpcError::Malformed);
-    }
-    let bytes = r.bytes(len)?;
-    // Checked on the borrowed bytes first, so a rejected ticket is never
-    // copied out of the zeroizing frame buffer.
-    if !TicketText::alphabet_ok(bytes) {
-        return Err(IpcError::Malformed);
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| IpcError::Malformed)?;
-    TicketText::new(kickoff_wire::TicketTextValue::protect(text.to_owned()))
-}
-
-/// Only 0 and 1: a second spelling of a boolean is a malformed message.
-fn get_bool(r: &mut Reader<'_>) -> Result<bool, IpcError> {
-    match r.u8()? {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(IpcError::Malformed),
-    }
-}
-
-fn get_id(r: &mut Reader<'_>) -> Result<EndpointId, IpcError> {
-    EndpointId::from_bytes(&r.array::<32>()?).map_err(|_| IpcError::Malformed)
-}
-
-fn put_field(out: &mut Vec<u8>, field: &Field) {
-    match *field {
-        Field::Count(key, n) => {
-            out.extend_from_slice(&[FIELD_COUNT, key.tag()]);
-            out.extend_from_slice(&n.to_be_bytes());
+impl From<Field> for FieldRepr {
+    fn from(f: Field) -> Self {
+        match f {
+            Field::Count(k, n) => Self::Count(k.tag(), n),
+            Field::Flag(k, b) => Self::Flag(k.tag(), b),
+            Field::Version(k, v) => Self::Version(k.tag(), v.major, v.minor, v.patch),
+            Field::State(k, v) => Self::State(k.tag(), v.tag()),
+            Field::PathType(k, v) => Self::PathType(k.tag(), v.tag()),
         }
-        Field::Flag(key, b) => out.extend_from_slice(&[FIELD_FLAG, key.tag(), u8::from(b)]),
-        Field::Version(key, v) => {
-            out.extend_from_slice(&[FIELD_VERSION, key.tag()]);
-            for part in [v.major, v.minor, v.patch] {
-                out.extend_from_slice(&part.to_be_bytes());
+    }
+}
+impl TryFrom<FieldRepr> for Field {
+    type Error = IpcError;
+    fn try_from(f: FieldRepr) -> Result<Self, Self::Error> {
+        fn known<T>(v: Option<T>) -> Result<T, IpcError> {
+            v.ok_or(IpcError::Malformed)
+        }
+        Ok(match f {
+            FieldRepr::Count(k, n) => Self::Count(known(Counter::from_tag(k))?, n),
+            FieldRepr::Flag(k, b) => Self::Flag(known(Flag::from_tag(k))?, b),
+            FieldRepr::Version(k, major, minor, patch) => Self::Version(
+                known(Component::from_tag(k))?,
+                Version {
+                    major,
+                    minor,
+                    patch,
+                },
+            ),
+            FieldRepr::State(k, v) => Self::State(
+                known(StateKey::from_tag(k))?,
+                known(StateValue::from_tag(v))?,
+            ),
+            FieldRepr::PathType(k, v) => {
+                Self::PathType(known(PathRole::from_tag(k))?, known(PathKind::from_tag(v))?)
+            }
+        })
+    }
+}
+struct ReportRepr(Report);
+impl Serialize for ReportRepr {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(self.0.fields().len()))?;
+        for f in self.0.fields() {
+            seq.serialize_element(&FieldRepr::from(*f))?;
+        }
+        seq.end()
+    }
+}
+impl<'de> Deserialize<'de> for ReportRepr {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Fields;
+        impl<'de> Visitor<'de> for Fields {
+            type Value = ReportRepr;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a bounded diagnostics report")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                if seq.size_hint().is_some_and(|len| len > MAX_FIELDS) {
+                    return Err(serde::de::Error::custom("report too large"));
+                }
+                let mut report = Report::new();
+                while let Some(field) = seq.next_element::<FieldRepr>()? {
+                    report
+                        .push(Field::try_from(field).map_err(serde::de::Error::custom)?)
+                        .map_err(|_| serde::de::Error::custom("report too large"))?;
+                }
+                Ok(ReportRepr(report))
             }
         }
-        Field::State(key, value) => {
-            out.extend_from_slice(&[FIELD_STATE, key.tag(), value.tag()]);
-        }
-        Field::PathType(role, kind) => {
-            out.extend_from_slice(&[FIELD_PATH_TYPE, role.tag(), kind.tag()]);
-        }
+        d.deserialize_seq(Fields)
     }
 }
 
-fn get_field(r: &mut Reader<'_>) -> Result<Field, IpcError> {
-    fn known<T>(found: Option<T>) -> Result<T, IpcError> {
-        found.ok_or(IpcError::Malformed)
-    }
-    Ok(match r.u8()? {
-        FIELD_COUNT => Field::Count(known(Counter::from_tag(r.u8()?))?, r.u64()?),
-        FIELD_FLAG => {
-            let key = known(Flag::from_tag(r.u8()?))?;
-            Field::Flag(key, get_bool(r)?)
-        }
-        FIELD_VERSION => Field::Version(
-            known(Component::from_tag(r.u8()?))?,
-            Version {
-                major: r.u16()?,
-                minor: r.u16()?,
-                patch: r.u16()?,
-            },
-        ),
-        FIELD_STATE => Field::State(
-            known(StateKey::from_tag(r.u8()?))?,
-            known(StateValue::from_tag(r.u8()?))?,
-        ),
-        FIELD_PATH_TYPE => Field::PathType(
-            known(PathRole::from_tag(r.u8()?))?,
-            known(PathKind::from_tag(r.u8()?))?,
-        ),
-        _ => return Err(IpcError::Malformed),
-    })
-}
-
-/// A cursor over hostile bytes; every read is checked, none indexes.
+/// The fixed handshake uses big-endian integers independently of postcard.
 struct Reader<'a> {
     rest: &'a [u8],
 }
-
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Reader<'a> {
-        Reader { rest: bytes }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { rest: bytes }
     }
-
-    fn bytes(&mut self, n: usize) -> Result<&'a [u8], IpcError> {
-        let (head, tail) = self.rest.split_at_checked(n).ok_or(IpcError::Malformed)?;
-        self.rest = tail;
-        Ok(head)
-    }
-
     fn array<const N: usize>(&mut self) -> Result<[u8; N], IpcError> {
         let (head, tail) = self
             .rest
@@ -370,20 +408,13 @@ impl<'a> Reader<'a> {
         self.rest = tail;
         Ok(*head)
     }
-
     fn u8(&mut self) -> Result<u8, IpcError> {
-        let [b] = self.array::<1>()?;
+        let [b] = self.array()?;
         Ok(b)
     }
-
     fn u16(&mut self) -> Result<u16, IpcError> {
         Ok(u16::from_be_bytes(self.array()?))
     }
-
-    fn u64(&mut self) -> Result<u64, IpcError> {
-        Ok(u64::from_be_bytes(self.array()?))
-    }
-
     fn finish(self) -> Result<(), IpcError> {
         if self.rest.is_empty() {
             Ok(())
@@ -392,24 +423,21 @@ impl<'a> Reader<'a> {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use kickoff_wire::MAX_TICKET_LEN;
     fn ticket(text: &str) -> TicketText {
-        TicketText::new(kickoff_wire::TicketTextValue::protect(text.to_owned())).unwrap()
+        TicketText::new(TicketTextValue::protect(text.to_owned())).unwrap()
     }
-
     fn id(seed: u8) -> EndpointId {
         iroh_base::SecretKey::from_bytes(&[seed; 32]).public()
     }
-
     fn every_op() -> Vec<Op> {
         vec![
             Op::Status,
             Op::Host,
-            Op::Join(ticket("kickoff1ABCDEF234567")),
+            Op::Join(ticket("kickoff1ABC234")),
             Op::Invite(InviteFor::Friend(id(1))),
             Op::Invite(InviteFor::Bearer),
             Op::Kick(id(2)),
@@ -427,140 +455,145 @@ mod tests {
             Op::ToggleOverlay,
         ]
     }
-
-    fn same_op(a: &Op, b: &Op) -> bool {
-        match (a, b) {
-            (Op::Join(x), Op::Join(y)) => x.secret().ct_eq(&TicketTextValue::transport(y.secret())),
-            _ => format!("{a:?}") == format!("{b:?}"),
-        }
-    }
-
     #[test]
     fn ops_round_trip_and_reject_every_truncation_and_trailing_byte() {
-        for op in every_op() {
-            let bytes = encode_op(&op).unwrap();
-            assert!(same_op(&decode_op(&bytes).unwrap(), &op), "{op:?}");
-            for cut in 0..bytes.len() {
-                assert_eq!(decode_op(&bytes[..cut]).err(), Some(IpcError::Malformed));
+        for role in [ChannelRole::Cli, ChannelRole::UiMain, ChannelRole::Overlay] {
+            for op in every_op() {
+                let Ok(bytes) = encode_op(role, &op) else {
+                    continue;
+                };
+                let got = decode_op(role, &bytes).unwrap();
+                assert_eq!(encode_op(role, &got).unwrap().as_slice(), bytes.as_slice());
+                assert_eq!(format!("{got:?}"), format!("{op:?}"));
+                for cut in 0..bytes.len() {
+                    assert_eq!(
+                        decode_op(role, &bytes[..cut]).err(),
+                        Some(IpcError::Malformed)
+                    );
+                }
+                let mut longer = bytes.to_vec();
+                longer.push(0);
+                assert_eq!(decode_op(role, &longer).err(), Some(IpcError::Malformed));
             }
-            let mut longer = bytes.to_vec();
-            longer.push(0);
-            assert_eq!(decode_op(&longer).err(), Some(IpcError::Malformed));
         }
     }
-
     #[test]
-    fn unknown_tags_are_malformed() {
-        let known: Vec<u8> = every_op()
-            .iter()
-            .map(|op| encode_op(op).unwrap()[0])
-            .collect();
-        for tag in 0..=u8::MAX {
-            if !known.contains(&tag) {
-                assert_eq!(decode_op(&[tag]).err(), Some(IpcError::Malformed));
+    fn unknown_and_noncanonical_variants_are_malformed() {
+        for role in [ChannelRole::Cli, ChannelRole::UiMain, ChannelRole::Overlay] {
+            for tag in 9..=u8::MAX {
+                assert!(decode_op(role, &[tag]).is_err());
             }
+            assert_eq!(decode_op(role, &[0x80, 0]).err(), Some(IpcError::Malformed));
         }
-        assert_eq!(decode_op(&[OP_INVITE, 3]).err(), Some(IpcError::Malformed));
+        assert_eq!(
+            decode_op(ChannelRole::Cli, &[3, 2]).err(),
+            Some(IpcError::Malformed)
+        );
     }
-
     #[test]
     fn invalid_endpoint_id_is_malformed() {
-        // Some 32-byte strings are not ed25519 points; find one.
         let bad = (0..=u8::MAX)
             .map(|b| [b; 32])
-            .find(|bytes| EndpointId::from_bytes(bytes).is_err())
-            .expect("an invalid point encoding");
-        let mut bytes = vec![OP_KICK];
-        bytes.extend_from_slice(&bad);
-        assert_eq!(decode_op(&bytes).err(), Some(IpcError::Malformed));
+            .find(|b| EndpointId::from_bytes(b).is_err())
+            .unwrap();
+        let bytes = postcard::to_allocvec(&UiRepr::<&str>::Kick(bad)).unwrap();
+        assert_eq!(
+            decode_op(ChannelRole::UiMain, &bytes).err(),
+            Some(IpcError::Malformed)
+        );
     }
-
     #[test]
     fn decide_takes_a_canonical_boolean() {
-        let mut bytes = vec![OP_DECIDE];
+        let mut bytes = vec![5];
         bytes.extend_from_slice(&[5; 16]);
         bytes.push(2);
-        assert_eq!(decode_op(&bytes).err(), Some(IpcError::Malformed));
+        assert_eq!(
+            decode_op(ChannelRole::UiMain, &bytes).err(),
+            Some(IpcError::Malformed)
+        );
     }
-
     #[test]
     fn ticket_length_is_checked_before_reading() {
-        let mut bytes = vec![OP_JOIN];
-        bytes.extend_from_slice(&u16::MAX.to_be_bytes());
-        assert_eq!(decode_op(&bytes).err(), Some(IpcError::Malformed));
-        assert_eq!(decode_op(&[OP_JOIN, 0, 0]).err(), Some(IpcError::Malformed));
+        assert_eq!(
+            decode_op(ChannelRole::Cli, &[2, 0xff, 0xff, 3]).err(),
+            Some(IpcError::Malformed)
+        );
+        assert_eq!(
+            decode_op(ChannelRole::Cli, &[2, 0]).err(),
+            Some(IpcError::Malformed)
+        );
+        let oversized = "A".repeat(MAX_TICKET_LEN + 1);
+        let bytes = postcard::to_allocvec(&CliRepr::Join(oversized.as_str())).unwrap();
+        assert_eq!(
+            decode_op(ChannelRole::Cli, &bytes).err(),
+            Some(IpcError::Malformed)
+        );
     }
-
     #[test]
     fn replies_round_trip() {
         let mut report = Report::new();
-        report
-            .push(Field::Count(Counter::IpcPeersRejected, 7))
-            .unwrap();
-        report.push(Field::Flag(Flag::SessionActive, true)).unwrap();
-        report
-            .push(Field::Version(
+        for f in [
+            Field::Count(Counter::IpcPeersRejected, 7),
+            Field::Flag(Flag::SessionActive, true),
+            Field::Version(
                 Component::IpcProtocol,
                 Version {
                     major: 1,
                     minor: 2,
                     patch: 3,
                 },
-            ))
-            .unwrap();
-        report
-            .push(Field::State(StateKey::SessionRole, StateValue::Host))
-            .unwrap();
-        report
-            .push(Field::PathType(PathRole::RuntimeDir, PathKind::Directory))
-            .unwrap();
-        let bytes = encode_reply(&Reply::Report(report.clone())).unwrap();
-        match decode_reply(&bytes).unwrap() {
-            Reply::Report(got) => assert_eq!(got, report),
-            other => panic!("{other:?}"),
-        }
-        for refusal in [
-            Refusal::Unknown,
-            Refusal::Busy,
-            Refusal::NotHost,
-            Refusal::Failed,
+            ),
+            Field::State(StateKey::SessionRole, StateValue::Host),
+            Field::PathType(PathRole::RuntimeDir, PathKind::Directory),
         ] {
-            let bytes = encode_reply(&Reply::Refused(refusal)).unwrap();
-            assert!(matches!(decode_reply(&bytes).unwrap(), Reply::Refused(r) if r == refusal));
+            report.push(f).unwrap();
         }
-        let bytes = encode_reply(&Reply::Invite(ticket("kickoff1XYZ"))).unwrap();
-        assert!(matches!(decode_reply(&bytes).unwrap(), Reply::Invite(_)));
-        for cut in 0..bytes.len() {
-            assert!(decode_reply(&bytes[..cut]).is_err());
+        let replies = [
+            Reply::Done,
+            Reply::Report(report),
+            Reply::Invite(ticket("kickoff1XYZ")),
+            Reply::Refused(Refusal::Unknown),
+            Reply::Refused(Refusal::Busy),
+            Reply::Refused(Refusal::NotHost),
+            Reply::Refused(Refusal::Failed),
+        ];
+        for reply in replies {
+            let bytes = encode_reply(&reply).unwrap();
+            let got = decode_reply(&bytes).unwrap();
+            assert_eq!(encode_reply(&got).unwrap().as_slice(), bytes.as_slice());
+            for cut in 0..bytes.len() {
+                assert_eq!(decode_reply(&bytes[..cut]).err(), Some(IpcError::Malformed));
+            }
+            let mut longer = bytes.to_vec();
+            longer.push(0);
+            assert!(decode_reply(&longer).is_err());
         }
     }
-
     #[test]
     fn report_count_is_checked_before_reading_fields() {
-        let mut bytes = vec![REPLY_REPORT];
-        bytes.extend_from_slice(&u16::try_from(MAX_FIELDS + 1).unwrap().to_be_bytes());
+        let mut bytes = vec![3];
+        bytes.extend(postcard::to_allocvec(&(MAX_FIELDS + 1)).unwrap());
         assert_eq!(decode_reply(&bytes).err(), Some(IpcError::Malformed));
     }
-
     #[test]
     fn non_canonical_flag_is_malformed() {
-        let bytes = [REPLY_REPORT, 0, 1, FIELD_FLAG, Flag::SessionActive.tag(), 2];
-        assert_eq!(decode_reply(&bytes).err(), Some(IpcError::Malformed));
+        assert_eq!(
+            decode_reply(&[3, 1, 1, Flag::SessionActive.tag(), 2]).err(),
+            Some(IpcError::Malformed)
+        );
     }
-
     #[test]
     fn hello_is_checked_version_first() {
-        let hello = encode_hello(PROTOCOL_VERSION, ChannelRole::Cli);
-        assert_eq!(decode_hello(&hello), Ok(ChannelRole::Cli));
-        let other = PROTOCOL_VERSION.wrapping_add(1);
         assert_eq!(
-            decode_hello(&encode_hello(other, ChannelRole::Cli)),
-            Err(Welcome::Version)
+            decode_hello(&encode_hello(PROTOCOL_VERSION, ChannelRole::Cli)),
+            Ok(ChannelRole::Cli)
         );
-        assert_eq!(
-            decode_hello(&encode_hello(other, ChannelRole::Gamebox)),
-            Err(Welcome::Version)
-        );
+        for role in [ChannelRole::Cli, ChannelRole::Gamebox] {
+            assert_eq!(
+                decode_hello(&encode_hello(PROTOCOL_VERSION.wrapping_add(1), role)),
+                Err(Welcome::Version)
+            );
+        }
         for role in [ChannelRole::Gamebox, ChannelRole::ServiceClient] {
             assert_eq!(
                 decode_hello(&encode_hello(PROTOCOL_VERSION, role)),
@@ -570,9 +603,6 @@ mod tests {
         assert_eq!(decode_hello(b"KO"), Err(Welcome::Version));
         assert_eq!(decode_hello(b"XX\0\x01\x01"), Err(Welcome::Version));
     }
-
-    /// No input panics and none decodes with bytes left over (fuzz stand-in;
-    /// the nightly fuzzer runs the same entry points).
     #[test]
     fn decoders_survive_arbitrary_bytes() {
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
@@ -585,7 +615,9 @@ mod tests {
         for _ in 0..20_000 {
             let len = usize::from(next().to_le_bytes()[0] % 64);
             let bytes: Vec<u8> = (0..len).map(|_| next().to_le_bytes()[0]).collect();
-            let _ = decode_op(&bytes);
+            for role in [ChannelRole::Cli, ChannelRole::UiMain, ChannelRole::Overlay] {
+                let _ = decode_op(role, &bytes);
+            }
             let _ = decode_reply(&bytes);
             let _ = decode_hello(&bytes);
             let _ = decode_welcome(&bytes);

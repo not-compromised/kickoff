@@ -20,7 +20,7 @@ use kickoff_ipc::{IpcError, PROTOCOL_VERSION, Server, connect};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-const LEAVE: u8 = 8;
+const LEAVE: u8 = 4;
 
 /// An old or new client sends its hello and, without waiting, a command. The
 /// server answers `Version` and closes; the command never reaches the daemon.

@@ -148,21 +148,20 @@ async fn si_7_squatted_socket_name_refused_without_touching_it() {
 }
 
 #[tokio::test]
-async fn dead_socket_of_ours_is_reclaimed() {
+async fn si_7_dead_socket_collision_is_refused_without_touching_it() {
     let base = TempBase::new();
     let dir = base.dir();
     drop(std::os::unix::net::UnixListener::bind(dir.socket_path()).unwrap());
-    assert!(
-        dir.socket_path().exists(),
-        "a killed daemon leaves its socket"
+    let before = std::fs::symlink_metadata(dir.socket_path()).unwrap();
+    assert_eq!(
+        Server::bind(&dir, trust_me()).err(),
+        Some(IpcError::Squatted)
     );
-    let server = Arc::new(Server::bind(&dir, trust_me()).unwrap());
-    let (_task, _seen) = serve(server);
-    let mut client = connect::<Cli>(&dir, &trust_me()).await.unwrap();
-    assert!(matches!(
-        client.call(CliCommand::Status).await.unwrap(),
-        Reply::Done
-    ));
+    let after = std::fs::symlink_metadata(dir.socket_path()).unwrap();
+    assert_eq!(
+        (after.dev(), after.ino(), after.mode()),
+        (before.dev(), before.ino(), before.mode())
+    );
 }
 
 /// The server believes its user is another uid, so this process is, to it,
@@ -378,7 +377,7 @@ async fn si_7_descriptors_from_a_caller_close_the_channel_and_are_closed() {
         let server = Arc::new(Server::bind(&dir, trust_me()).unwrap());
         let (_task, mut seen) = serve(Arc::clone(&server));
         let (mut stream, bytes) = if after_hello {
-            (raw_channel(&dir, CLI).await, frame(&[1]))
+            (raw_channel(&dir, CLI).await, frame(&[0]))
         } else {
             (
                 tokio::net::UnixStream::connect(dir.socket_path())
@@ -448,7 +447,7 @@ fn pid_recycle_role() {
                 .unwrap();
             let mut stream = std::os::unix::net::UnixStream::from(fd);
             let _ = stream.write_all(&hello(kickoff_ipc::PROTOCOL_VERSION, CLI));
-            let _ = stream.write_all(&frame(&[1]));
+            let _ = stream.write_all(&frame(&[0]));
             let mut sink = Vec::new();
             let _ = stream.read_to_end(&mut sink);
         }

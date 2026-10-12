@@ -47,6 +47,8 @@ mutant-si30-probe-fd-unchecked = []
 iroh-base.workspace = true
 kickoff-secret.workspace = true
 kickoff-wire.workspace = true
+postcard.workspace = true
+serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 zeroize.workspace = true

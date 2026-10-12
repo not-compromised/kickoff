@@ -82,7 +82,7 @@ impl<R: Role> Client<R> {
     }
 
     async fn exchange(&mut self, command: R::Command) -> Result<Reply, IpcError> {
-        let bytes = codec::encode_op(&command.into())?;
+        let bytes = codec::encode_op(R::ROLE, &command.into())?;
         if bytes.len() > MAX_REQUEST_FRAME {
             return Err(IpcError::TooLarge {
                 max: MAX_REQUEST_FRAME,

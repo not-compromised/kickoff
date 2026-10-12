@@ -1,6 +1,6 @@
 use std::io::ErrorKind;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -42,10 +42,7 @@ impl Counters {
 }
 
 impl Server {
-    /// Creates the socket with `bind`, which fails if the name exists. The
-    /// one name we replace is a dead socket we own, left by a kickoffd that
-    /// was killed; anything else at that name (a live server, a file, a
-    /// symlink, another owner's socket) fails closed as `Squatted`.
+    /// Creates a new socket exclusively. Every existing name fails closed.
     ///
     /// Must be called inside a tokio runtime.
     pub fn bind(dir: &RuntimeDir, trust: Trust) -> Result<Server, IpcError> {
@@ -54,7 +51,10 @@ impl Server {
         let std_listener = match std::os::unix::net::UnixListener::bind(path) {
             Ok(listener) => listener,
             Err(e) if e.kind() == ErrorKind::AddrInUse => {
-                reclaim_dead_socket(path, dir.uid())?;
+                if !cfg!(feature = "mutant-si7-reclaim-any") {
+                    return Err(IpcError::Squatted);
+                }
+                std::fs::remove_file(path)?;
                 std::os::unix::net::UnixListener::bind(path).map_err(|_| IpcError::Squatted)?
             }
             Err(e) => return Err(e.into()),
@@ -187,27 +187,6 @@ impl Drop for Server {
     }
 }
 
-/// Lets kickoffd start after it was killed. The directory is ours and 0700,
-/// so only our uid could have put anything here; we still remove only a
-/// socket we own that nobody is listening on.
-fn reclaim_dead_socket(path: &Path, uid: u32) -> Result<(), IpcError> {
-    let meta = std::fs::symlink_metadata(path).map_err(|_| IpcError::Squatted)?;
-    if cfg!(feature = "mutant-si7-reclaim-any") {
-        std::fs::remove_file(path)?;
-        return Ok(());
-    }
-    if !meta.file_type().is_socket() || meta.uid() != uid {
-        return Err(IpcError::Squatted);
-    }
-    match std::os::unix::net::UnixStream::connect(path) {
-        Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
-            std::fs::remove_file(path)?;
-            Ok(())
-        }
-        Ok(_) | Err(_) => Err(IpcError::Squatted),
-    }
-}
-
 /// One authenticated caller. Requests and replies alternate: every request
 /// `recv` returns gets exactly one reply.
 ///
@@ -296,7 +275,7 @@ impl Channel {
                 return Err(e);
             }
         };
-        match codec::decode_op(&body)
+        match codec::decode_op(self.role, &body)
             .ok()
             .and_then(|op| op.for_role(self.role))
         {

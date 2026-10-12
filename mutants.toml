@@ -470,3 +470,6 @@ crate = "kickoff-ipc"
 feature = "mutant-si30-late-facade-core"
 test = "si_30_facade_policy_precedes_arguments_runtime_and_trust"
 note = "normal startup defers the facade core policy until listener construction"
+
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-reclaim-any", test = "si_7_dead_socket_collision_is_refused_without_touching_it", note = "bind replaces an existing dead socket instead of failing closed"
+[[unmutated]] test = "si_10_role_commands_use_postcard", reason = "independent postcard command/reply fixtures prove positive role-format composition; authentication and version protections have separate mutants"

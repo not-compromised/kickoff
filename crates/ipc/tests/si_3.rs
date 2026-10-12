@@ -165,11 +165,11 @@ async fn si_3_path_shaped_join_on_the_wire_never_reaches_the_daemon() {
     let (_task, mut seen) = serve(server);
     let mut stream = raw_channel(&dir, CLI).await;
     let path = b"../../etc/passwd";
-    let mut join = vec![3u8];
-    join.extend_from_slice(&u16::try_from(path.len()).unwrap().to_be_bytes());
+    let mut join = vec![2u8];
+    join.push(u8::try_from(path.len()).unwrap());
     join.extend_from_slice(path);
     stream.write_all(&frame(&join)).await.unwrap();
-    assert_eq!(read_frame(&mut stream).await.unwrap(), [2, 1]);
+    assert_eq!(read_frame(&mut stream).await.unwrap(), [1, 0]);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(seen.try_recv().is_err());
 }

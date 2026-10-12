@@ -68,7 +68,7 @@ pub enum IpcError {
 
 /// Bumped on any change to a role's command enum; a mismatch closes the
 /// channel before any side effect (SI-10).
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Each role has its own fixed command enum, and none carries a path, URL,
 /// shell string, launch command or EAC mode (SI-3). Only `Cli`, `UiMain` and
