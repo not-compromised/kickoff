@@ -5,18 +5,22 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream, presets};
+use iroh::endpoint::{
+    Builder, ConnectError, ConnectingError, Connection, ConnectionError, Incoming, RecvStream,
+    SendStream, TransportErrorCode, presets,
+};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey};
 use kickoff_secret::Secret;
 use kickoff_wire::{Admitted, JoinRefused, JoinReply, JoinRequest, Ticket};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::budget::Window;
-use crate::egress::{Egress, EgressGuard, IfaceAddr};
+use crate::egress::{Egress, EgressGuard, IfaceAddr, SendGuard, View};
+use crate::guarded::{self, Guarded};
+use crate::incoming::Gate;
 use crate::stream::{read_message, write_message};
 use crate::{
-    AbortOnDrop, CONNECT_DEADLINE, HANDSHAKE_DEADLINE, JOIN_ALPN, NetError, PENDING_INCOMING,
-    close, transport,
+    AbortOnDrop, CONNECT_DEADLINE, HANDSHAKE_DEADLINE, JOIN_ALPN, NetError, close, transport,
 };
 
 /// Invalid requests per identity and overall, per `INVALID_WINDOW` (§6.3).
@@ -26,6 +30,10 @@ const INVALID_WINDOW: Duration = Duration::from_secs(60);
 /// Identities whose invalid count is remembered; beyond it, unknown ids count
 /// against the global limit only.
 const INVALID_TRACKED: usize = 256;
+/// Authenticated connections that have not sent their `JoinRequest` yet,
+/// overall and per identity (§6.3).
+const AWAITING: usize = 16;
+const AWAITING_PER_ID: usize = 2;
 /// Authenticated requests waiting for the admission owner.
 const PRIORITY_QUEUE: usize = 8;
 const GENERAL_QUEUE: usize = 16;
@@ -35,24 +43,27 @@ const REPLY_DEADLINE: Duration = Duration::from_secs(120);
 const ANSWER_LINGER: Duration = Duration::from_secs(5);
 
 /// Relay-only, persistent identity. Runs only while hosting or while "friends
-/// may join" is on.
+/// may join" is on. It has no IP transport, so it owns no UDP socket.
 pub async fn door(id: &Secret<SecretKey>, relays: &RelayMap) -> Result<Door, NetError> {
-    let builder = Endpoint::builder(presets::Minimal)
-        .clear_ip_transports()
-        .relay_mode(RelayMode::Custom(relays.clone()));
-    Door::bind(id, builder, Egress::new(relays.clone(), None)).await
+    let egress = Egress::new(relays.clone(), None);
+    let ep = Door::builder(id)
+        .relay_mode(RelayMode::Custom(relays.clone()))
+        .hooks(EgressGuard::new(egress.clone()))
+        .bind()
+        .await
+        .map_err(|_| NetError::Bind)?;
+    Ok(Door::serve(ep, egress, None))
 }
 
 /// The in-process adapter (design §2.3): the same door on 127.0.0.1 with no
 /// relay, for tests and for nothing that leaves this host.
 pub async fn door_loopback(id: &Secret<SecretKey>) -> Result<Door, NetError> {
     let bind = IfaceAddr::loopback();
-    let builder = Endpoint::builder(presets::Minimal)
-        .clear_ip_transports()
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr((bind.ip(), 0))
-        .map_err(|_| NetError::Bind)?;
-    Door::bind(id, builder, Egress::new(RelayMap::empty(), Some(bind))).await
+    let egress = Egress::new(RelayMap::empty(), Some(bind));
+    let view = View::current(bind, &[]).await;
+    let make = || Door::builder(id).relay_mode(RelayMode::Disabled);
+    let (ep, guarded) = guarded::bind(make, bind.ip(), &egress, view).await?;
+    Ok(Door::serve(ep, egress, Some(guarded)))
 }
 
 pub struct Door {
@@ -61,6 +72,8 @@ pub struct Door {
     queues: tokio::sync::Mutex<Queues>,
     priority: Arc<ArcSwap<HashSet<EndpointId>>>,
     _accept: AbortOnDrop,
+    /// The loopback adapter's send guard; the relay-only door has none.
+    guarded: Option<Guarded>,
 }
 
 struct Queues {
@@ -69,36 +82,37 @@ struct Queues {
 }
 
 impl Door {
-    async fn bind(
-        id: &Secret<SecretKey>,
-        builder: iroh::endpoint::Builder,
-        egress: Egress,
-    ) -> Result<Door, NetError> {
-        let ep = builder
+    fn builder(id: &Secret<SecretKey>) -> Builder {
+        Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
             .secret_key(id.expose(SecretKey::clone))
             .alpns(vec![JOIN_ALPN.to_vec()])
             .transport_config(transport(1, false))
-            .hooks(EgressGuard(egress.clone()))
-            .bind()
-            .await
-            .map_err(|_| NetError::Bind)?;
+    }
+
+    fn serve(ep: Endpoint, egress: Egress, guarded: Option<Guarded>) -> Door {
         let (priority_tx, priority) = mpsc::channel(PRIORITY_QUEUE);
         let (general_tx, general) = mpsc::channel(GENERAL_QUEUE);
         let priority_ids = Arc::new(ArcSwap::from_pointee(HashSet::new()));
+        let guard = guarded.as_ref().map(|g| Arc::clone(&g.guard));
         let accept = Acceptor {
+            gate: Gate::new(guard.clone()),
+            guard,
+            awaiting: Arc::new(Awaiting::default()),
             limiter: Arc::new(Mutex::new(InvalidLimiter::default())),
             priority_ids: Arc::clone(&priority_ids),
             priority_tx,
             general_tx,
         };
         let task = tokio::spawn(accept.run(ep.clone()));
-        Ok(Door {
+        Door {
             ep,
             egress,
             queues: tokio::sync::Mutex::new(Queues { priority, general }),
             priority: priority_ids,
             _accept: AbortOnDrop(task),
-        })
+            guarded,
+        }
     }
 
     pub fn id(&self) -> EndpointId {
@@ -141,20 +155,54 @@ impl Door {
         request: JoinRequest,
     ) -> Result<Admitted, NetError> {
         let addr = ticket.expose(|t| self.egress.scope(&t.door))?;
-        let conn = tokio::time::timeout(CONNECT_DEADLINE, self.ep.connect(addr, JOIN_ALPN))
+        let conn = match tokio::time::timeout(CONNECT_DEADLINE, self.ep.connect(addr, JOIN_ALPN))
             .await
-            .map_err(|_| NetError::Closed)?
-            .map_err(|_| NetError::Closed)?;
+        {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(err)) if connect_busy(&err) => return Err(NetError::Refused(JoinRefused::Busy)),
+            _ => return Err(NetError::Closed),
+        };
+        if let Some(guarded) = &self.guarded {
+            guarded.guard.track(&conn);
+        }
         let reply = tokio::time::timeout(REPLY_DEADLINE, exchange(&conn, &request)).await;
+        let turned_away = conn.close_reason().as_ref().is_some_and(busy);
         conn.close(close::DONE, b"");
-        match reply.map_err(|_| NetError::Closed)?? {
-            JoinReply::Admitted(admitted) => Ok(admitted),
-            JoinReply::Refused(why) => Err(NetError::Refused(why)),
+        match reply.map_err(|_| NetError::Closed)? {
+            Ok(JoinReply::Admitted(admitted)) => Ok(admitted),
+            Ok(JoinReply::Refused(why)) => Err(NetError::Refused(why)),
+            Err(_) if turned_away => Err(NetError::Refused(JoinRefused::Busy)),
+            Err(err) => Err(err),
         }
     }
 
     pub async fn close(&self) {
         self.ep.close().await;
+    }
+}
+
+/// The door turned the connection away before reading a request: refused
+/// before the handshake (pending slots or handshake rate full) or closed with
+/// `BUSY` after it (awaiting slots or the invalid-request limit). To the
+/// guest that is the host being busy.
+fn connect_busy(err: &ConnectError) -> bool {
+    match err {
+        ConnectError::Connection { source, .. }
+        | ConnectError::Connecting {
+            source: ConnectingError::ConnectionError { source, .. },
+            ..
+        } => busy(source),
+        _ => false,
+    }
+}
+
+fn busy(err: &ConnectionError) -> bool {
+    match err {
+        ConnectionError::ConnectionClosed(close) => {
+            close.error_code == TransportErrorCode::CONNECTION_REFUSED
+        }
+        ConnectionError::ApplicationClosed(app) => app.error_code == close::BUSY,
+        _ => false,
     }
 }
 
@@ -218,6 +266,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 struct Acceptor {
+    gate: Gate,
+    guard: Option<Arc<SendGuard>>,
+    awaiting: Arc<Awaiting>,
     limiter: Arc<Mutex<InvalidLimiter>>,
     priority_ids: Arc<ArcSwap<HashSet<EndpointId>>>,
     priority_tx: mpsc::Sender<JoinAttempt>,
@@ -227,23 +278,18 @@ struct Acceptor {
 impl Acceptor {
     async fn run(self, ep: Endpoint) {
         let this = Arc::new(self);
-        let pending = Arc::new(Semaphore::new(PENDING_INCOMING));
         while let Some(incoming) = ep.accept().await {
-            let Ok(permit) = Arc::clone(&pending).try_acquire_owned() else {
-                incoming.refuse();
+            let Some((incoming, pending)) = this.gate.admit(incoming) else {
                 continue;
             };
-            if !incoming.remote_addr_validated() {
-                if let Err(err) = incoming.retry() {
-                    err.into_incoming().refuse();
-                }
-                continue;
-            }
             let this = Arc::clone(&this);
             tokio::spawn(async move {
-                let attempt =
-                    tokio::time::timeout(HANDSHAKE_DEADLINE, this.receive(incoming)).await;
-                drop(permit);
+                let deadline = if cfg!(feature = "mutant-si23-door-no-join-deadline") {
+                    Duration::from_secs(86_400)
+                } else {
+                    HANDSHAKE_DEADLINE
+                };
+                let attempt = tokio::time::timeout(deadline, this.receive(incoming, pending)).await;
                 if let Ok(Some(attempt)) = attempt {
                     this.enqueue(attempt);
                 }
@@ -251,9 +297,21 @@ impl Acceptor {
         }
     }
 
-    async fn receive(&self, incoming: Incoming) -> Option<JoinAttempt> {
+    async fn receive(
+        &self,
+        incoming: Incoming,
+        pending: OwnedSemaphorePermit,
+    ) -> Option<JoinAttempt> {
         let conn = incoming.accept().ok()?.await.ok()?;
+        drop(pending);
         let id = conn.remote_id();
+        let Some(_waiting) = Awaiting::enter(&self.awaiting, id) else {
+            conn.close(close::BUSY, b"");
+            return None;
+        };
+        if let Some(guard) = &self.guard {
+            guard.track(&conn);
+        }
         let priority = self.priority_ids.load().contains(&id);
         if lock(&self.limiter).blocked(Instant::now(), id, priority) {
             conn.close(close::BUSY, b"");
@@ -292,6 +350,52 @@ impl Acceptor {
         if let Err(full) = queue.try_send(attempt) {
             let attempt = full.into_inner();
             tokio::spawn(attempt.answer(Err(JoinRefused::Busy)));
+        }
+    }
+}
+
+/// Connections past their handshake that have not sent a `JoinRequest` yet.
+#[derive(Debug, Default)]
+struct Awaiting {
+    counts: Mutex<(usize, HashMap<EndpointId, usize>)>,
+}
+
+/// One awaiting connection's place; dropping it frees the place.
+struct Waiting {
+    awaiting: Arc<Awaiting>,
+    id: EndpointId,
+}
+
+impl Awaiting {
+    fn enter(this: &Arc<Awaiting>, id: EndpointId) -> Option<Waiting> {
+        let mut counts = lock(&this.counts);
+        let (total, per_id) = &mut *counts;
+        let mine = per_id.get(&id).copied().unwrap_or(0);
+        let full = !cfg!(feature = "mutant-si23-door-no-awaiting-cap") && *total >= AWAITING;
+        let own_full =
+            !cfg!(feature = "mutant-si23-door-no-identity-cap") && mine >= AWAITING_PER_ID;
+        if full || own_full {
+            return None;
+        }
+        *total = total.saturating_add(1);
+        per_id.insert(id, mine.saturating_add(1));
+        Some(Waiting {
+            awaiting: Arc::clone(this),
+            id,
+        })
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        let mut counts = lock(&self.awaiting.counts);
+        let (total, per_id) = &mut *counts;
+        *total = total.saturating_sub(1);
+        if let Some(mine) = per_id.get_mut(&self.id) {
+            *mine = mine.saturating_sub(1);
+            if *mine == 0 {
+                per_id.remove(&self.id);
+            }
         }
     }
 }

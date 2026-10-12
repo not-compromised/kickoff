@@ -12,11 +12,12 @@ difference. Changing this patch means changing both pins in that script.
 
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -274,6 +274,9 @@
+@@ -274,6 +274,10 @@
  version = "1.3.0"
  default-features = false
  
 +[dependencies.kickoff-send-guard]
++version = "=0.0.0"
 +path = "../../crates/send-guard"
 +
  [dependencies.n0-error]

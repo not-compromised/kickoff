@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -17,6 +18,9 @@ use kickoff_wire::{
 };
 
 const BUSY: u32 = 7;
+/// Slower than the per-source handshake rate (8/s), so a test about another
+/// limit is never refused by that one.
+const HANDSHAKE_SPACING: Duration = Duration::from_millis(150);
 const PROTOCOL: u32 = 6;
 
 async fn door() -> Door {
@@ -157,28 +161,100 @@ async fn invalid_join(ep: &iroh::Endpoint, door: &Door) -> Option<u32> {
     close_code(&conn).await
 }
 
+/// The flooder paces its attempts below the per-source handshake rate (8/s)
+/// and its friend has its own loopback address, so that rate never decides
+/// an attempt here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn si_23_invalid_join_requests_exhaust_only_their_own_identity() {
     let host_door = door().await;
     let flooder = raw_endpoint().await;
     for n in 0..10 {
+        if n >= 4 {
+            tokio::time::sleep(HANDSHAKE_SPACING).await;
+        }
         assert_eq!(
             invalid_join(&flooder, &host_door).await,
             Some(PROTOCOL),
             "attempt {n} is read and refused"
         );
     }
+    tokio::time::sleep(HANDSHAKE_SPACING).await;
     assert_eq!(
         invalid_join(&flooder, &host_door).await,
         Some(BUSY),
         "the 11th is turned away unread"
     );
 
-    let friend = raw_endpoint().await;
+    let friend = raw_endpoint_at(Ipv4Addr::new(127, 0, 2, 1)).await;
     assert_eq!(
         invalid_join(&friend, &host_door).await,
         Some(PROTOCOL),
         "another identity is still read"
+    );
+}
+
+/// SI-23: completed handshakes that never send a `JoinRequest`. One identity
+/// holds at most two such connections; the third is closed at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_door_holds_two_silent_connections_per_identity() {
+    let host_door = door().await;
+    let silent = raw_endpoint().await;
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(silent.connect(host_door.addr(), JOIN_ALPN).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let third = silent.connect(host_door.addr(), JOIN_ALPN).await.unwrap();
+    assert_eq!(
+        close_code(&third).await,
+        Some(BUSY),
+        "a third silent connection"
+    );
+    assert!(held.iter().all(|c| c.close_reason().is_none()));
+
+    let other = raw_endpoint().await;
+    let theirs = other.connect(host_door.addr(), JOIN_ALPN).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), theirs.closed())
+            .await
+            .is_err(),
+        "another identity was turned away"
+    );
+}
+
+/// SI-23: at most 16 connections await a `JoinRequest` at once, whoever
+/// holds them. Each silent connection here comes from its own address and
+/// identity, so only that cap can turn the seventeenth away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_door_caps_connections_awaiting_a_join_request() {
+    let host_door = door().await;
+    let mut held = Vec::new();
+    for n in 0..16u8 {
+        let ep = raw_endpoint_at(Ipv4Addr::new(127, 0, 1, n.wrapping_add(1))).await;
+        let conn = ep.connect(host_door.addr(), JOIN_ALPN).await.unwrap();
+        held.push((ep, conn));
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let late = raw_endpoint_at(Ipv4Addr::new(127, 0, 1, 100)).await;
+    let conn = late.connect(host_door.addr(), JOIN_ALPN).await.unwrap();
+    assert_eq!(
+        close_code(&conn).await,
+        Some(BUSY),
+        "a seventeenth awaiting connection"
+    );
+    assert!(held.iter().all(|(_, c)| c.close_reason().is_none()));
+}
+
+/// SI-23: a silent connection is closed at the 5 s join deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_door_closes_silent_connections_at_the_join_deadline() {
+    let host_door = door().await;
+    let silent = raw_endpoint().await;
+    let conn = silent.connect(host_door.addr(), JOIN_ALPN).await.unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(8), conn.closed()).await;
+    assert!(
+        closed.is_ok(),
+        "a silent connection outlived the join deadline"
     );
 }
 

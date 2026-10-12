@@ -1398,6 +1398,7 @@ dependencies = [
  "bytes",
  "iroh",
  "kickoff-secret",
+ "kickoff-send-guard",
  "kickoff-wire",
  "netwatch",
  "thiserror 2.0.21",

@@ -92,7 +92,10 @@ mod tests {
         let registration = register(bind, Arc::new(Only(ok))).unwrap();
         assert!(admit(bind, ok));
         assert!(!admit(bind, other));
-        assert!(admit(addr("127.0.0.1:40009"), other), "unregistered binds pass");
+        assert!(
+            admit(addr("127.0.0.1:40009"), other),
+            "unregistered binds pass"
+        );
         assert!(
             register(bind, Arc::new(Only(ok))).is_none(),
             "one guard per bind"

@@ -12,7 +12,7 @@ version=1.3.0
 # The crates.io checksum Cargo.lock recorded for iroh 1.3.0 before vendoring.
 crate_sha256=885787b892b5e2507c701f132ecbd45d2bad4bbb75157a19427087c16dadb833
 # The reviewed patch. Changing it means changing this pin in the same review.
-patch_sha256=ac21e8abb0110a4a94147e06e92a0f9b34a3009fb29f5e494abb1b602912b0d3
+patch_sha256=6ba84bbb1f058ecbc6eb8b767218e375f20bbc69270dbd9bccb2c75cce0e7c7e
 
 vendored="vendor/$crate-$version"
 patch_file="vendor/$crate-$version.patch"

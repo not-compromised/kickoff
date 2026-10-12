@@ -1,12 +1,17 @@
 //! Address scoping in both directions. `Egress::scope` is the only place peer
 //! data becomes a destination (SI-29); `Egress::publishable` is the only place
-//! this node's own addresses are filtered before anyone learns them (SI-31).
+//! this node's own addresses are filtered before anyone learns them (SI-31);
+//! `SendGuard` holds every IP packet to the same policy, whoever chose its
+//! destination.
+
+mod send_guard;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use iroh::endpoint::{BeforeConnectOutcome, EndpointHooks};
 use iroh::{EndpointAddr, RelayMap, TransportAddr};
 
+pub(crate) use self::send_guard::{SendGuard, View};
 use crate::NetError;
 
 /// Tailscale and carrier-grade NAT. Never published, never dialed.
@@ -33,6 +38,29 @@ const NOT_GLOBAL: [(Ipv4Addr, u8); 15] = [
     (Ipv4Addr::new(240, 0, 0, 0), 4),
 ];
 
+/// The §3.1 denylist, inclusive ranges: no packet goes to these ports
+/// whatever else allows it. The LAN filter keeps the same list in
+/// `kickoff-vlan` (`ports::DENYLIST`); the two must stay equal.
+const DENIED_PORTS: &[(u16, u16)] = &[
+    (22, 22),
+    (53, 53),
+    (67, 68),
+    (137, 138),
+    (1900, 1900),
+    (5353, 5353),
+    (5355, 5355),
+    (9002, 9002),
+    (47984, 48010),
+    (49123, 49124),
+    (53317, 53317),
+];
+
+fn denied_port(port: u16) -> bool {
+    DENIED_PORTS
+        .iter()
+        .any(|&(lo, hi)| (lo..=hi).contains(&port))
+}
+
 fn in_net(ip: Ipv4Addr, (net, len): (Ipv4Addr, u8)) -> bool {
     let mask = u32::MAX
         .checked_shl(u32::from(32u8.saturating_sub(len)))
@@ -40,7 +68,7 @@ fn in_net(ip: Ipv4Addr, (net, len): (Ipv4Addr, u8)) -> bool {
     u32::from(ip) & mask == u32::from(net) & mask
 }
 
-fn is_global(ip: Ipv4Addr) -> bool {
+pub(crate) fn is_global(ip: Ipv4Addr) -> bool {
     !NOT_GLOBAL.iter().any(|&net| in_net(ip, net))
 }
 
@@ -97,8 +125,25 @@ impl IfaceAddr {
         (!is_forbidden(ip) && !ip.is_loopback() && prefix <= 32).then_some(IfaceAddr { ip, prefix })
     }
 
+    /// Another loopback address, for in-process tests that need two hosts.
+    #[cfg(test)]
+    pub(crate) fn loopback_at(ip: Ipv4Addr) -> IfaceAddr {
+        IfaceAddr { ip, prefix: 8 }
+    }
+
     fn contains(&self, ip: Ipv4Addr) -> bool {
         in_net(ip, (self.ip, self.prefix))
+    }
+
+    /// The bound subnet's network or broadcast address. A /31 or /32 has
+    /// neither.
+    fn is_subnet_edge(&self, ip: Ipv4Addr) -> bool {
+        if self.prefix >= 31 || !self.contains(ip) {
+            return false;
+        }
+        let host_bits = u32::MAX.checked_shr(u32::from(self.prefix)).unwrap_or(0);
+        let host = u32::from(ip) & host_bits;
+        host == 0 || host == host_bits
     }
 }
 
@@ -187,9 +232,33 @@ impl Egress {
 
 /// Second layer under `Egress::scope`: iroh refuses any connect whose address
 /// set holds a destination the policy would have dropped, whichever code path
-/// built it.
+/// built it. It also holds the endpoint's send-guard registration, so the
+/// guard stays installed exactly as long as iroh keeps the endpoint's hooks.
 #[derive(Debug)]
-pub(crate) struct EgressGuard(pub(crate) Egress);
+pub(crate) struct EgressGuard {
+    egress: Egress,
+    _send: Option<kickoff_send_guard::Registration>,
+}
+
+impl EgressGuard {
+    /// For an endpoint with no IP transport, which sends nothing to guard.
+    pub(crate) fn new(egress: Egress) -> EgressGuard {
+        EgressGuard {
+            egress,
+            _send: None,
+        }
+    }
+
+    pub(crate) fn with_send_guard(
+        egress: Egress,
+        send: kickoff_send_guard::Registration,
+    ) -> EgressGuard {
+        EgressGuard {
+            egress,
+            _send: Some(send),
+        }
+    }
+}
 
 impl EndpointHooks for EgressGuard {
     async fn before_connect<'a>(
@@ -198,7 +267,7 @@ impl EndpointHooks for EgressGuard {
         _alpn: &'a [u8],
     ) -> BeforeConnectOutcome {
         if cfg!(feature = "mutant-si29-no-connect-guard")
-            || remote_addr.addrs.iter().all(|a| self.0.may_dial(a))
+            || remote_addr.addrs.iter().all(|a| self.egress.may_dial(a))
         {
             BeforeConnectOutcome::Accept
         } else {
@@ -349,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn si_29_connect_guard_refuses_what_scope_would_drop() {
         let ours = relay("https://relay.kickoff.example");
-        let guard = EgressGuard(Egress::new(RelayMap::from(ours.clone()), Some(lan_bind())));
+        let guard = EgressGuard::new(Egress::new(RelayMap::from(ours.clone()), Some(lan_bind())));
         let alpn = crate::SESSION_ALPN;
         for hostile in [
             TransportAddr::Relay(relay("https://evil.example")),
