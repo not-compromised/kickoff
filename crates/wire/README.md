@@ -18,6 +18,15 @@ bytes it came from. No error carries input bytes (SI-30).
 | Tickets | `Ticket`, `Cap`, `parse_ticket -> Secret<Ticket>`, `encode_ticket -> Secret<TicketTextValue>` |
 | Invites | `Invites::new`, `issue(key, invitee, now) -> Cap`, `redeem(cap, requester, now) -> Redeemed` |
 
+## Codec and port ownership
+
+Peer datagram and message framing lives in [`lan`](src/lan.rs) and
+[`msg`](src/msg.rs). Net consumes these exported codecs. Ethernet L2 framing
+lives in [`kickoff-vlan::codec`](../vlan/src/codec.rs).
+
+[`ports`](src/ports.rs) owns the compiled denied-port policy exported as
+`DENIED_PORTS` and `denied_port`. Both the VLAN filter and net egress use it.
+
 ## Invariants held here
 
 | SI | Test |
@@ -37,9 +46,8 @@ same properties the fuzzer does.
 
 ## NOTES
 
-- **L2 frame codec.** §2.2 lists it under `wire`; §2.3 puts it in `vlan`
-  ("`vlan` hides the frame codec"). It lives in `vlan` (`crates/vlan/src/codec.rs`
-  on `m2/vlan`); `wire` carries only UDP tuples.
+- **L2 frame codec.** The draft-2 layout descriptions differed. Current
+  ownership is recorded in [codec and port ownership](#codec-and-port-ownership).
 - **Nonce states.** §4.4 describes `Unused → Pending(conn) → Consumed | Revoked`.
   `Invites::redeem` goes straight from unused to spent, so a declined or
   cancelled prompt cannot leave a capability usable. The caller must check
@@ -61,11 +69,11 @@ same properties the fuzzer does.
 - **`Version`.** An unknown top-level variant, or a ticket version above 1,
   returns `WireError::Version` so the caller can close with `VERSION` (§4.5).
   An unknown nested variant, such as a new `GameState`, is `Malformed`.
-- **`WireError::NotImplemented`** is unused. It stays because `kickoff-net` on
-  `m2/net` matches on it; remove it at integration.
-- **`kickoff-net` duplicates the LAN codec.** It was written against the stubs
-  (`crates/net/src/frame.rs`). The layout is byte-compatible; at integration it
-  should call `decode_datagram` and `encode_datagram`.
+- **`WireError::NotImplemented`** is unused by wire decoders;
+  [net stream error mapping](../net/src/stream.rs) still translates it to
+  `NetError::NotImplemented`.
+- **Net codec integration.** See [codec and port ownership](#codec-and-port-ownership).
+  The earlier separate net frame codec has been retired.
 - **Fuzz crate outside the workspace.** libFuzzer needs nightly and sanitizer
   flags, so `fuzz/` has its own `[workspace]` and a pinned lockfile seeded from
   the workspace's. `scripts/check.sh` does not build it. Adding

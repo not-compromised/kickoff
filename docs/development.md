@@ -31,7 +31,11 @@ scripts/check.sh
 
 Runs the dated advisory exception policy and its Python tests, the unsafe guard, the upstream-plus-patch vendor comparison, `cargo fmt --check`, clippy with `-D warnings`, the whole
 test suite (every `si_n_*` test and the SI-33 policy test), the design §7
-latency tests in a release build, `cargo deny check`, and then every mutant.
+latency tests in a release build, both cargo-deny scans, and then every mutant.
+The dated-exception owner is `advisory-exceptions.toml`;
+`scripts/advisory-exceptions.py` validates it before either advisory scan.
+The registry mirror in `scripts/check-upstream-advisories.sh` also covers
+the pinned path dependencies that the root RustSec scan cannot match.
 Run cargo through `mise exec --` so the pinned toolchain
 (`rust-toolchain.toml`) is used.
 
@@ -124,8 +128,8 @@ scaffolding M2.
    `Generation`, `PeerRef`, `MapId`, `AdmitPass` and `ApprovalId` are in `wire`:
    `net` and `vlan` both need `LanDatagram`, and `net` should not depend on the
    tap adapters. `ApprovalId` is re-exported by session and IPC; only the
-   session owner mints it. The compiled denylist also has one owner in wire,
-   used by the LAN filter and IP send guard.
+   session owner mints it. See [wire codec and port ownership](../crates/wire/README.md#codec-and-port-ownership)
+   for the shared codecs and compiled denylist.
 4. **`Admitted { session_addr, pass: AdmitPass }`**, so a guest dials with
    `dial(admitted.session_addr, admitted.pass)`.
 5. **`Link::peer() -> PeerRef`** exposes the (identity, slot, generation) the
@@ -190,9 +194,10 @@ scaffolding M2.
 
 ### Harness (SI-33) notes
 
-1. All draft-3 M2 types and named mutants are integrated. The networking
-   review still must verify the per-remote candidate budget and per-connection
-   cache, the pending-handshake flood proof, and fail-closed send registration.
+1. Networking policy owners and the pending-handshake cap regression are
+   indexed in [net egress policy](../crates/net/README.md#egress-policy).
+   SI-33 checks the registry; running the full gate establishes dynamic proof
+   for the current source revision.
 2. SI-22's local half is covered by `kickoff-secret`: file and directory modes,
    hostile names and damaged state, read isolation from another uid, and local
    revocation before identity replacement. Remote revocation notices are M10.
@@ -206,8 +211,9 @@ scaffolding M2.
    a synthetic host view. Its unbound mutant requires another non-loopback
    IPv4 interface to expose address enumeration; the test fails if it cannot
    establish that difference instead of skipping the mutant.
-5. Session's `Hello` deadline is 2 s. Net's 5 s control-stream deadline is a
-   separate limit before the session message is visible.
+5. See [admission lifetime bounds](../crates/net/README.md#admission-lifetime-bounds)
+   for the absolute two-second Hello window after TLS, including stream and
+   accept-queue waiting. TLS has a separate five-second bound.
 6. **Hot-path bench.** §7 names criterion. A criterion bench measures but
    cannot fail the gate, so `vlan/tests/hot_path.rs` is a release-mode timing
    test with the same ≤ 2 µs budget instead, and no bench dependency was
