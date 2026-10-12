@@ -3,6 +3,7 @@
 
 use bytes::Bytes;
 use iroh_base::{EndpointAddr, EndpointId};
+use kickoff_secret::SecretBuffer;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ticket::CapRepr;
@@ -185,13 +186,14 @@ impl JoinRequestRepr {
 
 pub(crate) mod sealed {
     use crate::WireError;
+    use kickoff_secret::SecretBuffer;
 
     /// The encoding of each message, reachable only through `encode` and
     /// `decode`, so every decode goes through the strict path.
     pub trait Sealed: Sized {
         /// The number of top-level variants, for an enum.
         const VARIANTS: Option<u32>;
-        fn write(&self) -> Result<Vec<u8>, WireError>;
+        fn write(&self) -> Result<SecretBuffer, WireError>;
         fn read(bytes: &[u8]) -> Result<(Self, &[u8]), WireError>;
     }
 }
@@ -202,8 +204,17 @@ pub trait WireMessage: Sized + sealed::Sealed {
     const MAX_LEN: usize;
 }
 
-fn postcard_write<T: Serialize>(value: &T) -> Result<Vec<u8>, WireError> {
-    postcard::to_allocvec(value).map_err(|_| WireError::Malformed)
+pub(crate) fn postcard_write<T: Serialize>(
+    value: &T,
+    max: usize,
+) -> Result<SecretBuffer, WireError> {
+    let len = postcard::experimental::serialized_size(value).map_err(|_| WireError::Malformed)?;
+    if !cfg!(feature = "mutant-si23-no-message-cap") && len > max {
+        return Err(WireError::TooLong { max });
+    }
+    let mut out = SecretBuffer::zeroed(len);
+    postcard::to_slice(value, &mut out).map_err(|_| WireError::Malformed)?;
+    Ok(out)
 }
 
 fn postcard_read<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<(T, &'a [u8]), WireError> {
@@ -214,8 +225,8 @@ macro_rules! wire_message {
     ($($ty:ty => $max:expr, $variants:expr);+ $(;)?) => {$(
         impl sealed::Sealed for $ty {
             const VARIANTS: Option<u32> = Some($variants);
-            fn write(&self) -> Result<Vec<u8>, WireError> {
-                postcard_write(self)
+            fn write(&self) -> Result<SecretBuffer, WireError> {
+                postcard_write(self, <Self as WireMessage>::MAX_LEN)
             }
             fn read(bytes: &[u8]) -> Result<(Self, &[u8]), WireError> {
                 postcard_read(bytes)
@@ -236,8 +247,8 @@ wire_message! {
 impl sealed::Sealed for JoinRequest {
     const VARIANTS: Option<u32> = None;
 
-    fn write(&self) -> Result<Vec<u8>, WireError> {
-        postcard_write(&JoinRequestRepr::from_request(self))
+    fn write(&self) -> Result<SecretBuffer, WireError> {
+        postcard_write(&JoinRequestRepr::from_request(self), Self::MAX_LEN)
     }
 
     fn read(bytes: &[u8]) -> Result<(Self, &[u8]), WireError> {
@@ -259,12 +270,12 @@ impl WireMessage for JoinRequest {
 }
 
 /// The message body, without the length prefix.
-pub fn encode<M: WireMessage>(msg: &M) -> Result<Bytes, WireError> {
+pub fn encode<M: WireMessage>(msg: &M) -> Result<SecretBuffer, WireError> {
     let body = msg.write()?;
     if !cfg!(feature = "mutant-si23-no-message-cap") && body.len() > M::MAX_LEN {
         return Err(WireError::TooLong { max: M::MAX_LEN });
     }
-    Ok(Bytes::from(body))
+    Ok(body)
 }
 
 /// Decodes one message body. A top-level variant this build does not know is
@@ -282,20 +293,20 @@ pub fn decode<M: WireMessage>(bytes: &[u8]) -> Result<M, WireError> {
         return Err(WireError::Version);
     }
     let (msg, rest) = M::read(bytes)?;
-    if !rest.is_empty() || msg.write()? != bytes {
+    if !rest.is_empty() || msg.write()?.as_ref() != bytes {
         return Err(WireError::Malformed);
     }
     Ok(msg)
 }
 
 /// `len:u32 | body`, ready to write to a join or control stream.
-pub fn encode_framed<M: WireMessage>(msg: &M) -> Result<Bytes, WireError> {
+pub fn encode_framed<M: WireMessage>(msg: &M) -> Result<SecretBuffer, WireError> {
     let body = encode(msg)?;
     let len = u32::try_from(body.len()).map_err(|_| WireError::TooLong { max: M::MAX_LEN })?;
-    let mut framed = Vec::with_capacity(LEN_PREFIX_LEN.saturating_add(body.len()));
+    let mut framed = SecretBuffer::with_capacity(LEN_PREFIX_LEN.saturating_add(body.len()));
     framed.extend_from_slice(&len.to_be_bytes());
     framed.extend_from_slice(&body);
-    Ok(Bytes::from(framed))
+    Ok(framed)
 }
 
 /// The body length a received prefix announces, checked against `M::MAX_LEN`

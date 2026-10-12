@@ -62,7 +62,7 @@ fn mode(path: &Path) -> u32 {
 }
 
 fn public(store: &IdentityStore) -> iroh_base::EndpointId {
-    store.load_or_create().unwrap().expose(SecretKey::public)
+    store.load_or_create().unwrap().public()
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn si_22_reset_revokes_every_trust_entry_for_the_old_key() {
     trust.trust(friend).unwrap();
     store.save_trust(&trust).unwrap();
 
-    let new = store.reset().unwrap().expose(SecretKey::public);
+    let new = store.reset().unwrap().public();
     assert_ne!(new, old);
 
     // As the next start sees it.

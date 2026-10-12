@@ -12,6 +12,7 @@
     clippy::cast_possible_truncation
 )]
 
+use kickoff_secret::key::IdentityKey;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -127,13 +128,13 @@ pub async fn bearer_host_with(configure: impl FnOnce(&mut HostOpts)) -> HostNode
 
 /// A persistent identity: its key and its relay-only door.
 pub struct Identity {
-    pub key: Secret<SecretKey>,
+    pub key: IdentityKey,
     pub door: Arc<Door>,
 }
 
 impl Identity {
     pub async fn new() -> Identity {
-        let key = Secret::new(SecretKey::generate());
+        let key = IdentityKey::new(SecretKey::generate());
         let door = Arc::new(kickoff_net::door(&key, &test_relays()).await.unwrap());
         tokio::time::timeout(WAIT, async {
             while door.addr().relay_urls().next().is_none() {
@@ -230,7 +231,7 @@ pub async fn join_with(
     opts: JoinOpts,
 ) -> Result<GuestNode, SessionError> {
     let (adapter, game) = mem_tap();
-    let net = if ticket.expose(|ticket| ticket.cap.invitee.is_none()) {
+    let net = if Ticket::is_bearer(&ticket) {
         relay_session_net(Role::Guest).await
     } else {
         session_net(Role::Guest).await
@@ -253,18 +254,13 @@ pub struct RawGuest {
 }
 
 pub fn copy_cap(ticket: &Secret<Ticket>) -> Cap {
-    ticket.expose(|t| Cap {
-        session_id: t.cap.session_id,
-        invitee: t.cap.invitee,
-        nonce: t.cap.nonce,
-        sig: t.cap.sig,
-    })
+    Ticket::join_cap(ticket)
 }
 
 /// The same ticket a second time, as a leaked or replayed link would carry
 /// it. The copy is made field by field so no secret gains `Clone`.
 pub fn duplicate(ticket: &Secret<Ticket>) -> Secret<Ticket> {
-    let door = ticket.expose(|t| t.door.clone());
+    let door = Ticket::door(ticket);
     Secret::new(Ticket {
         door,
         cap: copy_cap(ticket),
@@ -289,7 +285,7 @@ pub async fn request_join(
 
 impl RawGuest {
     pub async fn join(identity: Identity, ticket: &Secret<Ticket>) -> Result<RawGuest, NetError> {
-        let net = if ticket.expose(|ticket| ticket.cap.invitee.is_none()) {
+        let net = if Ticket::is_bearer(ticket) {
             relay_session_net(Role::Guest).await
         } else {
             session_net(Role::Guest).await
@@ -543,7 +539,7 @@ pub async fn raw_endpoint_with_window(ip: std::net::Ipv4Addr, window: u32) -> ir
 }
 
 pub async fn loopback_host() -> HostNode {
-    let key = Secret::new(SecretKey::generate());
+    let key = IdentityKey::new(SecretKey::generate());
     let door = Arc::new(kickoff_net::door_loopback(&key).await.unwrap());
     host_as(Identity { key, door }, |_| {}).await
 }

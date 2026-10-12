@@ -8,7 +8,7 @@ use std::fmt;
 use iroh_base::EndpointId;
 use kickoff_secret::Secret;
 use kickoff_secret::diag::Report;
-use kickoff_wire::{MAX_TICKET_LEN, MapId};
+use kickoff_wire::{MAX_TICKET_LEN, MapId, TicketTextValue};
 
 use crate::{ChannelRole, IpcError};
 
@@ -17,11 +17,11 @@ use crate::{ChannelRole, IpcError};
 /// encoding's (`kickoff1` plus base32), so it cannot hold a path, a URL, an
 /// option or whitespace (SI-3); the `kickoff://join/` prefix is stripped by
 /// the caller.
-pub struct TicketText(Secret<String>);
+pub struct TicketText(Secret<TicketTextValue>);
 
 impl TicketText {
-    pub fn new(text: Secret<String>) -> Result<TicketText, IpcError> {
-        if text.expose(|t| TicketText::alphabet_ok(t.as_bytes())) {
+    pub fn new(text: Secret<TicketTextValue>) -> Result<TicketText, IpcError> {
+        if cfg!(feature = "mutant-si3-ticket-text-any") || TicketTextValue::is_alphanumeric(&text) {
             Ok(TicketText(text))
         } else {
             Err(IpcError::Malformed)
@@ -37,7 +37,7 @@ impl TicketText {
                 || bytes.iter().all(u8::is_ascii_alphanumeric))
     }
 
-    pub fn secret(&self) -> &Secret<String> {
+    pub fn secret(&self) -> &Secret<TicketTextValue> {
         &self.0
     }
 }
@@ -45,7 +45,11 @@ impl TicketText {
 impl fmt::Debug for TicketText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if cfg!(feature = "mutant-si30-ticket-text-debug") {
-            return self.0.expose(|t| write!(f, "TicketText({t})"));
+            return write!(
+                f,
+                "TicketText({})",
+                String::from_utf8_lossy(&TicketTextValue::transport(&self.0))
+            );
         }
         f.write_str("TicketText(<redacted>)")
     }

@@ -42,6 +42,13 @@ fn process_helper() {
     let Ok(mode) = std::env::var(MODE) else {
         return;
     };
+    if mode == "early-core-policy" {
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Core);
+        assert_eq!(limit.current, Some(1));
+        assert_eq!(limit.maximum, Some(1));
+        emit("early-policy");
+        return;
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -236,11 +243,7 @@ async fn si_7_transferred_socket_keeps_listener_creator_identity() {
     let Reply::Invite(ticket) = reply else {
         panic!("ticket did not reach worker");
     };
-    assert!(
-        ticket
-            .secret()
-            .expose(|ticket| ticket == "kickoff1RANDOMCANARY123")
-    );
+    assert!(ticket.secret().ct_eq(b"kickoff1RANDOMCANARY123"));
 }
 
 #[tokio::test]
@@ -655,4 +658,15 @@ async fn si_10_control_version_refused_before_descriptor_use() {
         "wrong-version control transferred a usable client stream"
     );
     assert!(running.child.wait().unwrap().success());
+}
+
+#[test]
+fn si_30_facade_policy_precedes_arguments_runtime_and_trust() {
+    let result = command("early-core-policy").output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("KIPC early-policy"));
 }

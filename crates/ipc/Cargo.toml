@@ -39,6 +39,7 @@ mutant-si23-ipc-no-rate-limit = []
 mutant-si23-ipc-unbounded-channels = []
 mutant-si30-ticket-text-debug = []
 mutant-si30-facade-core-zero = []
+mutant-si30-late-facade-core = []
 mutant-si30-facade-no-probe = []
 mutant-si30-probe-fd-unchecked = []
 

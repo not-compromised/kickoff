@@ -103,17 +103,12 @@ fn ticket_text(text: &str) {
     let Ok(ticket) = parse_ticket(text) else {
         return;
     };
-    ticket.expose(|ticket| {
-        assert_eq!(
-            ticket.door.ip_addrs().count(),
-            0,
-            "a door has no direct address"
-        );
-        assert!((1..=4).contains(&ticket.door.relay_urls().count()));
-        for url in ticket.door.relay_urls() {
-            assert!(url.to_string().starts_with("https://"));
-        }
-        let again = encode_ticket(ticket).unwrap();
-        again.expose(|again| assert_eq!(again, &text.to_ascii_lowercase()));
-    });
+    let door = kickoff_wire::Ticket::door(&ticket);
+    assert_eq!(door.ip_addrs().count(), 0, "a door has no direct address");
+    assert!((1..=4).contains(&door.relay_urls().count()));
+    for url in door.relay_urls() {
+        assert!(url.to_string().starts_with("https://"));
+    }
+    let again = encode_ticket(&ticket).unwrap();
+    assert!(again.ct_eq(text.to_ascii_lowercase().as_bytes()));
 }

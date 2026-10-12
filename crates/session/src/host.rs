@@ -9,9 +9,9 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use iroh_base::{EndpointId, SecretKey};
+use iroh_base::EndpointId;
 use kickoff_net::{CtlStream, Door, JoinAttempt, Link, NetError, SessionNet};
-use kickoff_secret::Secret;
+use kickoff_secret::{Secret, key::IdentityKey};
 use kickoff_vlan::{Adapter, Lan, LanConfig};
 use kickoff_wire::{
     AdmitPass, Admitted, BoundedVec, GuestMsg, HostMsg, JoinRefused, KickReason, LanDatagram,
@@ -48,7 +48,7 @@ type Farewell = oneshot::Sender<(HostMsg, oneshot::Sender<()>)>;
 
 pub(crate) struct Host {
     door: Arc<Door>,
-    key: Secret<SecretKey>,
+    key: IdentityKey,
     net: SessionNet,
     lan: Lan,
     clock: Clock,
@@ -65,14 +65,14 @@ pub(crate) struct Host {
 
 pub(crate) fn start(
     door: Arc<Door>,
-    door_key: &Secret<SecretKey>,
+    door_key: &IdentityKey,
     net: SessionNet,
     adapter: Adapter,
     opts: HostOpts,
     events: broadcast::Sender<SessionEvent>,
     tasks: &mut JoinSet<()>,
 ) -> Result<Arc<Host>, SessionError> {
-    if door_key.expose(SecretKey::public) != door.id() {
+    if door_key.public() != door.id() {
         return Err(SessionError::WrongKey);
     }
     let lan = kickoff_vlan::open(
@@ -87,7 +87,7 @@ pub(crate) fn start(
     let (roster, _) = watch::channel((0, HostMsg::End));
     let host = Arc::new(Host {
         door,
-        key: door_key.expose(|k| Secret::new(k.clone())),
+        key: door_key.clone(),
         net,
         lan,
         clock: opts.clock,
@@ -316,7 +316,7 @@ impl Host {
         let mut approvals = self.approvals.subscribe();
         let decision = {
             let mut adm = self.admission();
-            let decision = if attempt.request().cap.invitee.is_none()
+            let decision = if attempt.request().cap.invitee().is_none()
                 && !adm.is_trusted(id)
                 && !self.net.is_relay_only()
                 && !cfg!(feature = "mutant-si31-bearer-admit-direct")
@@ -671,10 +671,11 @@ async fn sweep(host: Arc<Host>) {
 #[cfg(test)]
 mod privacy_tests {
     use super::*;
+    use iroh_base::SecretKey;
 
     #[tokio::test]
     async fn si_31_direct_host_refuses_a_bearer_capability_at_admission() {
-        let key = Secret::new(SecretKey::generate());
+        let key = IdentityKey::new(SecretKey::generate());
         let door = Arc::new(kickoff_net::door_loopback(&key).await.unwrap());
         let net = kickoff_net::session(
             &iroh::RelayMap::empty(),
@@ -705,15 +706,10 @@ mod privacy_tests {
             door: door.addr(),
             cap,
         });
-        let guest_key = Secret::new(SecretKey::generate());
+        let guest_key = IdentityKey::new(SecretKey::generate());
         let guest_door = kickoff_net::door_loopback(&guest_key).await.unwrap();
         let request = kickoff_wire::JoinRequest {
-            cap: ticket.expose(|ticket| kickoff_wire::Cap {
-                session_id: ticket.cap.session_id,
-                invitee: ticket.cap.invitee,
-                nonce: ticket.cap.nonce,
-                sig: ticket.cap.sig,
-            }),
+            cap: Ticket::join_cap(&ticket),
             session_key: SecretKey::generate().public(),
             name: kickoff_wire::Name::new("guest").unwrap(),
             platform: kickoff_wire::Platform::Linux,

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use kickoff_ipc::{Channel, Reply, Request, RuntimeDir, Server, TicketText, Trust};
-use kickoff_secret::Secret;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -77,7 +77,7 @@ pub fn other_exe() -> PathBuf {
 }
 
 pub fn canary_ticket(canary: &str) -> TicketText {
-    TicketText::new(Secret::new(canary.to_owned())).unwrap()
+    TicketText::new(kickoff_wire::TicketTextValue::protect(canary.to_owned())).unwrap()
 }
 
 /// What the stand-in daemon saw: the Debug form of each request, which is

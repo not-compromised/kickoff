@@ -5,8 +5,16 @@ diagnostics schema (design §3.4, §6.4, SI-22, SI-30).
 
 - `Secret<T>` implements none of `Debug`, `Display`, `Serialize`, `Clone` or
   `PartialEq`. The value lives in one heap allocation and is wiped on drop.
-  `expose(|v| ...)` is the only read; `ct_eq` is the only comparison and runs
-  in constant time for equal-length inputs.
+  `expose(&owner, |v| ...)` requires the kind's private owner token; unrelated
+  holders use typed owner operations. Rust coherence prevents replacing an
+  existing kind's owner. `ct_eq` compares equal-length inputs in constant time.
+- `SecretBuffer` holds uniquely owned transport bytes, with no `Clone` or
+  formatting implementation. Its slices serve encoders and network writes;
+  drop wipes live bytes and spare capacity, including errors and cancellation.
+- `key::IdentityKey` is a shared handle to one protected key allocation. It
+  provides public identity, signing and binding operations. Binding clears
+  key-observing lookup callbacks and key logging; `KeyEndpoint` deliberately
+  has no raw-key accessor or dereference to iroh's endpoint.
 - `Secret::new` requires `T: Wipe`, so every secret type states how it is
   wiped. Implemented for `String`, `Vec<u8>`, `Box<[u8]>`, `[u8; N]` and
   `iroh_base::SecretKey` (which zeroizes itself; a compile-time check fails
@@ -16,8 +24,10 @@ diagnostics schema (design §3.4, §6.4, SI-22, SI-30).
   ticket cannot enter an export. A report holds at most `MAX_FIELDS` fields.
 
 - `harden_process()` sets `RLIMIT_CORE` to 0 (soft and hard) and clears
-  `PR_SET_DUMPABLE`. kickoffd calls it first in `main` and refuses to start
-  if it fails. Not dumpable means no core dump at all, even through a
+  `PR_SET_DUMPABLE`. kickoffd's worker calls it before its runtime and refuses
+  to start if it fails. The inspectable facade applies its one-byte core limit
+  as its first application action and verifies a genuine exec crash probe
+  before listening. Not dumpable means no core dump at all, even through a
   core-pattern pipe, and no `/proc/<pid>/mem` or `ptrace` access for other
   processes of the same user.
 - `identity` (Linux): `IdentityStore::{open, open_in, load_or_create, reset,
@@ -58,20 +68,12 @@ the same reader as our uid can.
    test. This follows the design: a type that holds a secret writes its own
    redacting `Debug` (see `kickoff_ipc::TicketText`) instead of deriving one
    through a `Secret` that prints `<redacted>`.
-2. **Integration: `Secret::new` needs `T: Wipe`.** The scaffold's
-   `Secret::new` had no bound. Any crate that wraps its own type must
-   implement `kickoff_secret::Wipe` for it. `kickoff-wire` wraps `Ticket`,
-   so it needs, for example:
-   ```rust
-   impl kickoff_secret::Wipe for Ticket {
-       fn wipe(&mut self) {
-           self.cap.session_id.0 = [0; 16];
-           self.cap.nonce.0 = [0; 16];
-           self.cap.sig = iroh_base::Signature::from_bytes(&[0; 64]);
-       }
-   }
-   ```
-   (`zeroize` would make the writes volatile; the drop happens right after.)
+2. **Owned kinds.** `Secret::new` requires `Wipe`; raw exposure additionally
+   requires `OwnedSecret` and that kind's consumer token. Wire keeps its token
+   constructor private and owns capability/ticket operations. The identity
+   adapter keeps raw key access private and confines transport-owned copies.
+   A wiping type may delegate to its nested secret's Drop; this does not
+   promise immediate erasure from calling `Wipe` on a still-live aggregate.
 3. **Moves of inline values.** `Secret::new(value)` moves `value` into the
    box. For a `String` or `Vec` only the pointer moves; for an inline array
    the caller's stack copy is not wiped. Build inline secrets inside the

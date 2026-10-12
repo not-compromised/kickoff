@@ -15,7 +15,7 @@ reconnect, budgets and the pump between the local game's LAN and the links.
 ## Interface
 
 ```rust
-pub async fn host(door: Arc<Door>, door_key: &Secret<SecretKey>, net: SessionNet, adapter: Adapter, opts: HostOpts) -> Result<Session, SessionError>;
+pub async fn host(door: Arc<Door>, door_key: &secret::key::IdentityKey, net: SessionNet, adapter: Adapter, opts: HostOpts) -> Result<Session, SessionError>;
 pub async fn join(door: &Door, net: SessionNet, adapter: Adapter, ticket: Secret<Ticket>, opts: JoinOpts) -> Result<Session, SessionError>;
 impl Session {
     pub fn invite(&self, kind: InviteKind) -> Result<Secret<Ticket>, SessionError>;  // host only
@@ -158,9 +158,11 @@ and open questions.
 1. **`host` and `join` take an `Adapter`, not a `Lan`.** A guest learns its slot
    only from `Admitted`, and the LAN's address is its slot, so the session opens
    the LAN itself with the admitted slot; they cannot disagree.
-2. **`host` takes `Arc<Door>` and `&Secret<SecretKey>`.** The join loop outlives
+2. **`host` takes `Arc<Door>` and `&secret::key::IdentityKey`.** The join loop outlives
    the call, and invites are signed with the door key, which `Door` does not
-   expose. `host` refuses a key that is not the door's.
+   expose. The identity handle shares one protected allocation with the host;
+   iroh copies stay inside the key adapter. `host` refuses a key that is not
+   the door's.
 3. **`join` takes `JoinOpts`** (name, platform, game build). `game_build` is
    sent but not compared; build mismatch handling is M6.
 4. **Interface additions:** `Command::Readmit`, `Session::{slot, members,

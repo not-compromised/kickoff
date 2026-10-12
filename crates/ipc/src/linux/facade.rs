@@ -506,11 +506,15 @@ fn harden_facade() -> Result<(), IpcError> {
     Ok(())
 }
 
-/// Call first in the executable's worker entry point. A facade launches this
-/// genuine exec child with only this marker, null stdio and a private cwd.
-/// The parent uses kernel wait status, never a reported suppression verdict.
-/// No secrets may exist before this function runs.
+/// Call first at normal executable entry, before arguments or runtime setup.
+/// It applies the facade policy before checking the probe marker. The worker
+/// subsequently makes itself nondumpable and lowers both limits to zero.
+/// A facade launches the genuine exec probe with only its marker, null stdio
+/// and a private cwd, and checks kernel wait status. No secrets may exist yet.
 pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
+    if !cfg!(feature = "mutant-si30-late-facade-core") {
+        harden_facade()?;
+    }
     if std::env::var_os(CORE_PROBE_ENV).as_deref() != Some(std::ffi::OsStr::new("1")) {
         return Ok(());
     }

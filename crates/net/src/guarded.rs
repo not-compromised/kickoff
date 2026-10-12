@@ -45,6 +45,31 @@ pub(crate) async fn bind(
     egress: &Egress,
     view: View,
 ) -> Result<(Endpoint, Guarded), NetError> {
+    bind_with(make, |builder| builder.bind(), ip, egress, view).await
+}
+
+pub(crate) async fn bind_key(
+    key: &kickoff_secret::key::IdentityKey,
+    make: impl Fn() -> Builder,
+    ip: Ipv4Addr,
+    egress: &Egress,
+    view: View,
+) -> Result<(kickoff_secret::key::KeyEndpoint, Guarded), NetError> {
+    bind_with(make, |builder| key.bind(builder), ip, egress, view).await
+}
+
+async fn bind_with<E, F, Fut>(
+    make: impl Fn() -> Builder,
+    attach: F,
+    ip: Ipv4Addr,
+    egress: &Egress,
+    view: View,
+) -> Result<(E, Guarded), NetError>
+where
+    E: EndpointAddress + Clone + 'static,
+    F: Fn(Builder) -> Fut,
+    Fut: std::future::Future<Output = Result<E, iroh::endpoint::BindError>>,
+{
     let guard = Arc::new(SendGuard::new(view));
     for _ in 0..BIND_ATTEMPTS {
         let addr = SocketAddr::from((ip, free_port(ip)?));
@@ -62,7 +87,7 @@ pub(crate) async fn bind(
             .bind_addr(addr)
             .map_err(|_| NetError::Bind)?
             .hooks(hooks);
-        if let Ok(ep) = builder.bind().await {
+        if let Ok(ep) = attach(builder).await {
             let task = tokio::spawn(maintain(ep.clone(), Arc::clone(&guard)));
             return Ok((
                 ep,
@@ -87,7 +112,21 @@ fn free_port(ip: Ipv4Addr) -> Result<u16, NetError> {
 /// Re-reads validated paths every `RESCAN`, and the host's addresses, routes
 /// and resolvers whenever they change or QAD reports a new public address.
 /// A loopback bind is the in-process adapter and keeps its view.
-async fn maintain(ep: Endpoint, guard: Arc<SendGuard>) {
+trait EndpointAddress: Send {
+    fn address(&self) -> iroh::EndpointAddr;
+}
+impl EndpointAddress for Endpoint {
+    fn address(&self) -> iroh::EndpointAddr {
+        self.addr()
+    }
+}
+impl EndpointAddress for kickoff_secret::key::KeyEndpoint {
+    fn address(&self) -> iroh::EndpointAddr {
+        self.addr()
+    }
+}
+
+async fn maintain(ep: impl EndpointAddress, guard: Arc<SendGuard>) {
     let bind = guard.view().bind();
     let fixed = bind.ip().is_loopback();
     let monitor = if fixed {
@@ -131,9 +170,9 @@ async fn maintain(ep: Endpoint, guard: Arc<SendGuard>) {
 }
 
 /// The public addresses this endpoint currently advertises (QAD's view).
-fn public_addrs(ep: &Endpoint) -> Vec<Ipv4Addr> {
+fn public_addrs(ep: &impl EndpointAddress) -> Vec<Ipv4Addr> {
     let mut found: Vec<Ipv4Addr> = ep
-        .addr()
+        .address()
         .ip_addrs()
         .filter_map(|sock| match sock {
             SocketAddr::V4(v4) if is_global(*v4.ip()) => Some(*v4.ip()),

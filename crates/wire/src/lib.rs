@@ -33,7 +33,9 @@ pub use msg::{
     frame_len,
 };
 pub use ports::{DENIED_PORTS, denied_port};
-pub use ticket::{Cap, MAX_TICKET_LEN, Nonce, SessionId, Ticket, encode_ticket, parse_ticket};
+pub use ticket::{
+    Cap, MAX_TICKET_LEN, Nonce, SessionId, Ticket, TicketTextValue, encode_ticket, parse_ticket,
+};
 
 use iroh_base::EndpointId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

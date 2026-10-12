@@ -23,7 +23,7 @@ use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 use zeroize::Zeroizing;
 
-use crate::Secret;
+use crate::key::IdentityKey;
 
 const APP_DIR: &str = "kickoff";
 const STATE_DIR: &str = "state";
@@ -295,7 +295,7 @@ impl IdentityStore {
     /// The identity key, created on first use. An existing file must be a
     /// regular file we own with mode 0600 holding exactly one key; anything
     /// else is refused and left alone.
-    pub fn load_or_create(&self) -> Result<Secret<SecretKey>, StoreError> {
+    pub fn load_or_create(&self) -> Result<IdentityKey, StoreError> {
         let _transaction = self.transaction()?;
         match self.read(IDENTITY, IDENTITY_LEN)? {
             Some(bytes) => match decode_identity(&bytes) {
@@ -314,10 +314,10 @@ impl IdentityStore {
     /// so whoever holds the old key is no longer trusted here; then the new
     /// key replaces the old one. A crash in between leaves the old key with
     /// its trust revoked, which fails closed.
-    pub fn reset(&self) -> Result<Secret<SecretKey>, StoreError> {
+    pub fn reset(&self) -> Result<IdentityKey, StoreError> {
         let _transaction = self.transaction()?;
         if let Some(bytes) = self.read(IDENTITY, IDENTITY_LEN)? {
-            let old = decode_identity(&bytes)?.expose(SecretKey::public);
+            let old = decode_identity(&bytes)?.public();
             let mut trust = self.read_trust()?;
             if !cfg!(feature = "mutant-si22-reset-keeps-trust") {
                 trust.revoke(old)?;
@@ -378,7 +378,7 @@ impl IdentityStore {
         })
     }
 
-    fn create_identity(&self) -> Result<Secret<SecretKey>, StoreError> {
+    fn create_identity(&self) -> Result<IdentityKey, StoreError> {
         let key = new_key()?;
         self.publish(
             IDENTITY,
@@ -563,25 +563,25 @@ fn strip_header(bytes: &[u8], magic: [u8; 4]) -> Result<&[u8], StoreError> {
     }
 }
 
-fn new_key() -> Result<Secret<SecretKey>, StoreError> {
+fn new_key() -> Result<IdentityKey, StoreError> {
     let mut seed = Zeroizing::new([0u8; KEY_LEN]);
     getrandom::fill(seed.as_mut_slice()).map_err(|_| StoreError::Io(std::io::ErrorKind::Other))?;
-    Ok(Secret::new(SecretKey::from_bytes(&seed)))
+    Ok(IdentityKey::new(SecretKey::from_bytes(&seed)))
 }
 
-fn encode_identity(key: &Secret<SecretKey>) -> Zeroizing<Vec<u8>> {
+fn encode_identity(key: &IdentityKey) -> Zeroizing<Vec<u8>> {
     let mut out = Zeroizing::new(Vec::with_capacity(IDENTITY_LEN));
     out.extend_from_slice(&header(IDENTITY_MAGIC));
-    let raw = Zeroizing::new(key.expose(SecretKey::to_bytes));
+    let raw = key.persisted_bytes();
     out.extend_from_slice(raw.as_slice());
     out
 }
 
-fn decode_identity(bytes: &[u8]) -> Result<Secret<SecretKey>, StoreError> {
+fn decode_identity(bytes: &[u8]) -> Result<IdentityKey, StoreError> {
     let body = strip_header(bytes, IDENTITY_MAGIC)?;
     let raw: Zeroizing<[u8; KEY_LEN]> =
         Zeroizing::new(body.try_into().map_err(|_| StoreError::Damaged)?);
-    Ok(Secret::new(SecretKey::from_bytes(&raw)))
+    Ok(IdentityKey::new(SecretKey::from_bytes(&raw)))
 }
 
 #[cfg(test)]
@@ -603,19 +603,13 @@ mod tests {
         let second = IdentityStore::open_in(&base).unwrap();
         let barriers = Arc::new((Barrier::new(2), Barrier::new(2)));
         first.before_publish = Some(Arc::clone(&barriers));
-        let creator = std::thread::spawn(move || {
-            first
-                .load_or_create()
-                .map(|key| key.expose(SecretKey::public))
-        });
+        let creator = std::thread::spawn(move || first.load_or_create().map(|key| key.public()));
         barriers.0.wait();
         let (started_tx, started_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let contender = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            let result = second
-                .load_or_create()
-                .map(|key| key.expose(SecretKey::public));
+            let result = second.load_or_create().map(|key| key.public());
             done_tx.send(result).unwrap();
         });
         started_rx.recv().unwrap();
@@ -627,7 +621,7 @@ mod tests {
         let on_disk = IdentityStore::open_in(&base)
             .unwrap()
             .load_or_create()
-            .map(|key| key.expose(SecretKey::public));
+            .map(|key| key.public());
         std::fs::remove_dir_all(base).unwrap();
         assert!(
             early.is_none(),
@@ -675,10 +669,7 @@ mod tests {
         let key = new_key().unwrap();
         let bytes = encode_identity(&key);
         let back = decode_identity(&bytes).unwrap();
-        assert_eq!(
-            back.expose(SecretKey::public),
-            key.expose(SecretKey::public)
-        );
+        assert_eq!(back.public(), key.public());
         for cut in 0..bytes.len() {
             assert!(decode_identity(&bytes[..cut]).is_err());
         }

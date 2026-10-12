@@ -18,7 +18,6 @@ use kickoff_ipc::role::{Cli, UiMain};
 use kickoff_ipc::{
     CliCommand, InviteFor, IpcError, Reply, Request, Server, TicketText, UiCommand, connect,
 };
-use kickoff_secret::Secret;
 
 const CANARY: &str = "kickoff1CANARYQ7XZ3T2WVB";
 
@@ -79,7 +78,7 @@ fn si_30_every_ipc_type_holding_a_ticket_redacts_it() {
 #[test]
 fn si_30_rejected_ticket_error_is_silent() {
     let bad = format!("{CANARY}/../x");
-    let err = TicketText::new(Secret::new(bad)).unwrap_err();
+    let err = TicketText::new(kickoff_wire::TicketTextValue::protect(bad)).unwrap_err();
     assert_quiet("IpcError", format!("{err} {err:?}"));
 }
 

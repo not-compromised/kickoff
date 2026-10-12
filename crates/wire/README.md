@@ -15,7 +15,7 @@ bytes it came from. No error carries input bytes (SI-30).
 |---|---|
 | LAN datagrams | `LanHeader`, `FragmentHeader`, `decode_datagram(link_slot, bytes) -> Inbound`, `encode_datagram(d, frag_id, max) -> Vec<Bytes>` |
 | Messages | `JoinRequest`, `JoinReply`, `GuestMsg`, `HostMsg`; `encode`, `decode`, `encode_framed`, `frame_len` |
-| Tickets | `Ticket`, `Cap`, `parse_ticket -> Secret<Ticket>`, `encode_ticket -> Secret<String>` |
+| Tickets | `Ticket`, `Cap`, `parse_ticket -> Secret<Ticket>`, `encode_ticket -> Secret<TicketTextValue>` |
 | Invites | `Invites::new`, `issue(key, invitee, now) -> Cap`, `redeem(cap, requester, now) -> Redeemed` |
 
 ## Invariants held here
@@ -54,10 +54,10 @@ same properties the fuzzer does.
 - **The door's relays are not signed.** The capability signature covers the
   session id, invitee, nonce and door identity. §4.2 relies on TLS pinning the
   door, so an edited relay can only break the dial.
-- **`Cap` outside `Secret`.** `Invites::issue` returns a bare `Cap`, and a
-  decoded `JoinRequest` holds one. Neither implements `Debug`, `Clone` or
-  `Serialize`. `session` wraps the `Cap` in a `Secret<Ticket>` before it
-  leaves.
+- **Capability ownership.** `Invites::issue` and decoded `JoinRequest` values
+  carry an opaque `Cap` whose private fields live in `Secret<CapValue>`.
+  It implements no `Debug`, `Clone` or `Serialize`. The enclosing ticket is
+  a `Secret<Ticket>`; wire alone can expose its stored fields.
 - **`Version`.** An unknown top-level variant, or a ticket version above 1,
   returns `WireError::Version` so the caller can close with `VERSION` (§4.5).
   An unknown nested variant, such as a new `GameState`, is `Malformed`.
@@ -71,3 +71,11 @@ same properties the fuzzer does.
   the workspace's. `scripts/check.sh` does not build it. Adding
   `cargo check --manifest-path crates/wire/fuzz/Cargo.toml --locked` there would
   keep it from rotting.
+
+Stored tickets and capabilities expose no raw fields to another consuming
+crate. Wire's private owner token permits its fixed encode, parse, invitation
+kind and protected join-copy operations. Message encoders return uniquely
+owned wiping `SecretBuffer` transit bytes. Serialization deliberately supplies
+slices to transport callers; this is separate from stored-kind raw exposure.
+Ticket, base32, canonical, join body and frame allocations wipe on success,
+error and cancellation.

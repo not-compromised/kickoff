@@ -12,7 +12,7 @@ use kickoff_net::{CtlStream, Door, Link, NetError, SessionNet};
 use kickoff_secret::Secret;
 use kickoff_vlan::{Adapter, Lan, LanConfig};
 use kickoff_wire::{
-    Admitted, Cap, GuestMsg, HostMsg, JoinRequest, LanDatagram, Member, PeerSlot, Ticket,
+    Admitted, GuestMsg, HostMsg, JoinRequest, LanDatagram, Member, PeerSlot, Ticket,
 };
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio::task::JoinSet;
@@ -61,12 +61,12 @@ pub(crate) async fn start(
     events: broadcast::Sender<SessionEvent>,
     tasks: &mut JoinSet<()>,
 ) -> Result<Guest, SessionError> {
-    let bearer = ticket.expose(|ticket| ticket.cap.invitee.is_none());
+    let bearer = Ticket::is_bearer(&ticket);
     if bearer && !net.is_relay_only() && !cfg!(feature = "mutant-si31-bearer-guest-direct") {
         return Err(SessionError::RequiresRelay);
     }
     let request = JoinRequest {
-        cap: ticket.expose(|t| copy_cap(&t.cap)),
+        cap: Ticket::join_cap(&ticket),
         session_key: net.id(),
         name: opts.name,
         platform: opts.platform,
@@ -134,17 +134,6 @@ impl Guest {
         let mut ended = self.ended.clone();
         let _ = tokio::time::timeout(LEAVE_WAIT, ended.wait_for(|ended| *ended)).await;
         Ok(())
-    }
-}
-
-/// The capability travels in the request; the ticket around it stays secret
-/// and is dropped (wiped) once the join is answered.
-fn copy_cap(cap: &Cap) -> Cap {
-    Cap {
-        session_id: cap.session_id,
-        invitee: cap.invitee,
-        nonce: cap.nonce,
-        sig: cap.sig,
     }
 }
 
@@ -308,10 +297,11 @@ async fn reconnect(
 #[cfg(test)]
 mod privacy_tests {
     use super::*;
+    use kickoff_secret::key::IdentityKey;
 
     #[tokio::test]
     async fn si_31_bearer_guest_refuses_a_host_advertising_ip_addresses() {
-        let host_key = Secret::new(iroh_base::SecretKey::generate());
+        let host_key = IdentityKey::new(iroh_base::SecretKey::generate());
         let host_door = Arc::new(kickoff_net::door_loopback(&host_key).await.unwrap());
         let mut invites = kickoff_wire::Invites::new(&host_key).unwrap();
         let cap = invites
@@ -337,7 +327,7 @@ mod privacy_tests {
             };
             let _ = attempt.answer(Ok(admitted)).await;
         });
-        let key = Secret::new(iroh_base::SecretKey::generate());
+        let key = IdentityKey::new(iroh_base::SecretKey::generate());
         let door = kickoff_net::door_loopback(&key).await.unwrap();
         let relays = iroh::RelayMap::from("https://127.0.0.1:9".parse::<iroh::RelayUrl>().unwrap());
         let net = kickoff_net::session(

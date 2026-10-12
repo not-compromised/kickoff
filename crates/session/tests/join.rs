@@ -249,7 +249,7 @@ async fn si_20_ticket_from_a_previous_host_session_refused() {
     let (key, door) = (identity.key, identity.door);
     let first = host_as(
         Identity {
-            key: key.expose(|k| kickoff_secret::Secret::new(k.clone())),
+            key: key.clone(),
             door: std::sync::Arc::clone(&door),
         },
         |_| {},

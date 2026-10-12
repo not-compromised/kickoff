@@ -24,6 +24,8 @@ mutant-si23-no-message-cap = []
 mutant-si23-no-frame-cap = []
 mutant-si29-door-with-ip = []
 mutant-si30-cap-debug = []
+mutant-si30-open-owner = []
+mutant-si30-cap-repr-no-wipe = []
 
 [dependencies]
 iroh-base.workspace = true
@@ -34,6 +36,7 @@ serde = { workspace = true, features = ["derive", "std"] }
 postcard.workspace = true
 data-encoding.workspace = true
 getrandom.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -3,12 +3,12 @@
 //! or a trailing byte is `Malformed`, never a best guess.
 
 use iroh_base::EndpointId;
-use kickoff_secret::Secret;
+
 use kickoff_secret::diag::{
     Component, Counter, Field, Flag, MAX_FIELDS, PathKind, PathRole, Report, StateKey, StateValue,
     Version,
 };
-use kickoff_wire::{MAX_TICKET_LEN, MapId};
+use kickoff_wire::{MAX_TICKET_LEN, MapId, TicketTextValue};
 use zeroize::Zeroizing;
 
 use crate::command::{ApprovalId, InviteFor, Op, Refusal, Reply, TicketText};
@@ -259,12 +259,11 @@ pub(crate) fn decode_reply(bytes: &[u8]) -> Result<Reply, IpcError> {
 }
 
 fn put_ticket(out: &mut Vec<u8>, ticket: &TicketText) -> Result<(), IpcError> {
-    ticket.secret().expose(|text| {
-        let len = u16::try_from(text.len()).map_err(|_| IpcError::Malformed)?;
-        out.extend_from_slice(&len.to_be_bytes());
-        out.extend_from_slice(text.as_bytes());
-        Ok(())
-    })
+    let text = TicketTextValue::transport(ticket.secret());
+    let len = u16::try_from(text.len()).map_err(|_| IpcError::Malformed)?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&text);
+    Ok(())
 }
 
 fn get_ticket(r: &mut Reader<'_>) -> Result<TicketText, IpcError> {
@@ -279,7 +278,7 @@ fn get_ticket(r: &mut Reader<'_>) -> Result<TicketText, IpcError> {
         return Err(IpcError::Malformed);
     }
     let text = std::str::from_utf8(bytes).map_err(|_| IpcError::Malformed)?;
-    TicketText::new(Secret::new(text.to_owned()))
+    TicketText::new(kickoff_wire::TicketTextValue::protect(text.to_owned()))
 }
 
 /// Only 0 and 1: a second spelling of a boolean is a malformed message.
@@ -399,7 +398,7 @@ mod tests {
     use super::*;
 
     fn ticket(text: &str) -> TicketText {
-        TicketText::new(Secret::new(text.to_owned())).unwrap()
+        TicketText::new(kickoff_wire::TicketTextValue::protect(text.to_owned())).unwrap()
     }
 
     fn id(seed: u8) -> EndpointId {
@@ -431,7 +430,7 @@ mod tests {
 
     fn same_op(a: &Op, b: &Op) -> bool {
         match (a, b) {
-            (Op::Join(x), Op::Join(y)) => y.secret().expose(|y| x.secret().ct_eq(y.as_bytes())),
+            (Op::Join(x), Op::Join(y)) => x.secret().ct_eq(&TicketTextValue::transport(y.secret())),
             _ => format!("{a:?}") == format!("{b:?}"),
         }
     }

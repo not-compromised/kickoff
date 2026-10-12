@@ -91,7 +91,7 @@ commands in the binary return `Refused(Failed)` until final adapters exist.
   draft 2's `Approve(EndpointId)` is gone and its tag retired. Replies: `Done`,
   `Refused(Refusal)`, `Invite(TicketText)` (never to the overlay),
   `Report(diag::Report)`.
-- `TicketText` is a `Secret<String>` restricted to 1..=2048 ASCII letters
+- `TicketText` is a `Secret<wire::TicketTextValue>` restricted to 1..=2048 ASCII letters
   and digits.
 
 ## Invariants and their tests

@@ -1643,10 +1643,12 @@ name = "kickoff-secret"
 version = "0.0.0"
 dependencies = [
  "getrandom 0.4.3",
+ "iroh",
  "iroh-base",
  "rustix",
  "serde",
  "subtle",
+ "tokio",
  "zeroize",
 ]
 
@@ -1704,6 +1706,7 @@ dependencies = [
  "serde",
  "serde-reflection",
  "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]

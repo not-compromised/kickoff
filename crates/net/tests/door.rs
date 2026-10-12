@@ -4,6 +4,7 @@
 
 mod common;
 
+use kickoff_secret::key::IdentityKey;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -24,7 +25,7 @@ const HANDSHAKE_SPACING: Duration = Duration::from_millis(150);
 const PROTOCOL: u32 = 6;
 
 async fn door() -> Door {
-    door_loopback(&Secret::new(SecretKey::generate()))
+    door_loopback(&IdentityKey::new(SecretKey::generate()))
         .await
         .unwrap()
 }
@@ -33,23 +34,23 @@ fn ticket(to: EndpointAddr, invitee: Option<iroh::EndpointId>) -> Secret<Ticket>
     let signer = SecretKey::generate();
     Secret::new(Ticket {
         door: to,
-        cap: Cap {
-            session_id: SessionId([1; 16]),
+        cap: Cap::new(
+            SessionId([1; 16]),
             invitee,
-            nonce: Nonce([2; 16]),
-            sig: signer.sign(b"fixture"),
-        },
+            Nonce([2; 16]),
+            signer.sign(b"fixture"),
+        ),
     })
 }
 
 fn request(session_key: iroh::EndpointId) -> JoinRequest {
     JoinRequest {
-        cap: Cap {
-            session_id: SessionId([1; 16]),
-            invitee: None,
-            nonce: Nonce([2; 16]),
-            sig: SecretKey::generate().sign(b"fixture"),
-        },
+        cap: Cap::new(
+            SessionId([1; 16]),
+            None,
+            Nonce([2; 16]),
+            SecretKey::generate().sign(b"fixture"),
+        ),
         session_key,
         name: Name::new("guest").unwrap(),
         platform: Platform::Linux,

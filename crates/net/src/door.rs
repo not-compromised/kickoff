@@ -9,8 +9,9 @@ use iroh::endpoint::{
     Builder, ConnectError, ConnectingError, Connection, ConnectionError, Incoming, RecvStream,
     SendStream, TransportErrorCode, presets,
 };
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode};
 use kickoff_secret::Secret;
+use kickoff_secret::key::{IdentityKey, KeyEndpoint};
 use kickoff_wire::{Admitted, JoinRefused, JoinReply, JoinRequest, Ticket};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
@@ -44,18 +45,17 @@ const ANSWER_LINGER: Duration = Duration::from_secs(5);
 
 /// Relay-only, persistent identity. Runs only while hosting or while "friends
 /// may join" is on. It has no IP transport, so it owns no UDP socket.
-pub async fn door(
-    id: &Secret<SecretKey>,
-    relays: impl Into<crate::Relays>,
-) -> Result<Door, NetError> {
+pub async fn door(id: &IdentityKey, relays: impl Into<crate::Relays>) -> Result<Door, NetError> {
     let policy = relays.into();
     let relays = &policy.map;
     let egress = Egress::new(relays.clone(), None);
-    let ep = Door::builder(id)
-        .ca_tls_config(policy.tls)
-        .relay_mode(RelayMode::Custom(relays.clone()))
-        .hooks(EgressGuard::new(egress.clone()))
-        .bind()
+    let ep = id
+        .bind(
+            Door::builder(id)
+                .ca_tls_config(policy.tls)
+                .relay_mode(RelayMode::Custom(relays.clone()))
+                .hooks(EgressGuard::new(egress.clone())),
+        )
         .await
         .map_err(|_| NetError::Bind)?;
     Ok(Door::serve(ep, egress, None))
@@ -63,17 +63,17 @@ pub async fn door(
 
 /// The in-process adapter (design §2.3): the same door on 127.0.0.1 with no
 /// relay, for tests and for nothing that leaves this host.
-pub async fn door_loopback(id: &Secret<SecretKey>) -> Result<Door, NetError> {
+pub async fn door_loopback(id: &IdentityKey) -> Result<Door, NetError> {
     let bind = IfaceAddr::loopback();
     let egress = Egress::new(RelayMap::empty(), Some(bind));
     let view = View::current(bind, &[]).await;
     let make = || Door::builder(id).relay_mode(RelayMode::Disabled);
-    let (ep, guarded) = guarded::bind(make, bind.ip(), &egress, view).await?;
+    let (ep, guarded) = guarded::bind_key(id, make, bind.ip(), &egress, view).await?;
     Ok(Door::serve(ep, egress, Some(guarded)))
 }
 
 pub struct Door {
-    ep: Endpoint,
+    ep: KeyEndpoint,
     egress: Egress,
     queues: tokio::sync::Mutex<Queues>,
     priority: Arc<ArcSwap<HashSet<EndpointId>>>,
@@ -88,15 +88,14 @@ struct Queues {
 }
 
 impl Door {
-    fn builder(id: &Secret<SecretKey>) -> Builder {
+    fn builder(_id: &IdentityKey) -> Builder {
         Endpoint::builder(presets::Minimal)
             .clear_ip_transports()
-            .secret_key(id.expose(SecretKey::clone))
             .alpns(vec![JOIN_ALPN.to_vec()])
             .transport_config(transport(1, false))
     }
 
-    fn serve(ep: Endpoint, egress: Egress, guarded: Option<Guarded>) -> Door {
+    fn serve(ep: KeyEndpoint, egress: Egress, guarded: Option<Guarded>) -> Door {
         let (priority_tx, priority) = mpsc::channel(PRIORITY_QUEUE);
         let (general_tx, general) = mpsc::channel(GENERAL_QUEUE);
         let priority_ids = Arc::new(ArcSwap::from_pointee(HashSet::new()));
@@ -160,7 +159,7 @@ impl Door {
         ticket: &Secret<Ticket>,
         request: JoinRequest,
     ) -> Result<Admitted, NetError> {
-        let addr = ticket.expose(|t| self.egress.scope(&t.door))?;
+        let addr = self.egress.scope(&Ticket::door(ticket))?;
         let conn = match tokio::time::timeout(CONNECT_DEADLINE, self.ep.connect(addr, JOIN_ALPN))
             .await
         {
@@ -303,7 +302,7 @@ struct Acceptor {
 }
 
 impl Acceptor {
-    async fn run(self, ep: Endpoint) {
+    async fn run(self, ep: KeyEndpoint) {
         let this = Arc::new(self);
         while let Some(incoming) = ep.accept().await {
             let Some((incoming, pending)) = this.gate.admit(incoming) else {
@@ -469,6 +468,7 @@ impl InvalidLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iroh::SecretKey;
 
     fn id(n: u8) -> EndpointId {
         SecretKey::from_bytes(&[n; 32]).public()
@@ -554,16 +554,16 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn si_23_door_overflow_closes_without_retaining_reply_tasks() {
-        let host = door_loopback(&Secret::new(SecretKey::generate()))
+        let host = door_loopback(&IdentityKey::new(SecretKey::generate()))
             .await
             .unwrap();
         let request = JoinRequest {
-            cap: kickoff_wire::Cap {
-                session_id: kickoff_wire::SessionId([0; 16]),
-                invitee: None,
-                nonce: kickoff_wire::Nonce([0; 16]),
-                sig: SecretKey::generate().sign(b"fixture"),
-            },
+            cap: kickoff_wire::Cap::new(
+                kickoff_wire::SessionId([0; 16]),
+                None,
+                kickoff_wire::Nonce([0; 16]),
+                SecretKey::generate().sign(b"fixture"),
+            ),
             session_key: SecretKey::generate().public(),
             name: kickoff_wire::Name::new("raw").unwrap(),
             platform: kickoff_wire::Platform::Linux,

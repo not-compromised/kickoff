@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use common::*;
 use kickoff_ipc::{CliCommand, InviteFor, OverlayCommand, Reply, Server, TicketText, UiCommand};
-use kickoff_secret::Secret;
+
 use tokio::io::AsyncWriteExt;
 
 /// What a command argument can be. Everything here is either fixed-size
@@ -70,7 +70,7 @@ fn reply_args(r: &Reply) -> Vec<Arg> {
 }
 
 fn ticket(text: &str) -> TicketText {
-    TicketText::new(Secret::new(text.to_owned())).unwrap()
+    TicketText::new(kickoff_wire::TicketTextValue::protect(text.to_owned())).unwrap()
 }
 
 fn id() -> iroh_base::EndpointId {
@@ -141,13 +141,18 @@ fn si_3_ticket_text_cannot_hold_path_url_or_option() {
         "",
     ] {
         assert!(
-            TicketText::new(Secret::new(hostile.to_owned())).is_err(),
+            TicketText::new(kickoff_wire::TicketTextValue::protect(hostile.to_owned())).is_err(),
             "{hostile:?}"
         );
     }
     let longest = "A".repeat(kickoff_wire::MAX_TICKET_LEN);
-    assert!(TicketText::new(Secret::new(longest.clone())).is_ok());
-    assert!(TicketText::new(Secret::new(format!("{longest}A"))).is_err());
+    assert!(TicketText::new(kickoff_wire::TicketTextValue::protect(longest.clone())).is_ok());
+    assert!(
+        TicketText::new(kickoff_wire::TicketTextValue::protect(format!(
+            "{longest}A"
+        )))
+        .is_err()
+    );
 }
 
 /// The same rule holds on the socket: a `Join` frame whose ticket is a path

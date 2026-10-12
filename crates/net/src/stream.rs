@@ -3,6 +3,7 @@
 //! allocated. Callers bound the whole exchange with a deadline.
 
 use iroh::endpoint::{RecvStream, SendStream};
+use kickoff_secret::SecretBuffer;
 use kickoff_wire::{LEN_PREFIX_LEN, WireError, WireMessage, decode, encode_framed, frame_len};
 
 use crate::NetError;
@@ -13,7 +14,7 @@ pub(crate) async fn read_message<M: WireMessage>(recv: &mut RecvStream) -> Resul
         .await
         .map_err(|_| NetError::Closed)?;
     let len = frame_len::<M>(prefix).map_err(wire)?;
-    let mut body = vec![0u8; len];
+    let mut body = SecretBuffer::zeroed(len);
     recv.read_exact(&mut body)
         .await
         .map_err(|_| NetError::Closed)?;

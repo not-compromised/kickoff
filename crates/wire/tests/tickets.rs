@@ -7,6 +7,7 @@
 
 mod harness;
 
+use kickoff_secret::key::IdentityKey;
 use std::fmt::{Debug, Display};
 use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
@@ -41,8 +42,8 @@ macro_rules! implements {
     }};
 }
 
-fn key(n: u8) -> Secret<SecretKey> {
-    Secret::new(SecretKey::from_bytes(&[n; 32]))
+fn key(n: u8) -> IdentityKey {
+    IdentityKey::new(SecretKey::from_bytes(&[n; 32]))
 }
 
 fn id(n: u8) -> EndpointId {
@@ -53,30 +54,29 @@ fn relay() -> RelayUrl {
     "https://use1-1.relay.n0.iroh.link./".parse().unwrap()
 }
 
-fn door(key: &Secret<SecretKey>) -> EndpointAddr {
-    EndpointAddr::new(key.expose(SecretKey::public)).with_relay_url(relay())
+fn door(key: &IdentityKey) -> EndpointAddr {
+    EndpointAddr::new(key.public()).with_relay_url(relay())
 }
 
 fn copy(cap: &Cap) -> Cap {
-    Cap {
-        session_id: cap.session_id,
-        invitee: cap.invitee,
-        nonce: cap.nonce,
-        sig: cap.sig,
-    }
+    cap.copy_for_join()
 }
 
-fn ticket_text(door_key: &Secret<SecretKey>, cap: &Cap) -> String {
+fn ticket_text(door_key: &IdentityKey, cap: &Cap) -> String {
     let ticket = Ticket {
         door: door(door_key),
         cap: copy(cap),
     };
-    encode_ticket(&ticket).unwrap().expose(String::clone)
+    String::from_utf8(
+        kickoff_wire::TicketTextValue::transport(&encode_ticket(&Secret::new(ticket)).unwrap())
+            .to_vec(),
+    )
+    .unwrap()
 }
 
 /// What a guest's join request carries after the ticket went through text.
 fn cap_from_text(text: &str) -> Cap {
-    parse_ticket(text).unwrap().expose(|t| copy(&t.cap))
+    Ticket::join_cap(&parse_ticket(text).unwrap())
 }
 
 #[test]
@@ -90,13 +90,12 @@ fn ticket_round_trips_through_text() {
         assert!(text.starts_with("kickoff1"));
         assert!(text.len() <= MAX_TICKET_LEN);
         let parsed = parse_ticket(&text).unwrap();
-        parsed.expose(|t| {
-            assert_eq!(t.door, door(&door_key));
-            assert!(t.cap.session_id == cap.session_id);
-            assert_eq!(t.cap.invitee, invitee);
-            assert!(t.cap.nonce == cap.nonce);
-            assert_eq!(t.cap.sig, cap.sig);
-        });
+        assert_eq!(Ticket::door(&parsed), door(&door_key));
+        assert_eq!(Ticket::join_cap(&parsed).invitee(), invitee);
+        assert_eq!(
+            kickoff_wire::TicketTextValue::transport(&encode_ticket(&parsed).unwrap()).as_ref(),
+            text.as_bytes()
+        );
         let requester = invitee.unwrap_or(id(9));
         assert!(invites.redeem(&cap_from_text(&text), requester, t0).is_ok());
     }
@@ -168,7 +167,7 @@ fn si_29_ticket_cannot_carry_direct_address() {
             door: door(&door_key).with_ip_addr(ip.parse().unwrap()),
             cap: copy(&cap),
         };
-        assert!(encode_ticket(&ticket).is_err(), "{ip}");
+        assert!(encode_ticket(&Secret::new(ticket)).is_err(), "{ip}");
     }
 
     // Refused when parsed: splice an address list (one IPv4 loopback entry,
@@ -195,11 +194,10 @@ fn si_29_ticket_cannot_carry_direct_address() {
     // check.
     for url in ["http://relay.example./", "file:///etc/passwd"] {
         let ticket = Ticket {
-            door: EndpointAddr::new(door_key.expose(SecretKey::public))
-                .with_relay_url(url.parse().unwrap()),
+            door: EndpointAddr::new(door_key.public()).with_relay_url(url.parse().unwrap()),
             cap: copy(&cap),
         };
-        assert!(encode_ticket(&ticket).is_err(), "{url}");
+        assert!(encode_ticket(&Secret::new(ticket)).is_err(), "{url}");
     }
 }
 
@@ -360,7 +358,7 @@ fn bound_invite_refuses_other_identities_and_stays_valid() {
     let mut invites = Invites::new(&door_key).unwrap();
     let t0 = Instant::now();
     let cap = invites.issue(&door_key, Some(id(2)), t0).unwrap();
-    for stranger in [id(3), id(4), door_key.expose(SecretKey::public)] {
+    for stranger in [id(3), id(4), door_key.public()] {
         assert_eq!(
             invites.redeem(&cap, stranger, t0),
             Err(JoinRefused::InvalidCap)
@@ -420,18 +418,29 @@ proptest! {
         let requester = invitee.unwrap_or(id(3));
         let cap = invites.issue(&door_key, invitee, t0).unwrap();
 
-        let mut forged = copy(&cap);
+        let request = JoinRequest {
+            cap: cap.copy_for_join(), session_key: requester,
+            name: kickoff_wire::Name::new("guest").unwrap(),
+            platform: kickoff_wire::Platform::Linux,
+            game_build: kickoff_wire::BuildId::new("fixture").unwrap(),
+            kickoff_version: kickoff_wire::KickoffVersion { major: 0, minor: 0, patch: 0 },
+        };
+        #[derive(serde::Deserialize)]
+        struct Fields { session_id: [u8; 16], invitee: Option<EndpointId>, nonce: [u8; 16], sig: Signature }
+        let bytes = kickoff_wire::encode(&request).unwrap();
+        let (mut forged, _) = postcard::take_from_bytes::<Fields>(&bytes).unwrap();
         match field {
-            0 => forged.session_id.0[bit % 128 / 8] ^= 1 << (bit % 8),
-            1 => forged.nonce.0[bit % 128 / 8] ^= 1 << (bit % 8),
+            0 => forged.session_id[bit % 128 / 8] ^= 1 << (bit % 8),
+            1 => forged.nonce[bit % 128 / 8] ^= 1 << (bit % 8),
             2 => {
-                let mut sig = cap.sig.to_bytes();
+                let mut sig = forged.sig.to_bytes();
                 sig[bit / 8] ^= 1 << (bit % 8);
                 forged.sig = Signature::from_bytes(&sig);
             }
             3 => forged.invitee = if bound { None } else { Some(requester) },
             _ => forged.invitee = Some(id(4 + u8::from(bound))),
         }
+        let forged = Cap::new(SessionId(forged.session_id), forged.invitee, Nonce(forged.nonce), forged.sig);
         prop_assert!(invites.redeem(&forged, requester, t0).is_err());
         if field == 4 {
             prop_assert!(invites.redeem(&forged, id(4 + u8::from(bound)), t0).is_err());

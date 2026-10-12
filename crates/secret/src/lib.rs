@@ -1,10 +1,13 @@
 //! Secrets that cannot leave the process through formatting or serialization,
 //! and the diagnostics schema that replaces free-form logs (design §6.4, SI-30).
 
+mod buffer;
+pub use buffer::SecretBuffer;
 pub mod diag;
 mod harden;
 #[cfg(target_os = "linux")]
 pub mod identity;
+pub mod key;
 
 pub use harden::{HardenError, harden_process};
 
@@ -17,7 +20,7 @@ use zeroize::Zeroize;
 /// diagnostics export, a second owner or a short-circuiting comparison by
 /// accident. `si_30_secret_has_no_debug_display_serialize` fails if any is
 /// added. A type that wants to carry a secret on a channel writes its own
-/// encoder around `expose`; nothing derives one.
+/// encoder in its designated owner; nothing derives one.
 ///
 /// The value lives in one heap allocation for its whole life, so moving the
 /// `Secret` moves a pointer and leaves no stale copy behind; drop wipes it.
@@ -39,9 +42,16 @@ impl<T> Secret<T> {
         }
     }
 
-    /// The only way to read the value. A closure keeps the borrow scoped to the
-    /// single consumer that needs it.
-    pub fn expose<R>(&self, use_it: impl FnOnce(&T) -> R) -> R {
+    /// Raw access requires the secret kind's owning module's private token.
+    /// Holders outside that owner use its typed operations instead.
+    pub fn expose<R>(&self, _owner: &T::Consumer, use_it: impl FnOnce(&T) -> R) -> R
+    where
+        T: OwnedSecret,
+    {
+        use_it(&self.value)
+    }
+
+    pub(crate) fn read<R>(&self, use_it: impl FnOnce(&T) -> R) -> R {
         use_it(&self.value)
     }
 }
@@ -79,6 +89,13 @@ impl<T> std::fmt::Debug for Secret<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Secret(<redacted>)")
     }
+}
+
+/// Assigns a secret kind to its owning module. The consumer type must have a
+/// private constructor; unrelated crates cannot implement this trait again for
+/// an existing kind (Rust's coherence rules), or manufacture its consumer.
+pub trait OwnedSecret: Wipe {
+    type Consumer;
 }
 
 /// Overwrites a secret's bytes in place. `Secret::new` requires it, so every

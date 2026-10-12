@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use iroh_base::{EndpointId, SecretKey};
-use kickoff_secret::Secret;
+use iroh_base::EndpointId;
+use kickoff_secret::key::IdentityKey;
 
 use crate::{Cap, JoinRefused, Nonce, SessionId};
 
@@ -57,9 +57,9 @@ fn random<const N: usize>() -> Result<[u8; N], InviteError> {
 }
 
 impl Invites {
-    pub fn new(door_key: &Secret<SecretKey>) -> Result<Invites, InviteError> {
+    pub fn new(door_key: &IdentityKey) -> Result<Invites, InviteError> {
         Ok(Invites {
-            door: door_key.expose(SecretKey::public),
+            door: door_key.public(),
             session_id: SessionId(random()?),
             outstanding: HashMap::with_capacity(MAX_OUTSTANDING),
         })
@@ -69,11 +69,11 @@ impl Invites {
     /// `Some`, a bearer invite otherwise.
     pub fn issue(
         &mut self,
-        door_key: &Secret<SecretKey>,
+        door_key: &IdentityKey,
         invitee: Option<EndpointId>,
         now: Instant,
     ) -> Result<Cap, InviteError> {
-        if door_key.expose(SecretKey::public) != self.door {
+        if door_key.public() != self.door {
             return Err(InviteError::WrongKey);
         }
         if self.outstanding.len() >= MAX_OUTSTANDING {
@@ -112,29 +112,31 @@ impl Invites {
         if !cap.verify(&self.door) {
             return Err(JoinRefused::InvalidCap);
         }
-        if !cfg!(feature = "mutant-si20-any-session") && cap.session_id != self.session_id {
-            return Err(JoinRefused::WrongSession);
-        }
-        let entry = self
-            .outstanding
-            .get(&cap.nonce)
-            .ok_or(JoinRefused::InvalidCap)?;
-        let wrong_requester = !cfg!(feature = "mutant-si20-bound-any-requester")
-            && entry.invitee.is_some_and(|id| id != requester);
-        if entry.invitee != cap.invitee || wrong_requester {
-            return Err(JoinRefused::InvalidCap);
-        }
-        let invitee = entry.invitee;
-        let issued = entry.issued;
-        if !cfg!(feature = "mutant-si20-nonatomic-nonce") {
-            self.outstanding.remove(&cap.nonce);
-        }
-        if expired(invitee, issued, now) {
-            return Err(JoinRefused::Expired);
-        }
-        Ok(match invitee {
-            Some(_) => Redeemed::Bound,
-            None => Redeemed::Bearer,
+        cap.read(|cap| {
+            if !cfg!(feature = "mutant-si20-any-session") && cap.session_id != self.session_id {
+                return Err(JoinRefused::WrongSession);
+            }
+            let entry = self
+                .outstanding
+                .get(&cap.nonce)
+                .ok_or(JoinRefused::InvalidCap)?;
+            let wrong_requester = !cfg!(feature = "mutant-si20-bound-any-requester")
+                && entry.invitee.is_some_and(|id| id != requester);
+            if entry.invitee != cap.invitee || wrong_requester {
+                return Err(JoinRefused::InvalidCap);
+            }
+            let invitee = entry.invitee;
+            let issued = entry.issued;
+            if !cfg!(feature = "mutant-si20-nonatomic-nonce") {
+                self.outstanding.remove(&cap.nonce);
+            }
+            if expired(invitee, issued, now) {
+                return Err(JoinRefused::Expired);
+            }
+            Ok(match invitee {
+                Some(_) => Redeemed::Bound,
+                None => Redeemed::Bearer,
+            })
         })
     }
 }

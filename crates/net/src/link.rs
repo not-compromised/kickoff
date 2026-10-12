@@ -395,10 +395,10 @@ pub struct CtlStream {
     conn: Connection,
     send: SendStream,
     recv: RecvStream,
-    unsent: Option<(bytes::Bytes, usize)>,
+    unsent: Option<(kickoff_secret::SecretBuffer, usize)>,
     prefix: [u8; LEN_PREFIX_LEN],
     prefix_have: usize,
-    body: Option<(Vec<u8>, usize)>,
+    body: Option<(kickoff_secret::SecretBuffer, usize)>,
     msgs: Bucket,
     bytes: Bucket,
     pub(crate) hello_deadline: Option<tokio::time::Instant>,
@@ -466,7 +466,7 @@ impl CtlStream {
                 frame_len::<M>(self.prefix).map_err(wire)?
             };
             self.wait_for_budget(len).await;
-            self.body = Some((vec![0; len], 0));
+            self.body = Some((kickoff_secret::SecretBuffer::zeroed(len), 0));
         }
         while let Some((body, have)) = &mut self.body {
             let Some(buf) = body.get_mut(*have..).filter(|b| !b.is_empty()) else {

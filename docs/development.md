@@ -118,7 +118,7 @@ scaffolding M2.
 2. **Tickets and keys are `Secret`.** `Session::invite` returns
    `Result<Secret<Ticket>, _>` (a guest gets `NotHost`; encoding can exceed
    2 KiB); `session::join` takes `Secret<Ticket>`; `Door::request_join` takes
-   `&Secret<Ticket>`; `net::door` takes `&Secret<SecretKey>`. §6.4 and SI-30
+   `&Secret<Ticket>`; `net::door` takes `&secret::key::IdentityKey`. §6.4 and SI-30
    require it, and iroh's `SecretKey` implements both `Debug` and `Serialize`.
 3. **Shared value types live in `wire`.** `LanDatagram`, `PeerSlot`,
    `Generation`, `PeerRef`, `MapId`, `AdmitPass` and `ApprovalId` are in `wire`:
@@ -156,9 +156,26 @@ scaffolding M2.
   before delivery, and `Lan::reset_peer` clears the slot's flows before reuse.
 - The host publishes the admission owner's current set through
   `SessionNet::set_admitted`; the handshake hook and each later layer re-check it.
-- IPC owns the ticket-text channel encoding. `Secret` itself remains
-  unserializable. `Secret::expose` is available to any holder, so enforcing one
-  consumer per secret type remains a question for the later application API.
+- `Secret::expose` requires the kind's designated consumer token. Wire's token
+  has a private constructor: other crates cannot expose a stored ticket or
+  substitute another owner. Capabilities hold private `Secret<CapValue>` data;
+  callers use invitation-kind inspection and protected join copies.
+- Wire owns ticket text and capability encodings. IPC wraps the wire-owned text
+  kind; its codec receives wiping transit bytes. `encode` and `encode_framed`
+  intentionally return uniquely owned `SecretBuffer` transport representations.
+  These buffers expose slices for transmission; they never share allocations,
+  and wipe live bytes and spare capacity on success, error and cancellation.
+  This storage/access boundary does not make serialized transport bytes opaque.
+- `IdentityKey` shares one `Secret<SecretKey>` allocation. Identity persistence,
+  public identity and signing operations stay inside its owner. Binding an iroh
+  endpoint copies the key only inside that adapter, clears address-lookup
+  callbacks and disables key logging. `KeyEndpoint` supplies connection
+  operations without iroh's raw-key accessor or `Deref`.
+- Linux kickoffd applies the facade core policy as its first application action,
+  before probe dispatch, arguments, runtime or trust. The genuine exec crash
+  probe still gates listening; the worker becomes nondumpable with zero limits
+  before its runtime. Runtime/loader work before Rust `main` remains outside
+  this startup-order proof.
 - `Session::approvals()` holds the pending set in a watch receiver. Slow readers
   can recover it even if they missed `ApprovalRequested` on the event stream.
 - `paste` (RUSTSEC-2024-0436, unmaintained) arrives through iroh 1.3.0 →

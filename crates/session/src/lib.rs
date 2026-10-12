@@ -15,9 +15,10 @@ mod guest;
 mod host;
 mod routes;
 
+use kickoff_secret::key::IdentityKey;
 use std::sync::Arc;
 
-use iroh_base::{EndpointId, SecretKey};
+use iroh_base::EndpointId;
 use kickoff_net::{Door, NetError, SessionNet};
 use kickoff_secret::Secret;
 use kickoff_vlan::{Adapter, LanError};
@@ -182,7 +183,7 @@ const EVENTS: usize = 64;
 /// over `net` and delivers it to the game on `adapter`, as slot 1.
 pub async fn host(
     door: Arc<Door>,
-    door_key: &Secret<SecretKey>,
+    door_key: &IdentityKey,
     net: SessionNet,
     adapter: Adapter,
     opts: HostOpts,

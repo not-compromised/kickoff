@@ -4,9 +4,12 @@
 //! implement `Debug`, `Clone` or a serde trait.
 
 use data_encoding::BASE32_NOPAD;
-use iroh_base::{EndpointAddr, EndpointId, SecretKey, Signature};
-use kickoff_secret::Secret;
+use iroh_base::{EndpointAddr, EndpointId, Signature};
+use kickoff_secret::SecretBuffer;
+use kickoff_secret::key::IdentityKey;
+use kickoff_secret::{OwnedSecret, Secret, Wipe};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::WireError;
 use crate::addr::DoorRepr;
@@ -30,10 +33,44 @@ pub struct Nonce(pub [u8; 16]);
 /// `invitee: Some` is a bound invite; `None` is a bearer invite. Either admits
 /// at most once (SI-20); see `Invites`.
 pub struct Cap {
-    pub session_id: SessionId,
-    pub invitee: Option<EndpointId>,
-    pub nonce: Nonce,
-    pub sig: Signature,
+    value: Secret<CapValue>,
+}
+
+pub(crate) struct CapValue {
+    pub(crate) session_id: SessionId,
+    pub(crate) invitee: Option<EndpointId>,
+    pub(crate) nonce: Nonce,
+    pub(crate) sig: [u8; 64],
+}
+
+/// Constructible only by the wire owner. Coherence prevents another crate
+/// from assigning a different consumer to any of these secret kinds.
+#[cfg(not(feature = "mutant-si30-open-owner"))]
+pub struct WireConsumer {
+    _private: (),
+}
+#[cfg(not(feature = "mutant-si30-open-owner"))]
+pub(crate) const OWNER: WireConsumer = WireConsumer { _private: () };
+#[cfg(feature = "mutant-si30-open-owner")]
+pub type WireConsumer = ();
+#[cfg(feature = "mutant-si30-open-owner")]
+pub(crate) const OWNER: WireConsumer = ();
+
+impl OwnedSecret for CapValue {
+    type Consumer = WireConsumer;
+}
+impl Wipe for CapValue {
+    fn wipe(&mut self) {
+        self.session_id.0.zeroize();
+        self.nonce.0.zeroize();
+        self.sig.zeroize();
+        #[cfg(test)]
+        WIPE_AUDIT.with(|audit| {
+            audit.borrow_mut().push(
+                self.session_id.0 == [0; 16] && self.nonce.0 == [0; 16] && self.sig == [0; 64],
+            )
+        });
+    }
 }
 
 #[cfg(feature = "mutant-si30-cap-debug")]
@@ -44,26 +81,52 @@ impl std::fmt::Debug for Cap {
 }
 
 impl Cap {
-    pub(crate) fn sign(
-        door_key: &Secret<SecretKey>,
+    /// Accepts caller-owned input, but never returns its raw fields.
+    pub fn new(
         session_id: SessionId,
         invitee: Option<EndpointId>,
         nonce: Nonce,
-    ) -> Cap {
-        door_key.expose(|key| {
-            let msg = signed_message(&key.public(), &session_id, invitee.as_ref(), &nonce);
-            Cap {
+        sig: Signature,
+    ) -> Self {
+        Self {
+            value: Secret::new(CapValue {
                 session_id,
                 invitee,
                 nonce,
-                sig: key.sign(&msg),
-            }
+                sig: sig.to_bytes(),
+            }),
+        }
+    }
+    pub fn invitee(&self) -> Option<EndpointId> {
+        self.read(|cap| cap.invitee)
+    }
+    pub fn copy_for_join(&self) -> Self {
+        self.read(|cap| Self {
+            value: Secret::new(CapValue {
+                session_id: cap.session_id,
+                invitee: cap.invitee,
+                nonce: cap.nonce,
+                sig: cap.sig,
+            }),
         })
     }
-
+    pub(crate) fn read<R>(&self, operation: impl FnOnce(&CapValue) -> R) -> R {
+        self.value.expose(&OWNER, operation)
+    }
+    pub(crate) fn sign(
+        door_key: &IdentityKey,
+        session_id: SessionId,
+        invitee: Option<EndpointId>,
+        nonce: Nonce,
+    ) -> Self {
+        let msg = signed_message(&door_key.public(), &session_id, invitee.as_ref(), &nonce);
+        Self::new(session_id, invitee, nonce, door_key.sign(&msg))
+    }
     pub(crate) fn verify(&self, door: &EndpointId) -> bool {
-        let msg = signed_message(door, &self.session_id, self.invitee.as_ref(), &self.nonce);
-        door.verify(&msg, &self.sig).is_ok()
+        self.read(|cap| {
+            let msg = signed_message(door, &cap.session_id, cap.invitee.as_ref(), &cap.nonce);
+            door.verify(&msg, &Signature::from_bytes(&cap.sig)).is_ok()
+        })
     }
 }
 
@@ -74,8 +137,8 @@ fn signed_message(
     session_id: &SessionId,
     invitee: Option<&EndpointId>,
     nonce: &Nonce,
-) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(CAP_CONTEXT.len().saturating_add(32 + 16 + 33 + 16));
+) -> SecretBuffer {
+    let mut msg = SecretBuffer::with_capacity(CAP_CONTEXT.len().saturating_add(32 + 16 + 33 + 16));
     msg.extend_from_slice(CAP_CONTEXT);
     msg.extend_from_slice(door.as_bytes());
     msg.extend_from_slice(&session_id.0);
@@ -99,12 +162,95 @@ pub struct Ticket {
     pub cap: Cap,
 }
 
-/// The capability is the secret part; the door's address is public.
-impl kickoff_secret::Wipe for Ticket {
+impl OwnedSecret for Ticket {
+    type Consumer = WireConsumer;
+}
+impl Wipe for Ticket {
+    fn wipe(&mut self) { /* The nested Secret<CapValue> wipes when this ticket drops. */
+    }
+}
+
+impl Ticket {
+    pub fn door(ticket: &Secret<Self>) -> EndpointAddr {
+        ticket.expose(&OWNER, |t| t.door.clone())
+    }
+    pub fn is_bearer(ticket: &Secret<Self>) -> bool {
+        ticket.expose(&OWNER, |t| t.cap.invitee().is_none())
+    }
+    pub fn join_cap(ticket: &Secret<Self>) -> Cap {
+        ticket.expose(&OWNER, |t| t.cap.copy_for_join())
+    }
+}
+
+/// Protected textual encoding shared by wire and IPC. Operations return
+/// protected transport bytes or parsed tickets, never an arbitrary closure.
+pub struct TicketTextValue(String);
+impl Wipe for TicketTextValue {
     fn wipe(&mut self) {
-        kickoff_secret::Wipe::wipe(&mut self.cap.session_id.0);
-        kickoff_secret::Wipe::wipe(&mut self.cap.nonce.0);
-        self.cap.sig = Signature::from_bytes(&[0; 64]);
+        self.0.zeroize();
+    }
+}
+impl OwnedSecret for TicketTextValue {
+    type Consumer = WireConsumer;
+}
+impl AsRef<[u8]> for TicketTextValue {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+impl TicketTextValue {
+    pub fn protect(text: String) -> Secret<Self> {
+        Secret::new(Self(text))
+    }
+    pub fn is_alphanumeric(text: &Secret<Self>) -> bool {
+        text.expose(&OWNER, |t| {
+            (1..=MAX_TICKET_LEN).contains(&t.0.len())
+                && t.0.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+    }
+    pub fn transport(text: &Secret<Self>) -> SecretBuffer {
+        text.expose(&OWNER, |t| SecretBuffer::copy_from(t.0.as_bytes()))
+    }
+    pub fn parse(text: &Secret<Self>) -> Result<Secret<Ticket>, WireError> {
+        text.expose(&OWNER, |t| parse_ticket(&t.0))
+    }
+}
+
+mod signature_bytes {
+    use serde::{
+        Deserializer, Serializer,
+        de::{Error, SeqAccess, Visitor},
+        ser::SerializeTuple,
+    };
+    use zeroize::Zeroizing;
+    pub fn serialize<S: Serializer>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_tuple(64)?;
+        for byte in bytes {
+            sequence.serialize_element(byte)?;
+        }
+        sequence.end()
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 64], D::Error> {
+        struct Bytes;
+        impl<'de> Visitor<'de> for Bytes {
+            type Value = [u8; 64];
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("64 signature bytes")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut bytes = Zeroizing::new([0; 64]);
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = sequence
+                        .next_element()?
+                        .ok_or_else(|| A::Error::invalid_length(i, &self))?;
+                }
+                Ok(*bytes)
+            }
+        }
+        deserializer.deserialize_tuple(64, Bytes)
     }
 }
 
@@ -114,25 +260,28 @@ pub(crate) struct CapRepr {
     session_id: [u8; 16],
     invitee: Option<EndpointId>,
     nonce: [u8; 16],
-    sig: Signature,
+    #[serde(with = "signature_bytes")]
+    sig: [u8; 64],
 }
 
 impl CapRepr {
     pub(crate) fn from_cap(cap: &Cap) -> CapRepr {
-        CapRepr {
+        cap.read(|cap| CapRepr {
             session_id: cap.session_id.0,
             invitee: cap.invitee,
             nonce: cap.nonce.0,
             sig: cap.sig,
-        }
+        })
     }
 
     pub(crate) fn into_cap(self) -> Cap {
         Cap {
-            session_id: SessionId(self.session_id),
-            invitee: self.invitee,
-            nonce: Nonce(self.nonce),
-            sig: self.sig,
+            value: Secret::new(CapValue {
+                session_id: SessionId(self.session_id),
+                invitee: self.invitee,
+                nonce: Nonce(self.nonce),
+                sig: self.sig,
+            }),
         }
     }
 }
@@ -155,12 +304,31 @@ impl TicketRepr {
     }
 }
 
-fn ticket_bytes(ticket: &Ticket) -> Result<Vec<u8>, WireError> {
+impl Drop for CapRepr {
+    fn drop(&mut self) {
+        if !cfg!(feature = "mutant-si30-cap-repr-no-wipe") {
+            self.session_id.zeroize();
+            self.nonce.zeroize();
+            self.sig.zeroize();
+        }
+        #[cfg(test)]
+        WIPE_AUDIT.with(|audit| {
+            audit
+                .borrow_mut()
+                .push(self.session_id == [0; 16] && self.nonce == [0; 16] && self.sig == [0; 64])
+        });
+    }
+}
+
+#[cfg(test)]
+thread_local! { static WIPE_AUDIT: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+fn ticket_bytes(ticket: &Ticket) -> Result<SecretBuffer, WireError> {
     let repr = TicketRepr::new(
         DoorRepr::from_addr(&ticket.door)?,
         CapRepr::from_cap(&ticket.cap),
     );
-    postcard::to_allocvec(&repr).map_err(|_| WireError::Malformed)
+    crate::msg::postcard_write(&repr, MAX_TICKET_LEN)
 }
 
 /// Accepts the text in either case (QR codes carry upper case). Anything but
@@ -181,9 +349,15 @@ pub fn parse_ticket(text: &str) -> Result<Secret<Ticket>, WireError> {
     if !prefix.eq_ignore_ascii_case(TICKET_PREFIX) {
         return Err(WireError::Malformed);
     }
-    let bytes = BASE32_NOPAD
-        .decode(body.to_ascii_uppercase().as_bytes())
+    let uppercase = Zeroizing::new(body.to_ascii_uppercase());
+    let len = BASE32_NOPAD
+        .decode_len(uppercase.len())
         .map_err(|_| WireError::Malformed)?;
+    let mut bytes = SecretBuffer::zeroed(len);
+    let used = BASE32_NOPAD
+        .decode_mut(uppercase.as_bytes(), &mut bytes)
+        .map_err(|_| WireError::Malformed)?;
+    bytes.truncate(used);
     match bytes.first() {
         Some(&TICKET_VERSION) => {}
         Some(&v) if v > TICKET_VERSION => return Err(WireError::Version),
@@ -198,35 +372,92 @@ pub fn parse_ticket(text: &str) -> Result<Secret<Ticket>, WireError> {
         door: repr.door.to_addr()?,
         cap: repr.cap.into_cap(),
     };
-    if ticket_bytes(&ticket)? != bytes {
+    if ticket_bytes(&ticket)?.as_ref() != bytes.as_ref() {
         return Err(WireError::Malformed);
     }
     Ok(Secret::new(ticket))
 }
 
 /// Refuses a door address with a direct address or no relay.
-pub fn encode_ticket(ticket: &Ticket) -> Result<Secret<String>, WireError> {
-    let body = BASE32_NOPAD
-        .encode(&ticket_bytes(ticket)?)
-        .to_ascii_lowercase();
-    let text = format!("{TICKET_PREFIX}{body}");
-    if text.len() > MAX_TICKET_LEN {
-        return Err(WireError::TooLong {
-            max: MAX_TICKET_LEN,
-        });
-    }
-    Ok(Secret::new(text))
+pub fn encode_ticket(ticket: &Secret<Ticket>) -> Result<Secret<TicketTextValue>, WireError> {
+    ticket.expose(&OWNER, |ticket| {
+        let bytes = ticket_bytes(ticket)?;
+        let len = TICKET_PREFIX
+            .len()
+            .saturating_add(BASE32_NOPAD.encode_len(bytes.len()));
+        if len > MAX_TICKET_LEN {
+            return Err(WireError::TooLong {
+                max: MAX_TICKET_LEN,
+            });
+        }
+        let mut text = SecretBuffer::zeroed(len);
+        let (prefix, body) = text.split_at_mut(TICKET_PREFIX.len());
+        prefix.copy_from_slice(TICKET_PREFIX.as_bytes());
+        BASE32_NOPAD.encode_mut(&bytes, body);
+        body.make_ascii_lowercase();
+        // The final string allocation is protected before any secret is copied.
+        let mut out = TicketTextValue(String::with_capacity(len));
+        out.0
+            .push_str(std::str::from_utf8(&text).map_err(|_| WireError::Malformed)?);
+        Ok(Secret::new(out))
+    })
 }
 
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects)]
 mod tests {
+    use iroh_base::SecretKey;
     use proptest::prelude::*;
 
     use super::*;
 
-    fn key(n: u8) -> Secret<SecretKey> {
-        Secret::new(SecretKey::from_bytes(&[n; 32]))
+    #[test]
+    fn si_30_ticket_and_join_values_wipe_on_success_and_decode_errors() {
+        WIPE_AUDIT.with(|audit| audit.borrow_mut().clear());
+        let key = key(1);
+        let addr = EndpointAddr::new(key.public())
+            .with_relay_url("https://relay.example./".parse().unwrap());
+        let ticket = Secret::new(Ticket {
+            door: addr,
+            cap: Cap::sign(&key, SessionId([7; 16]), None, Nonce([9; 16])),
+        });
+        let encoded = encode_ticket(&ticket).unwrap();
+        let parsed = TicketTextValue::parse(&encoded).unwrap();
+        let request = crate::JoinRequest {
+            cap: Ticket::join_cap(&parsed),
+            session_key: id(2),
+            name: crate::Name::new("guest").unwrap(),
+            platform: crate::Platform::Linux,
+            game_build: crate::BuildId::new("fixture").unwrap(),
+            kickoff_version: crate::KickoffVersion {
+                major: 0,
+                minor: 0,
+                patch: 0,
+            },
+        };
+        let mut body = crate::encode(&request).unwrap();
+        let decoded = crate::decode::<crate::JoinRequest>(&body).unwrap();
+        drop(decoded);
+        body.push(0);
+        assert!(crate::decode::<crate::JoinRequest>(&body).is_err());
+        body.truncate(40);
+        assert!(crate::decode::<crate::JoinRequest>(&body).is_err());
+        drop((request, parsed, ticket));
+        WIPE_AUDIT.with(|audit| {
+            let audit = audit.borrow();
+            assert!(
+                audit.len() >= 8,
+                "real ticket, join, canonical and error representations were dropped"
+            );
+            assert!(
+                audit.iter().all(|wiped| *wiped),
+                "a live capability representation contained secret bytes after its wipe"
+            );
+        });
+    }
+
+    fn key(n: u8) -> IdentityKey {
+        IdentityKey::new(SecretKey::from_bytes(&[n; 32]))
     }
 
     fn id(n: u8) -> EndpointId {
@@ -254,17 +485,18 @@ mod tests {
             let cap = Cap::sign(&door_key, SessionId([7; 16]), invitee, Nonce([9; 16]));
             prop_assert!(cap.verify(&door));
 
-            let mut forged = Cap { session_id: cap.session_id, invitee, nonce: cap.nonce, sig: cap.sig };
+            let cap = cap.read(|c| CapValue { session_id: c.session_id, invitee: c.invitee, nonce: c.nonce, sig: c.sig });
+            let mut forged = CapValue { session_id: cap.session_id, invitee, nonce: cap.nonce, sig: cap.sig };
             let mut checked_door = door;
             match field {
                 0 => forged.session_id = SessionId(flip(cap.session_id.0, bit)),
                 1 => forged.nonce = Nonce(flip(cap.nonce.0, bit)),
-                2 => forged.sig = Signature::from_bytes(&flip(cap.sig.to_bytes(), bit)),
+                2 => forged.sig = flip(cap.sig, bit),
                 3 => forged.invitee = if bound { None } else { Some(door) },
                 4 => forged.invitee = Some(id(3)),
                 _ => checked_door = id(3),
             }
-            prop_assert!(!forged.verify(&checked_door));
+            prop_assert!(!Cap::new(forged.session_id, forged.invitee, forged.nonce, Signature::from_bytes(&forged.sig)).verify(&checked_door));
         }
     }
 }

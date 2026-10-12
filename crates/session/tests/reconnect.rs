@@ -140,12 +140,12 @@ async fn guest_redials_after_a_drop_and_carries_on() {
     let alice_id = alice.id();
     let ticket = Secret::new(Ticket {
         door: host_identity.door.addr(),
-        cap: Cap {
-            session_id: SessionId([1; 16]),
-            invitee: Some(alice_id),
-            nonce: Nonce([2; 16]),
-            sig: iroh::Signature::from_bytes(&[0; 64]),
-        },
+        cap: Cap::new(
+            SessionId([1; 16]),
+            Some(alice_id),
+            Nonce([2; 16]),
+            iroh::Signature::from_bytes(&[0; 64]),
+        ),
     });
     let slot = PeerSlot::new(2).unwrap();
     let pass = AdmitPass {
@@ -257,12 +257,12 @@ async fn guest_reports_host_lost_after_the_reconnect_window() {
     let alice_id = alice.id();
     let ticket = Secret::new(Ticket {
         door: host_identity.door.addr(),
-        cap: Cap {
-            session_id: SessionId([1; 16]),
-            invitee: Some(alice_id),
-            nonce: Nonce([2; 16]),
-            sig: iroh::Signature::from_bytes(&[0; 64]),
-        },
+        cap: Cap::new(
+            SessionId([1; 16]),
+            Some(alice_id),
+            Nonce([2; 16]),
+            iroh::Signature::from_bytes(&[0; 64]),
+        ),
     });
     let slot = PeerSlot::new(2).unwrap();
     let pass = AdmitPass {

@@ -161,12 +161,12 @@ impl RequestParts {
     fn build(&self) -> JoinRequest {
         let (major, minor, patch) = self.version;
         JoinRequest {
-            cap: Cap {
-                session_id: SessionId(self.sid),
-                invitee: self.invitee,
-                nonce: Nonce(self.nonce),
-                sig: self.sig,
-            },
+            cap: Cap::new(
+                SessionId(self.sid),
+                self.invitee,
+                Nonce(self.nonce),
+                self.sig,
+            ),
             session_key: self.session_key,
             name: self.name.clone(),
             platform: if self.linux {
@@ -216,15 +216,7 @@ fn join_request() -> impl Strategy<Value = RequestParts> {
 }
 
 fn same_request(a: &JoinRequest, b: &JoinRequest) -> bool {
-    a.cap.session_id == b.cap.session_id
-        && a.cap.invitee == b.cap.invitee
-        && a.cap.nonce == b.cap.nonce
-        && a.cap.sig == b.cap.sig
-        && a.session_key == b.session_key
-        && a.name == b.name
-        && a.platform == b.platform
-        && a.game_build == b.game_build
-        && a.kickoff_version == b.kickoff_version
+    encode(a).unwrap().as_ref() == encode(b).unwrap().as_ref()
 }
 
 proptest! {
@@ -384,7 +376,7 @@ fn si_23_oversize_messages_refused_both_ways() {
         bundle: BundleBlob(Bytes::from(vec![0; MAX_CONTROL_LEN])),
     };
     assert_eq!(
-        encode(&big).unwrap_err(),
+        encode(&big).err().unwrap(),
         WireError::TooLong {
             max: MAX_CONTROL_LEN
         }
@@ -460,12 +452,12 @@ fn signature_bytes_are_not_validated_by_the_decoder() {
     // Decoding only carries the signature; checking it is `Invites::redeem`'s
     // job, which the ticket suite covers.
     let request = JoinRequest {
-        cap: Cap {
-            session_id: SessionId([0; 16]),
-            invitee: None,
-            nonce: Nonce([0; 16]),
-            sig: Signature::from_bytes(&[0xff; 64]),
-        },
+        cap: Cap::new(
+            SessionId([0; 16]),
+            None,
+            Nonce([0; 16]),
+            Signature::from_bytes(&[0xff; 64]),
+        ),
         session_key: SecretKey::from_bytes(&[2; 32]).public(),
         name: Name::new("p").unwrap(),
         platform: Platform::Linux,

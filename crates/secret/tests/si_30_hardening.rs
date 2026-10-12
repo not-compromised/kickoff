@@ -36,15 +36,11 @@ fn canary_child() {
     let mut seed = [0u8; 16];
     getrandom::fill(&mut seed).unwrap();
     let hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
-    let canary = Secret::new(format!("kickoff-canary-{hex}"));
-    canary.expose(|c| {
-        println!(
-            "KSEC {} {} {} {c}",
-            std::process::id(),
-            c.as_ptr().addr(),
-            c.len()
-        );
-    });
+    let text = format!("kickoff-canary-{hex}");
+    let address = text.as_ptr().addr();
+    let len = text.len();
+    println!("KSEC {} {} {} {text}", std::process::id(), address, len);
+    let canary = Secret::new(text);
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
     if line.trim() == "crash" {

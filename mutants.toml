@@ -435,3 +435,38 @@ note = "a first byte near the deadline restarts Hello decoding"
 [[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-session", test = "si_23_full_fanout_bucket_discards_idle_fractional_credit", note = "fanout's shared bucket retains idle credit"
 [[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-net", test = "si_23_full_ingress_bucket_discards_idle_fractional_credit", note = "ingress's shared bucket retains idle credit"
 [[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-vlan", test = "si_23_full_lan_bucket_discards_idle_fractional_credit", note = "LAN's shared bucket retains idle credit"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-secret"
+feature = "mutant-si30-buffer-no-wipe"
+test = "si_30_transport_buffers_wipe_on_success_error_and_cancel"
+note = "owned transport allocations are released without wiping"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-wire"
+feature = "mutant-si30-cap-repr-no-wipe"
+test = "si_30_ticket_and_join_values_wipe_on_success_and_decode_errors"
+note = "temporary capability representations retain secret fields at drop"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-wire"
+feature = "mutant-si30-open-owner"
+test = "si_30_unrelated_consumers_cannot_expose_or_replace_secret_owners"
+note = "a publicly constructible substitute owner exposes stored tickets"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-secret"
+feature = "mutant-si30-key-lookup"
+test = "si_30_identity_adapter_refuses_key_observing_callbacks"
+note = "a caller address lookup obtains the transport-owned identity key"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+feature = "mutant-si30-late-facade-core"
+test = "si_30_facade_policy_precedes_arguments_runtime_and_trust"
+note = "normal startup defers the facade core policy until listener construction"

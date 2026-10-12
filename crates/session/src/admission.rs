@@ -4,12 +4,13 @@
 //! published admitted set, roster and route agrees with one state of this
 //! table.
 
+use kickoff_secret::key::IdentityKey;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use iroh_base::{EndpointId, SecretKey};
+use iroh_base::EndpointId;
 use kickoff_net::AdmittedSet;
-use kickoff_secret::Secret;
+
 use kickoff_wire::{
     Cap, Generation, InviteError, Invites, JoinRefused, JoinRequest, KickoffVersion, MAX_ROSTER,
     Member, Name, PeerRef, PeerSlot, Redeemed,
@@ -98,12 +99,12 @@ pub(crate) struct Admission {
 
 impl Admission {
     pub(crate) fn new(
-        door_key: &Secret<SecretKey>,
+        door_key: &IdentityKey,
         host_session_key: EndpointId,
         host_name: Name,
         trusted: impl IntoIterator<Item = EndpointId>,
     ) -> Result<Admission, InviteError> {
-        let door = door_key.expose(SecretKey::public);
+        let door = door_key.public();
         Ok(Admission {
             host: Member {
                 slot: PeerSlot::HOST,
@@ -133,7 +134,7 @@ impl Admission {
 
     pub(crate) fn issue(
         &mut self,
-        door_key: &Secret<SecretKey>,
+        door_key: &IdentityKey,
         invitee: Option<EndpointId>,
         now: Instant,
     ) -> Result<Cap, InviteError> {
@@ -188,7 +189,7 @@ impl Admission {
         // capability shows itself without being redeemed, so this refusal
         // does not spend it.
         let trusted = self.trusted.contains(&id);
-        if !trusted && request.cap.invitee.is_none() && self.approvals.bearer_pending() {
+        if !trusted && request.cap.invitee().is_none() && self.approvals.bearer_pending() {
             return Err(JoinRefused::Busy);
         }
         let redeemed = if trusted {
@@ -500,6 +501,7 @@ fn peer_of(index: usize, seat: &Seat) -> Option<PeerRef> {
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects)]
 mod tests {
+    use iroh_base::SecretKey;
     use std::collections::HashMap;
 
     use iroh_base::Signature;
@@ -519,12 +521,12 @@ mod tests {
 
     fn request(session_key: EndpointId) -> JoinRequest {
         JoinRequest {
-            cap: Cap {
-                session_id: SessionId([0; 16]),
-                invitee: None,
-                nonce: Nonce([0; 16]),
-                sig: Signature::from_bytes(&[0; 64]),
-            },
+            cap: Cap::new(
+                SessionId([0; 16]),
+                None,
+                Nonce([0; 16]),
+                Signature::from_bytes(&[0; 64]),
+            ),
             session_key,
             name: Name::new("guest").unwrap(),
             platform: Platform::Linux,
@@ -571,7 +573,7 @@ mod tests {
     /// carries the pass, and the seat has no live link already.
     #[test]
     fn si_18_link_up_needs_the_seat_generation_and_pass() {
-        let door = Secret::new(SecretKey::from_bytes(&[200; 32]));
+        let door = IdentityKey::new(SecretKey::from_bytes(&[200; 32]));
         let host_key = SecretKey::from_bytes(&[201; 32]).public();
         let mut adm =
             Admission::new(&door, host_key, Name::new("host").unwrap(), [key(0)]).unwrap();
@@ -603,7 +605,7 @@ mod tests {
         fn si_18_admission_table_invariants_hold_for_any_sequence(
             ops in proptest::collection::vec(op(), 1..120)
         ) {
-            let door = Secret::new(SecretKey::from_bytes(&[200; 32]));
+            let door = IdentityKey::new(SecretKey::from_bytes(&[200; 32]));
             let host_key = SecretKey::from_bytes(&[201; 32]).public();
             let mut adm = Admission::new(
                 &door,

@@ -150,12 +150,12 @@ fn id(n: u8) -> EndpointId {
 }
 
 fn cap() -> Cap {
-    Cap {
-        session_id: SessionId([1; 16]),
-        invitee: Some(id(2)),
-        nonce: Nonce([3; 16]),
-        sig: Signature::from_bytes(&[4; 64]),
-    }
+    Cap::new(
+        SessionId([1; 16]),
+        Some(id(2)),
+        Nonce([3; 16]),
+        Signature::from_bytes(&[4; 64]),
+    )
 }
 
 /// The traced schema of every message a peer can send or Kickoff decodes from
