@@ -675,9 +675,18 @@ async fn guard_connection_snapshot_worker() {
                         .unwrap()
                         .unwrap();
                 }
+                ctl.send(&GuestMsg::Pong).await.unwrap();
+                Some((guest, link, ctl))
             }));
             tasks.push(tokio::spawn(async move {
-                let (link, _ctl) = accepting.accept().await.unwrap();
+                let (link, mut ctl) = accepting.accept().await.unwrap();
+                assert!(matches!(
+                    tokio::time::timeout(WAIT, ctl.recv::<GuestMsg>())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    GuestMsg::Hello { .. }
+                ));
                 for _ in 0..64 {
                     link.send_lan(&LanDatagram {
                         peer: PeerSlot::HOST,
@@ -688,10 +697,25 @@ async fn guard_connection_snapshot_worker() {
                     });
                     tokio::task::yield_now().await;
                 }
+                // Keep application handles alive until the receiver has all
+                // datagrams. Dropping the last handle closes the connection.
+                assert_eq!(
+                    tokio::time::timeout(WAIT, ctl.recv::<GuestMsg>())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    GuestMsg::Pong
+                );
+                None
             }));
         }
+        let mut retained = Vec::new();
         for task in tasks {
-            task.await.unwrap();
+            if let Some(handles) = task.await.unwrap() {
+                retained.push(handles);
+            }
         }
+        // A queued acknowledgement needs its sender's handles alive too.
+        drop(retained);
     }
 }
