@@ -121,6 +121,10 @@ impl Admission {
         })
     }
 
+    pub(crate) fn is_trusted(&self, id: EndpointId) -> bool {
+        self.trusted.contains(&id)
+    }
+
     pub(crate) fn issue(
         &mut self,
         door_key: &Secret<SecretKey>,

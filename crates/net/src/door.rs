@@ -44,9 +44,15 @@ const ANSWER_LINGER: Duration = Duration::from_secs(5);
 
 /// Relay-only, persistent identity. Runs only while hosting or while "friends
 /// may join" is on. It has no IP transport, so it owns no UDP socket.
-pub async fn door(id: &Secret<SecretKey>, relays: &RelayMap) -> Result<Door, NetError> {
+pub async fn door(
+    id: &Secret<SecretKey>,
+    relays: impl Into<crate::Relays>,
+) -> Result<Door, NetError> {
+    let policy = relays.into();
+    let relays = &policy.map;
     let egress = Egress::new(relays.clone(), None);
     let ep = Door::builder(id)
+        .ca_tls_config(policy.tls)
         .relay_mode(RelayMode::Custom(relays.clone()))
         .hooks(EgressGuard::new(egress.clone()))
         .bind()

@@ -142,6 +142,14 @@ p99 150 µs. Debug builds assert only loose ceilings; run
 `cargo test --release -p kickoff-session --test budget -- --nocapture` for the
 numbers.
 
+Bearer invites require a relay-only host and guest. The host refuses bearer
+creation in Direct mode and re-checks untrusted bearer requests at admission;
+the guest checks its own mode before requesting admission and refuses any
+host IP address in the admission reply. Each boundary has its own SI-31
+mutant. A local HTTPS relay with an explicitly trusted generated CA proves
+real bearer joins and game delivery without IP candidates. Bound-invite
+Direct sessions still exercise the direct transport.
+
 ## NOTES
 
 Deviations from the design (written against draft 2, updated for draft 3)

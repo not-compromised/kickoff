@@ -61,6 +61,10 @@ pub(crate) async fn start(
     events: broadcast::Sender<SessionEvent>,
     tasks: &mut JoinSet<()>,
 ) -> Result<Guest, SessionError> {
+    let bearer = ticket.expose(|ticket| ticket.cap.invitee.is_none());
+    if bearer && !net.is_relay_only() && !cfg!(feature = "mutant-si31-bearer-guest-direct") {
+        return Err(SessionError::RequiresRelay);
+    }
     let request = JoinRequest {
         cap: ticket.expose(|t| copy_cap(&t.cap)),
         session_key: net.id(),
@@ -76,6 +80,12 @@ pub(crate) async fn start(
             NetError::Refused(why) => SessionError::Refused(why),
             err => SessionError::Net(err),
         })?;
+    if bearer
+        && admitted.session_addr.ip_addrs().next().is_some()
+        && !cfg!(feature = "mutant-si31-bearer-admitted-ip")
+    {
+        return Err(SessionError::RequiresRelay);
+    }
     drop(ticket);
     let slot = admitted.pass.slot;
     let lan = kickoff_vlan::open(adapter, LanConfig { slot }).map_err(SessionError::Lan)?;
@@ -292,5 +302,69 @@ async fn reconnect(
             () = tokio::time::sleep(backoff) => {}
         }
         backoff = backoff.saturating_mul(2).min(BACKOFF_MAX);
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn si_31_bearer_guest_refuses_a_host_advertising_ip_addresses() {
+        let host_key = Secret::new(iroh_base::SecretKey::generate());
+        let host_door = Arc::new(kickoff_net::door_loopback(&host_key).await.unwrap());
+        let mut invites = kickoff_wire::Invites::new(&host_key).unwrap();
+        let cap = invites
+            .issue(&host_key, None, std::time::Instant::now())
+            .unwrap();
+        let ticket = Secret::new(Ticket {
+            door: host_door.addr(),
+            cap,
+        });
+        let answering = tokio::spawn(async move {
+            let attempt = host_door.next_join().await.unwrap();
+            let admitted = Admitted {
+                session_addr: iroh_base::EndpointAddr::from_parts(
+                    iroh_base::SecretKey::generate().public(),
+                    [iroh_base::TransportAddr::Ip(
+                        "127.0.0.1:40000".parse().unwrap(),
+                    )],
+                ),
+                pass: kickoff_wire::AdmitPass {
+                    slot: PeerSlot::new(2).unwrap(),
+                    generation: kickoff_wire::Generation::new(1),
+                },
+            };
+            let _ = attempt.answer(Ok(admitted)).await;
+        });
+        let key = Secret::new(iroh_base::SecretKey::generate());
+        let door = kickoff_net::door_loopback(&key).await.unwrap();
+        let relays = iroh::RelayMap::from("https://127.0.0.1:9".parse::<iroh::RelayUrl>().unwrap());
+        let net = kickoff_net::session(
+            &relays,
+            kickoff_net::SessionBind::RelayOnly,
+            kickoff_net::Role::Guest,
+        )
+        .await
+        .unwrap();
+        let (adapter, _) = kickoff_vlan::mem_tap();
+        let opts = JoinOpts {
+            name: kickoff_wire::Name::new("guest").unwrap(),
+            platform: kickoff_wire::Platform::Linux,
+            game_build: kickoff_wire::BuildId::new("test").unwrap(),
+            clock: Clock::system(),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::join(&door, net, adapter, ticket, opts),
+        )
+        .await;
+        answering.abort();
+        let _ = answering.await;
+        assert!(
+            matches!(result, Ok(Err(SessionError::RequiresRelay))),
+            "admission result: {}",
+            result.is_ok()
+        );
     }
 }

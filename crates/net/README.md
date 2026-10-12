@@ -165,3 +165,9 @@ Deviations from design draft 2 and open questions.
     leaked-endpoint test binds loopback, so an unbound endpoint differs on any
     machine with a non-loopback IPv4 interface (development.md harness note 4
     predates this).
+
+`Relays` bundles the compiled destination map with trusted TLS configuration.
+Passing `&RelayMap` to the door or session factory keeps the default CA roots.
+A trusted adapter may pass `Relays::with_ca`, as the in-process HTTPS relay
+fixture does with its generated CA. Peer messages cannot provide roots, and
+the wire decoder still accepts only canonical HTTPS relay URLs.

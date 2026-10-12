@@ -136,11 +136,13 @@ async fn guest_redials_after_a_drop_and_carries_on() {
 
     let host_identity = Identity::new().await;
     let host_net = session_net(Role::Host).await;
+    let alice = Identity::new().await;
+    let alice_id = alice.id();
     let ticket = Secret::new(Ticket {
         door: host_identity.door.addr(),
         cap: Cap {
             session_id: SessionId([1; 16]),
-            invitee: None,
+            invitee: Some(alice_id),
             nonce: Nonce([2; 16]),
             sig: iroh::Signature::from_bytes(&[0; 64]),
         },
@@ -150,8 +152,6 @@ async fn guest_redials_after_a_drop_and_carries_on() {
         slot,
         generation: Generation::new(1),
     };
-    let alice = Identity::new().await;
-    let alice_id = alice.id();
     let roster = |epoch| HostMsg::Roster {
         epoch,
         members: BoundedVec::new(vec![
@@ -253,11 +253,13 @@ async fn guest_reports_host_lost_after_the_reconnect_window() {
 
     let host_identity = Identity::new().await;
     let host_net = session_net(Role::Host).await;
+    let alice = Identity::new().await;
+    let alice_id = alice.id();
     let ticket = Secret::new(Ticket {
         door: host_identity.door.addr(),
         cap: Cap {
             session_id: SessionId([1; 16]),
-            invitee: None,
+            invitee: Some(alice_id),
             nonce: Nonce([2; 16]),
             sig: iroh::Signature::from_bytes(&[0; 64]),
         },
@@ -267,8 +269,6 @@ async fn guest_reports_host_lost_after_the_reconnect_window() {
         slot,
         generation: Generation::new(1),
     };
-    let alice = Identity::new().await;
-    let alice_id = alice.id();
     let clock = Clock::system();
     let mut opts = join_opts("guest");
     opts.clock = clock.clone();

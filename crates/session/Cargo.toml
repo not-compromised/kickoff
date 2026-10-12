@@ -26,6 +26,10 @@ mutant-si23-over-budget-is-a-drop = []
 mutant-si23-no-hello-deadline = []
 mutant-si23-no-idle-close = []
 mutant-si41-approve-by-peer = []
+mutant-si31-bearer-direct = []
+mutant-si31-bearer-admit-direct = []
+mutant-si31-bearer-guest-direct = []
+mutant-si31-bearer-admitted-ip = []
 mutant-si41-two-bearer-approvals = []
 mutant-si41-survives-peer-change = []
 mutant-si41-no-approval-timeout = []
@@ -54,6 +58,7 @@ thiserror.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+iroh-relay = { workspace = true, features = ["test-utils"] }
 kickoff-send-guard.workspace = true
 iroh.workspace = true
 bytes.workspace = true

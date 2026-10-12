@@ -23,6 +23,7 @@ kickoff-send-guard = { path = "crates/send-guard" }
 # Default features off: `portmapper` would map router ports (UPnP/PCP/NAT-PMP) and
 # publish them as extra candidates, which design §3.4 and SI-31 forbid.
 iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
+iroh-relay = { version = "=1.3.0", default-features = false, features = ["server", "tls-ring"] }
 iroh-base = { version = "=1.3.0", default-features = false, features = ["key"] }
 bytes = { version = "=1.12.1", default-features = false, features = ["std"] }
 tokio = { version = "=1.53.2", default-features = false }

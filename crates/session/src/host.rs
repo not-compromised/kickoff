@@ -122,6 +122,12 @@ enum Ended {
 impl Host {
     pub(crate) fn invite(&self, kind: InviteKind) -> Result<Secret<Ticket>, SessionError> {
         self.live()?;
+        if kind == InviteKind::Bearer
+            && !self.net.is_relay_only()
+            && !cfg!(feature = "mutant-si31-bearer-direct")
+        {
+            return Err(SessionError::RequiresRelay);
+        }
         let invitee = match kind {
             InviteKind::Bound(id) => Some(id),
             InviteKind::Bearer => None,
@@ -303,7 +309,15 @@ impl Host {
         let mut approvals = self.approvals.subscribe();
         let decision = {
             let mut adm = self.admission();
-            let decision = adm.join(id, attempt.request(), self.clock.now());
+            let decision = if attempt.request().cap.invitee.is_none()
+                && !adm.is_trusted(id)
+                && !self.net.is_relay_only()
+                && !cfg!(feature = "mutant-si31-bearer-admit-direct")
+            {
+                Err(JoinRefused::InvalidCap)
+            } else {
+                adm.join(id, attempt.request(), self.clock.now())
+            };
             if let Ok(joined) = &decision {
                 self.publish(&adm);
                 if let Joined::Prompt(approval) = joined {
@@ -599,5 +613,70 @@ async fn sweep(host: Arc<Host>) {
             }
         }
         host.publish(&adm);
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn si_31_direct_host_refuses_a_bearer_capability_at_admission() {
+        let key = Secret::new(SecretKey::generate());
+        let door = Arc::new(kickoff_net::door_loopback(&key).await.unwrap());
+        let net = kickoff_net::session(
+            &iroh::RelayMap::empty(),
+            kickoff_net::IfaceAddr::loopback(),
+            kickoff_net::Role::Host,
+        )
+        .await
+        .unwrap();
+        let (adapter, _game) = kickoff_vlan::mem_tap();
+        let (events, _) = broadcast::channel(16);
+        let mut tasks = JoinSet::new();
+        let host = start(
+            Arc::clone(&door),
+            &key,
+            net,
+            adapter,
+            HostOpts::new(kickoff_wire::Name::new("host").unwrap()),
+            events,
+            &mut tasks,
+        )
+        .unwrap();
+        // Seed a valid bearer in the owner's ledger to drive admission alone.
+        let cap = host
+            .admission()
+            .issue(&key, None, host.clock.now())
+            .unwrap();
+        let ticket = Secret::new(Ticket {
+            door: door.addr(),
+            cap,
+        });
+        let guest_key = Secret::new(SecretKey::generate());
+        let guest_door = kickoff_net::door_loopback(&guest_key).await.unwrap();
+        let request = kickoff_wire::JoinRequest {
+            cap: ticket.expose(|ticket| kickoff_wire::Cap {
+                session_id: ticket.cap.session_id,
+                invitee: ticket.cap.invitee,
+                nonce: ticket.cap.nonce,
+                sig: ticket.cap.sig,
+            }),
+            session_key: SecretKey::generate().public(),
+            name: kickoff_wire::Name::new("guest").unwrap(),
+            platform: kickoff_wire::Platform::Linux,
+            game_build: kickoff_wire::BuildId::new("test").unwrap(),
+            kickoff_version: crate::KICKOFF_VERSION,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            guest_door.request_join(&ticket, request),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Ok(Err(NetError::Refused(JoinRefused::InvalidCap)))
+        ));
+        assert!(host.approvals.borrow().is_empty());
     }
 }

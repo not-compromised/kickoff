@@ -183,3 +183,10 @@ note = "the policy stops checking that rows have registered mutants"
 [[mutant]] si = "SI-33", crate = "kickoff-xtask", feature = "mutant-si33-no-scope-check", test = "si_33_linux_m2_refuses_an_invariant_scoped_only_to_windows", note = "platform scope no longer constrains Linux M2 or numbered claims"
 
 [[mutant]] si = "SI-33", crate = "kickoff-xtask", feature = "mutant-si33-no-scope-check", test = "si_33_claim_scope_rejects_windows_same_user_containment_and_missing_mapping", note = "scope and claim mapping validation removed"
+
+[[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-direct", test = "si_31_direct_sessions_refuse_bearer_invites", note = "bearer session privacy no longer requires relay-only endpoints"
+[[unmutated]] test = "si_31_bearer_sessions_carry_game_frames_through_a_real_relay", reason = "positive relay transport and no-IP proof; the mode-removal mutant is pinned by the direct-session rejection test"
+
+[[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-admit-direct", test = "si_31_direct_host_refuses_a_bearer_capability_at_admission", note = "the host admission boundary accepts an untrusted bearer in direct mode"
+[[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-guest-direct", test = "si_31_direct_guests_refuse_bearer_before_requesting_admission", note = "the guest requests bearer admission with an IP transport"
+[[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-admitted-ip", test = "si_31_bearer_guest_refuses_a_host_advertising_ip_addresses", note = "a bearer guest accepts a direct address from the host"

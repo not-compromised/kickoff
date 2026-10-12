@@ -17,6 +17,7 @@ mod guarded;
 mod incoming;
 mod link;
 mod reassembly;
+mod relays;
 mod session;
 mod stream;
 
@@ -27,6 +28,7 @@ use iroh::endpoint::{QuicTransportConfig, VarInt};
 pub use door::{Door, JoinAttempt, door, door_loopback};
 pub use egress::IfaceAddr;
 pub use link::{CtlStream, Link, LinkHealth, PathStatus};
+pub use relays::Relays;
 pub use session::{AdmittedSet, Role, SessionBind, SessionNet, session};
 
 use kickoff_wire::JoinRefused;

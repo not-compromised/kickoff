@@ -41,7 +41,7 @@ async fn decide(host: &HostNode, approval: ApprovalId, allow: bool) -> Result<()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_41_kick_retires_the_approval_and_its_id() {
-    let mut host = host().await;
+    let mut host = bearer_host().await;
     let alice = Identity::new().await;
     let alice_id = alice.id();
 
@@ -84,7 +84,7 @@ async fn si_41_kick_retires_the_approval_and_its_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_41_timed_out_approval_authorizes_nothing() {
     let clock = Clock::system();
-    let mut host = host_with(|o| o.clock = clock.clone()).await;
+    let mut host = bearer_host_with(|o| o.clock = clock.clone()).await;
     let bob = Identity::new().await;
 
     let asking = ask(bob, host.bearer());
@@ -109,7 +109,7 @@ async fn si_41_timed_out_approval_authorizes_nothing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_41_session_end_retires_every_approval() {
-    let mut host = host().await;
+    let mut host = bearer_host().await;
     let carol = Identity::new().await;
     let asking = ask(carol, host.bearer());
     let pending = approval(&mut host).await;
@@ -128,7 +128,7 @@ async fn si_41_session_end_retires_every_approval() {
 /// at the door without spending its ticket.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_41_second_bearer_join_refused_while_one_is_pending() {
-    let mut host = host().await;
+    let mut host = bearer_host().await;
     let (alice, bob) = (Identity::new().await, Identity::new().await);
     let bob_ticket = host.bearer();
     let bob_again = duplicate(&bob_ticket);
@@ -158,7 +158,7 @@ async fn si_41_second_bearer_join_refused_while_one_is_pending() {
 /// drained its events still finds the pending one, and sees it go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pending_approvals_are_held_not_streamed() {
-    let mut host = host().await;
+    let mut host = bearer_host().await;
     let mut pending = host.session.approvals();
     let dave = Identity::new().await;
     let asking = ask(dave, host.bearer());

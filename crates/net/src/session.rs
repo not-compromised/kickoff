@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
+#[cfg(test)]
+use iroh::RelayMap;
 use iroh::endpoint::{
     AfterHandshakeOutcome, Builder, Connection, EndpointHooks, Incoming, WeakConnectionHandle,
     presets,
 };
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
 use kickoff_wire::{AdmitPass, PeerRef, PeerSlot};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
@@ -158,7 +160,7 @@ impl From<IfaceAddr> for SessionBind {
 /// the default route changes. An empty relay map makes a `Direct` endpoint
 /// direct-only; a `RelayOnly` one needs at least one relay.
 pub async fn session(
-    relays: &RelayMap,
+    relays: impl Into<crate::Relays>,
     bind: impl Into<SessionBind>,
     role: Role,
 ) -> Result<SessionNet, NetError> {
@@ -172,10 +174,12 @@ pub async fn session(
 
 /// `view` is `None` for a relay-only endpoint; tests pass a synthetic view.
 async fn bind_session(
-    relays: &RelayMap,
+    relays: impl Into<crate::Relays>,
     view: Option<View>,
     role: Role,
 ) -> Result<SessionNet, NetError> {
+    let policy = relays.into();
+    let relays = &policy.map;
     let relay_mode = if relays.is_empty() {
         RelayMode::Disabled
     } else {
@@ -190,6 +194,7 @@ async fn bind_session(
     let shared = Arc::new(Shared::default());
     let make = || -> Builder {
         Endpoint::builder(presets::Minimal)
+            .ca_tls_config(policy.tls.clone())
             .clear_ip_transports()
             .relay_mode(relay_mode.clone())
             .alpns(alpns.clone())

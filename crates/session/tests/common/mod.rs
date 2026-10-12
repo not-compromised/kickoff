@@ -1,7 +1,7 @@
-//! In-process nodes for session tests: loopback doors and session endpoints
-//! with relays disabled (design §2.3's test adapter) and `vlan::Mem` games.
-//! Each test plays every game by sending and reading raw Ethernet frames, and
-//! hostile guests by driving `kickoff-net` directly.
+//! In-process nodes: relay-only doors on a local HTTPS relay with a generated
+//! trusted CA, Direct or RelayOnly session endpoints, and `vlan::Mem` games.
+//! Each test plays the game through raw Ethernet frames and drives hostile
+//! guests through `kickoff-net`. Every transport stays on this host.
 #![allow(
     dead_code,
     clippy::unwrap_used,
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use iroh::{EndpointId, RelayMap, SecretKey};
-use kickoff_net::{CtlStream, Door, IfaceAddr, Link, NetError, Role, SessionNet, door_loopback};
+use kickoff_net::{CtlStream, Door, IfaceAddr, Link, NetError, Role, SessionNet};
 use kickoff_secret::Secret;
 use kickoff_session::{
     Approval, Clock, HostOpts, InviteKind, JoinOpts, KICKOFF_VERSION, Session, SessionError,
@@ -39,12 +39,93 @@ pub fn name(text: &str) -> Name {
 }
 
 pub async fn session_net(role: Role) -> SessionNet {
-    kickoff_net::session(&RelayMap::empty(), IfaceAddr::loopback(), role)
+    kickoff_net::session(&test_relays(), IfaceAddr::loopback(), role)
         .await
         .unwrap()
 }
 
-/// A persistent identity: its key and its loopback door.
+fn test_relays() -> kickoff_net::Relays {
+    static RELAYS: std::sync::OnceLock<kickoff_net::Relays> = std::sync::OnceLock::new();
+    RELAYS
+        .get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let (certs, server_config) =
+                        iroh_relay::server::testing::self_signed_tls_certs_and_config();
+                    let mut relay =
+                        iroh_relay::server::RelayConfig::new((std::net::Ipv4Addr::LOCALHOST, 0));
+                    relay.tls = Some(iroh_relay::server::TlsConfig::new(
+                        (std::net::Ipv4Addr::LOCALHOST, 0),
+                        iroh_relay::server::CertConfig::Manual { server_config },
+                    ));
+                    let mut config = iroh_relay::server::ServerConfig::default();
+                    config.relay = Some(relay);
+                    let server = iroh_relay::server::Server::spawn(config).await.unwrap();
+                    let url: iroh::RelayUrl = format!("https://{}", server.https_addr().unwrap())
+                        .parse()
+                        .unwrap();
+                    tx.send(kickoff_net::Relays::with_ca(
+                        RelayMap::from(url),
+                        iroh::tls::CaTlsConfig::custom_roots(certs),
+                    ))
+                    .unwrap();
+                    std::future::pending::<()>().await;
+                    drop(server);
+                });
+            });
+            rx.recv().unwrap()
+        })
+        .clone()
+}
+
+pub async fn relay_session_net(role: Role) -> SessionNet {
+    let net = kickoff_net::session(&test_relays(), kickoff_net::SessionBind::RelayOnly, role)
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, async {
+        while net.addr().relay_urls().next().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    net
+}
+
+pub async fn bearer_host() -> HostNode {
+    bearer_host_with(|_| {}).await
+}
+
+pub async fn bearer_host_with(configure: impl FnOnce(&mut HostOpts)) -> HostNode {
+    let identity = Identity::new().await;
+    let mut opts = HostOpts::new(name("host"));
+    configure(&mut opts);
+    let (adapter, game) = mem_tap();
+    let session = kickoff_session::host(
+        Arc::clone(&identity.door),
+        &identity.key,
+        relay_session_net(Role::Host).await,
+        adapter,
+        opts,
+    )
+    .await
+    .unwrap();
+    let events = session.events();
+    HostNode {
+        identity,
+        session,
+        game,
+        events,
+    }
+}
+
+/// A persistent identity: its key and its relay-only door.
 pub struct Identity {
     pub key: Secret<SecretKey>,
     pub door: Arc<Door>,
@@ -53,7 +134,14 @@ pub struct Identity {
 impl Identity {
     pub async fn new() -> Identity {
         let key = Secret::new(SecretKey::generate());
-        let door = Arc::new(door_loopback(&key).await.unwrap());
+        let door = Arc::new(kickoff_net::door(&key, &test_relays()).await.unwrap());
+        tokio::time::timeout(WAIT, async {
+            while door.addr().relay_urls().next().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         Identity { key, door }
     }
 
@@ -142,14 +230,12 @@ pub async fn join_with(
     opts: JoinOpts,
 ) -> Result<GuestNode, SessionError> {
     let (adapter, game) = mem_tap();
-    let session = kickoff_session::join(
-        &identity.door,
-        session_net(Role::Guest).await,
-        adapter,
-        ticket,
-        opts,
-    )
-    .await?;
+    let net = if ticket.expose(|ticket| ticket.cap.invitee.is_none()) {
+        relay_session_net(Role::Guest).await
+    } else {
+        session_net(Role::Guest).await
+    };
+    let session = kickoff_session::join(&identity.door, net, adapter, ticket, opts).await?;
     let events = session.events();
     Ok(GuestNode {
         identity,
@@ -176,8 +262,7 @@ pub fn copy_cap(ticket: &Secret<Ticket>) -> Cap {
 }
 
 /// The same ticket a second time, as a leaked or replayed link would carry
-/// it. (Loopback tickets carry a direct address, which `encode_ticket`
-/// rightly refuses, so the copy is made field by field.)
+/// it. The copy is made field by field so no secret gains `Clone`.
 pub fn duplicate(ticket: &Secret<Ticket>) -> Secret<Ticket> {
     let door = ticket.expose(|t| t.door.clone());
     Secret::new(Ticket {
@@ -204,7 +289,11 @@ pub async fn request_join(
 
 impl RawGuest {
     pub async fn join(identity: Identity, ticket: &Secret<Ticket>) -> Result<RawGuest, NetError> {
-        let net = session_net(Role::Guest).await;
+        let net = if ticket.expose(|ticket| ticket.cap.invitee.is_none()) {
+            relay_session_net(Role::Guest).await
+        } else {
+            session_net(Role::Guest).await
+        };
         let admitted = request_join(&identity, &net, ticket).await?;
         Ok(RawGuest {
             identity,

@@ -64,6 +64,8 @@ const fn parse_u16(digits: &str) -> u16 {
 pub enum SessionError {
     #[error("not implemented yet")]
     NotImplemented,
+    #[error("bearer invites require a relay-only session")]
+    RequiresRelay,
     #[error("only the host can do that")]
     NotHost,
     #[error("the session has ended")]

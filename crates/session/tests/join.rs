@@ -49,7 +49,7 @@ async fn bound_ticket_admits_its_invitee() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_20_bearer_ticket_admits_once() {
-    let mut host = host().await;
+    let mut host = bearer_host().await;
     let ticket = host.bearer();
     let alice = Identity::new().await;
     let alice_id = alice.id();
@@ -79,7 +79,7 @@ async fn si_20_bearer_ticket_admits_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_20_one_capability_on_many_connections_admits_once() {
-    let mut host = host().await;
+    let mut host = bearer_host().await;
     let ticket = host.bearer();
     let mut tries = tokio::task::JoinSet::new();
     for _ in 0..8 {
@@ -144,7 +144,7 @@ async fn si_20_bound_capability_raced_by_its_invitee_admits_once() {
 async fn si_18_one_seat_per_identity_under_concurrent_joins() {
     let alice = Identity::new().await;
     let alice_id = alice.id();
-    let host = host_with(|o| o.trusted = vec![alice_id]).await;
+    let host = bearer_host_with(|o| o.trusted = vec![alice_id]).await;
     let ticket = host.bearer();
     let attempts = (0..12).map(|_| async {
         let net = session_net(Role::Guest).await;
@@ -163,7 +163,7 @@ async fn si_18_one_seat_per_identity_under_concurrent_joins() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_20_expired_bearer_ticket_refused() {
     let clock = kickoff_session::Clock::system();
-    let host = host_with(|o| o.clock = clock.clone()).await;
+    let host = bearer_host_with(|o| o.clock = clock.clone()).await;
     let bearer = host.bearer();
     let alice = Identity::new().await;
     let bound = host.bound(alice.id());
@@ -214,7 +214,7 @@ async fn si_20_wrong_invitee_refused_and_the_ticket_survives() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_20_declined_prompt_spends_the_ticket() {
-    let mut host = host().await;
+    let mut host = bearer_host().await;
     let ticket = host.bearer();
     let again = duplicate(&ticket);
     let alice = Identity::new().await;
@@ -449,4 +449,88 @@ async fn si_23_link_without_hello_closed_at_the_deadline() {
         closed.is_ok(),
         "a link that never said Hello outlived the deadline"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn si_31_direct_sessions_refuse_bearer_invites() {
+    let direct = host().await;
+    assert!(matches!(
+        direct.session.invite(kickoff_session::InviteKind::Bearer),
+        Err(SessionError::RequiresRelay)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn si_31_direct_guests_refuse_bearer_before_requesting_admission() {
+    let relay_host = bearer_host().await;
+    let guest = Identity::new().await;
+    let (adapter, _) = kickoff_vlan::mem_tap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        kickoff_session::join(
+            &guest.door,
+            session_net(Role::Guest).await,
+            adapter,
+            relay_host.bearer(),
+            join_opts("guest"),
+        ),
+    )
+    .await;
+    assert!(matches!(result, Ok(Err(SessionError::RequiresRelay))));
+    assert!(
+        relay_host.session.approvals().borrow().is_empty(),
+        "a direct guest reached admission"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn si_31_bearer_sessions_carry_game_frames_through_a_real_relay() {
+    let identity = Identity::new().await;
+    let host_net = relay_session_net(Role::Host).await;
+    assert!(host_net.is_relay_only());
+    assert_eq!(host_net.addr().ip_addrs().count(), 0);
+    let (adapter, host_game) = kickoff_vlan::mem_tap();
+    let session = kickoff_session::host(
+        std::sync::Arc::clone(&identity.door),
+        &identity.key,
+        host_net,
+        adapter,
+        kickoff_session::HostOpts::new(name("host")),
+    )
+    .await
+    .unwrap();
+    let mut events = session.events();
+    let ticket = session.invite(kickoff_session::InviteKind::Bearer).unwrap();
+    let guest = Identity::new().await;
+    let guest_net = relay_session_net(Role::Guest).await;
+    assert!(guest_net.is_relay_only());
+    assert_eq!(guest_net.addr().ip_addrs().count(), 0);
+    let (adapter, guest_game) = kickoff_vlan::mem_tap();
+    let joining = tokio::spawn(async move {
+        kickoff_session::join(&guest.door, guest_net, adapter, ticket, join_opts("guest")).await
+    });
+    let approval = event(&mut events, |event| match event {
+        SessionEvent::ApprovalRequested(approval) => Some(approval.clone()),
+        _ => None,
+    })
+    .await;
+    session
+        .command(Command::Decide {
+            approval: approval.id,
+            allow: true,
+        })
+        .await
+        .unwrap();
+    let guest_session = joining.await.unwrap().unwrap();
+    guest_game
+        .send_frame(udp(
+            guest_session.slot().get(),
+            Some(1),
+            GAME_PORT,
+            GAME_PORT,
+            b"through-relay",
+        ))
+        .unwrap();
+    let received = next_udp(&host_game, WAIT).await.unwrap();
+    assert_eq!(received.payload, b"through-relay");
 }

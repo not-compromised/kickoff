@@ -104,7 +104,7 @@ async fn si_19_kicked_peer_datagrams_dropped() {
 async fn si_19_kick_overrides_trust_and_every_ticket() {
     let alice = Identity::new().await;
     let alice_id = alice.id();
-    let host = host_with(|o| o.trusted = vec![alice_id]).await;
+    let host = bearer_host_with(|o| o.trusted = vec![alice_id]).await;
     let first = host.bound(alice_id);
     let trusted_again = duplicate(&first);
     let bound = host.bound(alice_id);
