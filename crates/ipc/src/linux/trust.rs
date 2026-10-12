@@ -88,7 +88,7 @@ impl Trust {
     /// the check passes; only a same-uid process can arrange that, and
     /// same-user malware is outside Kickoff's boundary (§6.1).
     pub(super) fn check(&self, cred: UCred) -> Result<PeerCred, IpcError> {
-        if cred.uid() != self.uid {
+        if !cfg!(feature = "mutant-si7-no-uid-check") && cred.uid() != self.uid {
             return Err(IpcError::PeerRejected);
         }
         let pid = cred
@@ -96,7 +96,7 @@ impl Trust {
             .filter(|pid| *pid > 0)
             .ok_or(IpcError::PeerRejected)?;
         let exe = FileId::of(&proc_exe(pid)).map_err(|_| IpcError::PeerRejected)?;
-        if !self.exes.contains(&exe) {
+        if !cfg!(feature = "mutant-si7-no-exe-check") && !self.exes.contains(&exe) {
             return Err(IpcError::PeerRejected);
         }
         Ok(PeerCred {

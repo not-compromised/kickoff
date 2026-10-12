@@ -53,7 +53,16 @@ impl<T: AsRef<[u8]>> Secret<T> {
 
 impl<T> Drop for Secret<T> {
     fn drop(&mut self) {
-        (self.wipe)(&mut self.value);
+        if !cfg!(feature = "mutant-si30-no-wipe") {
+            (self.wipe)(&mut self.value);
+        }
+    }
+}
+
+#[cfg(feature = "mutant-si30-secret-debug")]
+impl<T> std::fmt::Debug for Secret<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
     }
 }
 

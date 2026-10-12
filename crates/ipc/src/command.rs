@@ -32,7 +32,9 @@ impl TicketText {
     /// `/`, `.`, `:`, `\`, `-`, `%` or whitespace, so no path, URL, option
     /// or escape fits.
     pub(crate) fn alphabet_ok(bytes: &[u8]) -> bool {
-        (1..=MAX_TICKET_LEN).contains(&bytes.len()) && bytes.iter().all(u8::is_ascii_alphanumeric)
+        (1..=MAX_TICKET_LEN).contains(&bytes.len())
+            && (cfg!(feature = "mutant-si3-ticket-text-any")
+                || bytes.iter().all(u8::is_ascii_alphanumeric))
     }
 
     pub fn secret(&self) -> &Secret<String> {
@@ -42,6 +44,9 @@ impl TicketText {
 
 impl fmt::Debug for TicketText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if cfg!(feature = "mutant-si30-ticket-text-debug") {
+            return self.0.expose(|t| write!(f, "TicketText({t})"));
+        }
         f.write_str("TicketText(<redacted>)")
     }
 }

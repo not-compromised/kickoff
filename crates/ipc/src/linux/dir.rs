@@ -34,7 +34,7 @@ impl RuntimeDir {
         let uid = super::euid();
         let base_fd = open_dir(rustix::fs::CWD, base)?;
         let base_mode = owned_dir_mode(&base_fd, uid)?;
-        if base_mode & 0o077 != 0 {
+        if !cfg!(feature = "mutant-si7-base-unchecked") && base_mode & 0o077 != 0 {
             return Err(IpcError::UnsafeDir);
         }
 
@@ -48,7 +48,7 @@ impl RuntimeDir {
             // The umask can only have narrowed 0700; restore it exactly.
             rustix::fs::fchmod(&fd, Mode::RWXU).map_err(std::io::Error::from)?;
         }
-        if owned_dir_mode(&fd, uid)? != 0o700 {
+        if owned_dir_mode(&fd, uid)? != 0o700 && !cfg!(feature = "mutant-si7-dir-mode-unchecked") {
             return Err(IpcError::UnsafeDir);
         }
         Ok(RuntimeDir {
