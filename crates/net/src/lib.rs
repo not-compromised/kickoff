@@ -21,6 +21,10 @@ mod relays;
 mod session;
 mod stream;
 
+#[cfg(test)]
+#[path = "../../../tests/support/ports.rs"]
+mod test_ports;
+
 use std::time::Duration;
 
 use iroh::endpoint::{QuicTransportConfig, VarInt};

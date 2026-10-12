@@ -520,3 +520,5 @@ note = "the public Kick future owns publication after removing the peer"
 [[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-reassembly-no-peer-reserve", test = "si_23_denied_port_colluding_fragments_leave_peer_capacity", note = "incomplete denied-port fragments can borrow other peers' reserved assembly places"
 [[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-reassembly-no-peer-reserve", test = "si_23_allowed_port_colluding_fragments_leave_peer_capacity", note = "incomplete allowed-port fragments can borrow other peers' reserved assembly places"
 [[unmutated]] test = "si_23_fragment_flood_does_not_starve_a_legitimate_peer", reason = "positive single-peer composition; removing either local capacity or peer reservation alone leaves the other protection, each independently mutated by the eight-versus-nine and colluding-peer tests"
+
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-bind-any-port", test = "si_29_binding_skips_unusable_ports_before_publishing_a_reachable_endpoint", note = "binding publishes a local port the peer send guard refuses; the recipient denylist remains enforced"

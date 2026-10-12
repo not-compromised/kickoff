@@ -33,7 +33,7 @@ pub use msg::{
     MAX_JOIN_LEN, MAX_NAME_LEN, Member, Name, Platform, PublicWireMessage, WireMessage, decode,
     encode, encode_framed, frame_len, prepare_message,
 };
-pub use ports::{DENIED_PORTS, denied_port};
+pub use ports::{DENIED_PORTS, denied_port, transport_port_allowed};
 pub use ticket::{
     Cap, MAX_TICKET_LEN, Nonce, SessionId, Ticket, TicketTextValue, encode_ticket, parse_ticket,
 };

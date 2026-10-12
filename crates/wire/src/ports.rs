@@ -21,3 +21,8 @@ pub fn denied_port(port: u16) -> bool {
         .iter()
         .any(|&(lo, hi)| (lo..=hi).contains(&port))
 }
+
+/// IP transport peers must use unprivileged ports outside the shared denylist.
+pub fn transport_port_allowed(port: u16) -> bool {
+    port >= 1024 && !denied_port(port)
+}

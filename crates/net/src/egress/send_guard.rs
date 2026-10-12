@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use iroh::TransportAddr;
 use iroh::endpoint::{Connection, WeakConnectionHandle};
 
-use super::{IfaceAddr, denied_port, is_forbidden, is_global};
+use super::{IfaceAddr, is_forbidden, is_global};
 use crate::budget::Bucket;
 
 /// Destinations sent to but not yet validated, at once (§6.3).
@@ -116,8 +116,8 @@ impl View {
             || !(self.own.contains(&ip)
                 || self.gateways.contains(&ip)
                 || self.resolvers.contains(&ip));
-        let port =
-            cfg!(feature = "mutant-si29-guard-any-port") || (port >= 1024 && !denied_port(port));
+        let port = cfg!(feature = "mutant-si29-guard-any-port")
+            || kickoff_wire::transport_port_allowed(port);
         range && host && port
     }
 

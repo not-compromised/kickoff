@@ -410,10 +410,7 @@ async fn si_23_link_without_hello_closed_at_the_deadline() {
         _guard: kickoff_send_guard::Registration,
     }
     impl iroh::endpoint::EndpointHooks for Registration {}
-    let bind = std::net::UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let bind = fixture_bind(std::net::Ipv4Addr::LOCALHOST);
     let registration = kickoff_send_guard::register(bind, std::sync::Arc::new(Attacker)).unwrap();
     let silent = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .clear_ip_transports()

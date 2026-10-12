@@ -513,10 +513,7 @@ impl kickoff_send_guard::Guard for Unfiltered {
 }
 
 pub async fn raw_endpoint_with_window(ip: std::net::Ipv4Addr, window: u32) -> iroh::Endpoint {
-    let bind = std::net::UdpSocket::bind((ip, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let bind = fixture_bind(ip);
     let registration = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
     iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .clear_ip_transports()
@@ -554,3 +551,7 @@ pub fn raw_request(ticket: &Secret<Ticket>, session_key: iroh::EndpointId) -> Jo
         kickoff_version: KICKOFF_VERSION,
     }
 }
+
+#[path = "../../../../tests/support/ports.rs"]
+mod ports;
+pub use ports::bind as fixture_bind;

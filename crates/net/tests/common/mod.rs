@@ -115,10 +115,7 @@ pub async fn raw_endpoint_at(ip: std::net::Ipv4Addr) -> Endpoint {
 }
 
 pub async fn raw_endpoint_with_window(ip: std::net::Ipv4Addr, window: u32) -> Endpoint {
-    let bind = std::net::UdpSocket::bind((ip, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let bind = fixture_bind(ip);
     let registered = kickoff_send_guard::register(bind, std::sync::Arc::new(Unfiltered)).unwrap();
     Endpoint::builder(presets::Minimal)
         .transport_config(
@@ -189,10 +186,7 @@ pub fn raw_bytes(parts: &[&[u8]]) -> Bytes {
 }
 
 pub async fn receiving_endpoint(key: SecretKey) -> Endpoint {
-    let bind = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let bind = fixture_bind(std::net::Ipv4Addr::LOCALHOST);
     let registered = kickoff_send_guard::register(bind, std::sync::Arc::new(Unfiltered)).unwrap();
     Endpoint::builder(presets::Minimal)
         .secret_key(key)
@@ -208,3 +202,7 @@ pub async fn receiving_endpoint(key: SecretKey) -> Endpoint {
         .await
         .unwrap()
 }
+
+#[path = "../../../../tests/support/ports.rs"]
+mod ports;
+pub use ports::bind as fixture_bind;

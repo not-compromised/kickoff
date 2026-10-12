@@ -579,10 +579,7 @@ mod tests {
     }
 
     async fn raw_client(ip: std::net::Ipv4Addr, window: u32) -> Endpoint {
-        let bind = std::net::UdpSocket::bind((ip, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap();
+        let bind = crate::test_ports::bind(ip);
         let registration = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
         Endpoint::builder(presets::Minimal)
             .clear_ip_transports()

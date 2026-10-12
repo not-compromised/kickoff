@@ -17,7 +17,7 @@ use crate::{AbortOnDrop, NetError};
 const RESCAN: Duration = Duration::from_secs(1);
 /// Without a route monitor, how many rescans between re-reading the host.
 const VIEW_POLL_TICKS: u32 = 5;
-/// The chosen port can be taken between choosing and binding; try again.
+/// Unusable candidates and ports taken before binding share this retry bound.
 const BIND_ATTEMPTS: usize = 4;
 
 /// The endpoint's send guard and the task maintaining it.
@@ -45,7 +45,7 @@ pub(crate) async fn bind(
     egress: &Egress,
     view: View,
 ) -> Result<(Endpoint, Guarded), NetError> {
-    bind_with(make, |builder| builder.bind(), ip, egress, view).await
+    bind_with(make, |builder| builder.bind(), free_port, ip, egress, view).await
 }
 
 pub(crate) async fn bind_key(
@@ -55,12 +55,21 @@ pub(crate) async fn bind_key(
     egress: &Egress,
     view: View,
 ) -> Result<(kickoff_secret::key::KeyEndpoint, Guarded), NetError> {
-    bind_with(make, |builder| key.bind(builder), ip, egress, view).await
+    bind_with(
+        make,
+        |builder| key.bind(builder),
+        free_port,
+        ip,
+        egress,
+        view,
+    )
+    .await
 }
 
 async fn bind_with<E, F, Fut>(
     make: impl Fn() -> Builder,
     attach: F,
+    mut choose: impl FnMut(Ipv4Addr) -> Result<u16, NetError>,
     ip: Ipv4Addr,
     egress: &Egress,
     view: View,
@@ -72,7 +81,13 @@ where
 {
     let guard = Arc::new(SendGuard::new(view));
     for _ in 0..BIND_ATTEMPTS {
-        let addr = SocketAddr::from((ip, free_port(ip)?));
+        let port = choose(ip)?;
+        if !cfg!(feature = "mutant-si29-bind-any-port")
+            && !kickoff_wire::transport_port_allowed(port)
+        {
+            continue;
+        }
+        let addr = SocketAddr::from((ip, port));
         let as_hook: Arc<dyn kickoff_send_guard::Guard> =
             if cfg!(feature = "mutant-si29-no-send-guard") {
                 Arc::new(Unfiltered)
@@ -182,4 +197,116 @@ fn public_addrs(ep: &impl EndpointAddress) -> Vec<Ipv4Addr> {
     found.sort_unstable();
     found.dedup();
     found
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+    use crate::egress::IfaceAddr;
+    use iroh::{RelayMode, endpoint::presets};
+    use std::time::Instant;
+
+    #[derive(Debug)]
+    struct Registered {
+        _registration: kickoff_send_guard::Registration,
+    }
+    impl iroh::endpoint::EndpointHooks for Registered {}
+
+    #[tokio::test]
+    async fn unusable_candidates_exhaust_the_existing_bound_without_binding() {
+        let ip = Ipv4Addr::LOCALHOST;
+        let iface = IfaceAddr::loopback();
+        let calls = std::cell::Cell::new(0);
+        let makers = std::cell::Cell::new(0);
+        let result: Result<(Endpoint, Guarded), NetError> = bind_with(
+            || {
+                makers.set(makers.get() + 1);
+                Endpoint::builder(presets::Minimal).clear_ip_transports()
+            },
+            |builder| builder.bind(),
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok(47984)
+            },
+            ip,
+            &Egress::new(iroh::RelayMap::empty(), Some(iface)),
+            View::new(iface, Vec::new(), Vec::new(), Vec::new()),
+        )
+        .await;
+        assert!(matches!(result, Err(NetError::Bind)));
+        assert_eq!(calls.get(), BIND_ATTEMPTS);
+        assert_eq!(makers.get(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn si_29_binding_skips_unusable_ports_before_publishing_a_reachable_endpoint() {
+        let ip = Ipv4Addr::LOCALHOST;
+        let iface = IfaceAddr::loopback();
+        let allowed = crate::test_ports::bind(ip).port();
+        let mut ports = [47984, allowed].into_iter();
+        let (host, guarded) = bind_with(
+            || {
+                Endpoint::builder(presets::Minimal)
+                    .clear_ip_transports()
+                    .relay_mode(RelayMode::Disabled)
+                    .alpns(vec![b"bind-test".to_vec()])
+            },
+            |builder| builder.bind(),
+            |_| Ok(ports.next().expect("candidate sequence exhausted")),
+            ip,
+            &Egress::new(iroh::RelayMap::empty(), Some(iface)),
+            View::new(iface, Vec::new(), Vec::new(), Vec::new()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            host.addr().ip_addrs().all(|a| a.port() == allowed),
+            "binding published a denylisted candidate instead of the usable candidate"
+        );
+        assert!(host.addr().ip_addrs().next().is_some());
+
+        let client_ip = Ipv4Addr::new(127, 0, 0, 2);
+        let client_addr = crate::test_ports::bind(client_ip);
+        let registration = kickoff_send_guard::register(client_addr, Arc::new(Unfiltered)).unwrap();
+        let client = Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .bind_addr(client_addr)
+            .unwrap()
+            .relay_mode(RelayMode::Disabled)
+            .hooks(Registered {
+                _registration: registration,
+            })
+            .bind()
+            .await
+            .unwrap();
+        guarded.guard.answer(client_addr, Instant::now());
+        let (dialed, accepted) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(client.connect(host.addr(), b"bind-test"), async {
+                host.accept().await.unwrap().await
+            })
+        })
+        .await
+        .unwrap();
+        let dialed = dialed.unwrap();
+        let accepted = accepted.unwrap();
+        dialed
+            .send_datagram(bytes::Bytes::from_static(b"reachable"))
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), accepted.read_datagram())
+                .await
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            b"reachable"
+        );
+        client.close().await;
+        host.close().await;
+    }
 }

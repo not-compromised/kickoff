@@ -168,6 +168,12 @@ Current implementation notes and interface differences from design draft 2.
     enumerate its own addresses.
 16. **Shared port denylist.** See
     [wire codec and port ownership](../wire/README.md#codec-and-port-ownership).
+    Local IP binding skips ports the peer send guard refuses before registering
+    or publishing an endpoint. Unusable OS candidates and bind races share the
+    four-attempt limit; exhausting it returns `Bind`. The binder regression
+    forces a denied candidate followed by an allowed one, then completes TLS
+    and receives a datagram. Positive raw fixtures use the same port policy.
+    A translated external port can still be refused by the peer's send guard.
 17. **Vendored advisory scans.** See [development checks](../../docs/development.md#checks)
     for root and pinned-registry scans under one dated exception policy.
 18. **Rate limits on loopback tests.** All in-process tests share 127.0.0.1,

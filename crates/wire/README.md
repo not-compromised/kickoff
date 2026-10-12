@@ -27,6 +27,10 @@ lives in [`kickoff-vlan::codec`](../vlan/src/codec.rs).
 
 [`ports`](src/ports.rs) owns the compiled denied-port policy exported as
 `DENIED_PORTS` and `denied_port`. Both the VLAN filter and net egress use it.
+`transport_port_allowed` owns the unprivileged IP transport port check against
+`DENIED_PORTS`. Endpoint binding and the final send guard share this predicate;
+LAN game-port admission retains its separate configured-port checks.
+
 
 ## Invariants held here
 

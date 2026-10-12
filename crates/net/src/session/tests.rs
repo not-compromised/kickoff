@@ -43,10 +43,7 @@ async fn endpoint(serve: bool, hook: Option<AdmissionHook>) -> Endpoint {
     } else {
         Vec::new()
     };
-    let bind = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let bind = crate::test_ports::bind(Ipv4Addr::LOCALHOST);
     let registered = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
     let builder = Endpoint::builder(presets::Minimal)
         .clear_ip_transports()
@@ -273,10 +270,7 @@ async fn si_18_each_datagram_rechecks_the_generation() {
 
 /// A bare iroh endpoint on `ip`, with no Kickoff policy.
 async fn raw(ip: Ipv4Addr) -> Endpoint {
-    let bind = std::net::UdpSocket::bind((ip, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let bind = crate::test_ports::bind(ip);
     let registered = kickoff_send_guard::register(bind, Arc::new(Unfiltered)).unwrap();
     Endpoint::builder(presets::Minimal)
         .clear_ip_transports()
@@ -451,10 +445,7 @@ impl kickoff_send_guard::Guard for ContextRecorder {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn si_29_transport_carries_distinct_connection_contexts() {
-    let bind = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let bind = crate::test_ports::bind(Ipv4Addr::LOCALHOST);
     let recorded = Arc::new(ContextRecorder::default());
     let registered = kickoff_send_guard::register(bind, recorded.clone()).unwrap();
     let client = Endpoint::builder(presets::Minimal)
@@ -598,10 +589,7 @@ async fn guard_connection_snapshot_worker() {
         }
     }
 
-    let bind = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let bind = crate::test_ports::bind(Ipv4Addr::LOCALHOST);
     let guard = Arc::new(SendGuard::new(View::new(
         IfaceAddr::loopback(),
         Vec::new(),

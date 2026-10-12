@@ -38,8 +38,6 @@ const NOT_GLOBAL: [(Ipv4Addr, u8); 15] = [
     (Ipv4Addr::new(240, 0, 0, 0), 4),
 ];
 
-use kickoff_wire::denied_port;
-
 fn in_net(ip: Ipv4Addr, (net, len): (Ipv4Addr, u8)) -> bool {
     let mask = u32::MAX
         .checked_shl(u32::from(32u8.saturating_sub(len)))
