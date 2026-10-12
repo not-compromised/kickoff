@@ -504,3 +504,7 @@ note = "the public Kick future owns publication after removing the peer"
 [[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-flow-table-grows", test = "si_23_broadcast_and_unicast_share_the_per_peer_flow_limit", note = "mixed broadcast and unicast permissions exceed the peer's combined 64-flow limit"
 [[mutant]] si = "SI-18", crate = "kickoff-vlan", test_crate = "kickoff-session", feature = "mutant-si18-flows-survive-reset", test = "si_18_reconnect_forgets_broadcast_return_flows", note = "the replacement link answers a broadcast flow retained by the VLAN generation reset"
 [[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-no-flow-reset", test = "si_18_reconnect_forgets_broadcast_return_flows", note = "route replacement skips clearing the previous generation's broadcast flow"
+
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-ipc-client-cancel-reuse", test = "cancelled_client_call_cannot_shift_replies", note = "a cancelled client exchange leaves an old reply available to answer another command"
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-ipc-recv-cancel-reuse", test = "cancelled_partial_server_receive_closes_channel", note = "a cancelled receive permits reuse after consuming a partial frame"
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-ipc-reply-cancel-reuse", test = "cancelled_blocked_server_reply_closes_channel", note = "a cancelled blocked reply leaves the channel available for another request"
