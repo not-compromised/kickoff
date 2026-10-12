@@ -23,26 +23,36 @@ mutant-si7-reclaim-any = []
 mutant-si7-client-any-socket = []
 mutant-si7-pid-not-pidfd = []
 mutant-si7-accept-ancillary = []
+mutant-si7-control-unchecked = []
+mutant-si7-control-fd-unchecked = []
+mutant-si7-facade-lifetime-unchecked = []
+mutant-si7-control-count-unchecked = []
+mutant-si7-worker-exe-unchecked = []
+mutant-si23-facade-unbounded = []
 mutant-si10-skip-version = []
 mutant-si10-client-skips-version = []
 mutant-si10-any-role = []
+mutant-si10-control-skips-version = []
 mutant-si23-ipc-frame-unbounded = []
 mutant-si23-ipc-no-frame-deadline = []
 mutant-si23-ipc-no-rate-limit = []
 mutant-si23-ipc-unbounded-channels = []
 mutant-si30-ticket-text-debug = []
+mutant-si30-facade-core-zero = []
+mutant-si30-facade-no-probe = []
+mutant-si30-probe-fd-unchecked = []
 
 [dependencies]
 iroh-base.workspace = true
 kickoff-secret.workspace = true
 kickoff-wire.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix.workspace = true
-rustix = { workspace = true, features = ["event", "net"] }
+rustix = { workspace = true, features = ["event", "net", "stdio"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

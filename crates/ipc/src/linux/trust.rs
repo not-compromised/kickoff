@@ -95,6 +95,10 @@ impl Trust {
     /// answer counts only if that process is still running after the read:
     /// if it is, the pid cannot have been recycled in between.
     pub(super) fn check(&self, socket: &UnixStream) -> Result<PeerCred, IpcError> {
+        self.pin(socket).map(|(peer, _)| peer)
+    }
+
+    pub(super) fn pin(&self, socket: &UnixStream) -> Result<(PeerCred, Option<OwnedFd>), IpcError> {
         let cred = socket.peer_cred()?;
         if !cfg!(feature = "mutant-si7-no-uid-check") && cred.uid() != self.uid {
             return Err(IpcError::PeerRejected);
@@ -113,15 +117,18 @@ impl Trust {
         if !cfg!(feature = "mutant-si7-no-exe-check") && !self.exes.contains(&exe) {
             return Err(IpcError::PeerRejected);
         }
-        if let Some(pidfd) = pinned
-            && !still_running(&pidfd)
+        if let Some(pidfd) = &pinned
+            && !still_running(pidfd)
         {
             return Err(IpcError::PeerRejected);
         }
-        Ok(PeerCred {
-            uid: cred.uid(),
-            pid,
-        })
+        Ok((
+            PeerCred {
+                uid: cred.uid(),
+                pid,
+            },
+            pinned,
+        ))
     }
 }
 

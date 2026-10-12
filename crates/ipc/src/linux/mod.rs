@@ -4,12 +4,14 @@
 
 mod client;
 mod dir;
+mod facade;
 mod server;
 mod stream;
 mod trust;
 
 pub use client::{Client, connect};
 pub use dir::RuntimeDir;
+pub use facade::{Facade, Worker, run_core_probe_if_requested};
 pub use server::{Channel, Server};
 pub(crate) use stream::AncillaryRefused;
 pub use trust::Trust;

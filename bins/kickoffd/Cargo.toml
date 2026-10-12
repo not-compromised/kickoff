@@ -11,3 +11,5 @@ workspace = true
 
 [dependencies]
 kickoff-secret.workspace = true
+kickoff-ipc.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "macros", "sync"] }

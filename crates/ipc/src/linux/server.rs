@@ -21,22 +21,22 @@ use crate::{
 
 /// kickoffd's listening socket.
 pub struct Server {
-    listener: UnixListener,
-    trust: Trust,
-    slots: Arc<Semaphore>,
-    health: Arc<Counters>,
+    pub(super) listener: UnixListener,
+    pub(super) trust: Trust,
+    pub(super) slots: Arc<Semaphore>,
+    pub(super) health: Arc<Counters>,
     path: PathBuf,
     inode: (u64, u64),
 }
 
 #[derive(Default)]
-struct Counters {
-    peers_rejected: AtomicU64,
+pub(super) struct Counters {
+    pub(super) peers_rejected: AtomicU64,
     frames_refused: AtomicU64,
 }
 
 impl Counters {
-    fn bump(counter: &AtomicU64) {
+    pub(super) fn bump(counter: &AtomicU64) {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -116,53 +116,64 @@ impl Server {
         stream: UnixStream,
         slot: OwnedSemaphorePermit,
     ) -> Result<Channel, IpcError> {
-        // Nothing has been read or written yet, so a refused caller learns
-        // only that the connection closed.
-        let peer = match self.trust.check(&stream) {
-            Ok(peer) => peer,
-            Err(e) => {
-                Counters::bump(&self.health.peers_rejected);
-                return Err(e);
-            }
-        };
-        let mut stream = DataOnly::new(stream);
-        let role = timeout(HANDSHAKE_DEADLINE, async {
-            let hello = read_frame(&mut stream, codec::HELLO_LEN).await?;
-            let (welcome, role) = match codec::decode_hello(&hello) {
-                Ok(role) => (Welcome::Ok, Ok(role)),
-                Err(refusal) => (refusal, Err(refusal)),
-            };
-            write_frame(&mut stream, &codec::encode_welcome(welcome)).await?;
-            Ok::<_, IpcError>(role)
-        })
-        .await
-        .map_err(|_| IpcError::Timeout)
-        .and_then(|r| r);
-        let role = match role {
-            Ok(Ok(role)) => role,
-            Ok(Err(refusal)) => {
-                Counters::bump(&self.health.frames_refused);
-                return Err(match refusal {
-                    Welcome::Role => IpcError::Role,
-                    Welcome::Ok | Welcome::Version => IpcError::Version,
-                });
-            }
-            Err(e) => {
-                Counters::bump(&self.health.frames_refused);
-                return Err(e);
-            }
-        };
-        Ok(Channel {
-            stream,
-            role,
-            peer,
-            budget: RateBudget::new(),
-            pending: false,
-            dead: false,
-            health: Arc::clone(&self.health),
-            _slot: slot,
-        })
+        admit_stream(&self.trust, Arc::clone(&self.health), stream, slot, None).await
     }
+}
+
+pub(super) async fn admit_stream(
+    trust: &Trust,
+    health: Arc<Counters>,
+    stream: UnixStream,
+    slot: OwnedSemaphorePermit,
+    lease: Option<super::facade::Lease>,
+) -> Result<Channel, IpcError> {
+    // Nothing has been read or written yet, so a refused caller learns
+    // only that the connection closed.
+    let peer = match trust.check(&stream) {
+        Ok(peer) => peer,
+        Err(e) => {
+            Counters::bump(&health.peers_rejected);
+            return Err(e);
+        }
+    };
+    let mut stream = DataOnly::new(stream);
+    let role = timeout(HANDSHAKE_DEADLINE, async {
+        let hello = read_frame(&mut stream, codec::HELLO_LEN).await?;
+        let (welcome, role) = match codec::decode_hello(&hello) {
+            Ok(role) => (Welcome::Ok, Ok(role)),
+            Err(refusal) => (refusal, Err(refusal)),
+        };
+        write_frame(&mut stream, &codec::encode_welcome(welcome)).await?;
+        Ok::<_, IpcError>(role)
+    })
+    .await
+    .map_err(|_| IpcError::Timeout)
+    .and_then(|r| r);
+    let role = match role {
+        Ok(Ok(role)) => role,
+        Ok(Err(refusal)) => {
+            Counters::bump(&health.frames_refused);
+            return Err(match refusal {
+                Welcome::Role => IpcError::Role,
+                Welcome::Ok | Welcome::Version => IpcError::Version,
+            });
+        }
+        Err(e) => {
+            Counters::bump(&health.frames_refused);
+            return Err(e);
+        }
+    };
+    Ok(Channel {
+        stream,
+        role,
+        peer,
+        budget: RateBudget::new(),
+        pending: false,
+        dead: false,
+        health,
+        _slot: slot,
+        _lease: lease,
+    })
 }
 
 impl Drop for Server {
@@ -211,6 +222,7 @@ pub struct Channel {
     dead: bool,
     health: Arc<Counters>,
     _slot: OwnedSemaphorePermit,
+    _lease: Option<super::facade::Lease>,
 }
 
 impl std::fmt::Debug for Channel {

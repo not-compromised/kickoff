@@ -26,13 +26,18 @@ pub use command::{
     UiCommand,
 };
 #[cfg(target_os = "linux")]
-pub use linux::{Channel, Client, RuntimeDir, Server, Trust, connect};
+pub use linux::{
+    Channel, Client, Facade, RuntimeDir, Server, Trust, Worker, connect,
+    run_core_probe_if_requested,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum IpcError {
     #[error("not supported on this platform yet")]
     Unsupported,
+    #[error("kernel core-dump suppression probe failed")]
+    Hardening,
     #[error("runtime directory is missing or has the wrong owner, type or mode")]
     UnsafeDir,
     #[error("endpoint name taken by a live endpoint or by something that is not our socket")]

@@ -387,7 +387,7 @@ async fn si_7_descriptors_from_a_caller_close_the_channel_and_are_closed() {
                 hello(kickoff_ipc::PROTOCOL_VERSION, CLI),
             )
         };
-        let (pipe_r, pipe_w) = rustix::pipe::pipe().unwrap();
+        let (pipe_r, pipe_w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         send_with_fd(&stream, &bytes, std::os::fd::AsFd::as_fd(&pipe_w));
         drop(pipe_w);
 
@@ -578,22 +578,58 @@ fn hardened_server_helper() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let dir = RuntimeDir::open_in(Path::new(&base)).unwrap();
-        let server = Server::bind(&dir, trust_me()).unwrap();
-        kickoff_secret::harden_process().unwrap();
+        let mut worker = std::process::Command::new(me());
+        worker.args([
+            "--exact",
+            "hardened_worker_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
+        worker
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let facade = kickoff_ipc::Facade::spawn(&dir, trust_me(), worker)
+            .await
+            .unwrap();
         println!("KIPC hardened-ready");
         std::io::stdout().flush().unwrap();
-        if let Ok(Ok(mut channel)) =
-            tokio::time::timeout(Duration::from_secs(3), server.accept()).await
-        {
-            channel.recv().await.unwrap();
-            channel.reply(Reply::Done).await.unwrap();
+        let _ = facade.run().await;
+    });
+}
+
+#[test]
+fn hardened_worker_helper() {
+    kickoff_ipc::run_core_probe_if_requested().unwrap();
+    if std::env::var_os(HARDENED_SERVER_ENV).is_none() {
+        return;
+    }
+    kickoff_secret::harden_process().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut worker = kickoff_ipc::Worker::inherit(trust_me(), trust_me())
+            .await
+            .unwrap();
+        while let Ok(mut channel) = worker.accept().await {
+            tokio::spawn(async move {
+                while let Ok(request) = channel.recv().await {
+                    let reply = match request {
+                        kickoff_ipc::Request::Cli(CliCommand::Join(ticket)) => {
+                            Reply::Invite(ticket)
+                        }
+                        _ => Reply::Done,
+                    };
+                    if channel.reply(reply).await.is_err() {
+                        break;
+                    }
+                }
+            });
         }
     });
 }
 
 /// Real daemon hardening and client authentication must hold together.
 #[tokio::test]
-async fn hardened_server_remains_authenticatable() {
+async fn si_7_hardened_server_remains_authenticatable() {
     use std::io::{BufRead, BufReader};
     let base = TempBase::new();
     let dir = base.dir();

@@ -16,6 +16,60 @@ call(R::Command) ─ frame ≤ 4 KiB ─────────►  recv: rate 
   ◄──────────────────── reply ≤ 8 KiB ──────  reply: allowed for role?
 ```
 
+## Hardened daemon
+
+`kickoffd` runs two modes of the same installed executable. Its facade creates
+and owns the listening socket. Before reading any client bytes it checks the
+same uid, installed executable inode and live kernel pidfd. It passes the
+untouched accepted stream and one connection lease over an inherited, unnamed
+Unix socketpair to its direct child. The facade drops its accepted-stream
+copy immediately. Client hello, tickets, commands and replies enter userspace
+only in the worker.
+
+The worker is nondumpable and keeps both core limits at zero. It authenticates
+its control socket's creator as its live, allowlisted direct parent, retaining
+the kernel pidfd. It checks each transferred stream's kernel client identity
+again before the normal version handshake. Client-side `SO_PEERCRED` and
+`SO_PEERPIDFD` still identify the live facade that created the listener after
+the accepted stream moves to the worker. No executable descriptor supplied by
+a peer counts as identity proof.
+
+The private protocol carries the shared `PROTOCOL_VERSION` before every tag.
+A wrong version closes all received descriptors before they are used. It
+permits one ready tag without descriptors, followed by one connection tag with
+exactly two descriptors. Both must be connected Unix
+streams; the lease must be unnamed and created by that same facade. Unknown
+tags, credentials, truncated ancillary data, extra or missing descriptors and
+wrong descriptor types close the control channel. External streams retain
+`DataOnly`: every external ancillary message closes the channel. They never
+use the descriptor-transfer reader.
+
+At most 16 transferred connections, including pending handshakes, exist at
+once. Lease EOF releases a facade slot. The worker watches both control EOF and
+the facade pidfd even while clients are idle; either closes every transferred
+stream. Dropping the facade kills and reaps its direct worker. The facade alone
+owns socket-path cleanup, guarded by the inode it created. Abrupt facade death
+can leave its dead pathname, reclaimed by the existing exclusive-bind checks.
+
+The facade stays dumpable so clients can inspect its actual executable. Its
+core soft and hard limits are **one byte**, not zero: Linux's piped core handler
+ignores zero, but treats one as its recursion sentinel and skips the handler.
+File-backed dumps refuse a limit below the format's minimum before creating a
+file. This is a [Linux kernel convention](https://code.googlesource.com/linux/torvalds/linux/+/18ded910b589839e38a51623a179837ab4cc3789/fs/coredump.c#579),
+not a portable hardening interface. Before listening, the facade execs a
+secret-free probe with a clean environment, null stdio and private scratch cwd.
+The child refuses inherited descriptors beyond stdio, verifies dumpability,
+and aborts. The parent's kernel wait status must show SIGABRT without a core
+and no scratch files. A wrong exit, core, or three-second timeout refuses
+startup and reaps the child. This probes the running kernel and handler; a
+handler configuration change after startup still requires a restart.
+
+Same-user malware remains outside the design's boundary. A ptrace-compromised
+facade can steal descriptors or IPC authority during handoff; keeping payloads
+out of its memory does not prevent that. The worker's memory and secrets remain
+nondumpable. M2 verifies this IPC seam, including installed daemon startup;
+commands in the binary return `Refused(Failed)` until final adapters exist.
+
 ## Interface
 
 - `RuntimeDir::{open, open_in, socket_path}`.
@@ -25,6 +79,10 @@ call(R::Command) ─ frame ≤ 4 KiB ─────────►  recv: rate 
   `SO_PEERPIDFD`, reads `/proc/<pid>/exe`, and counts the answer only if the
   pidfd still names a running process.
 - `Server::{bind(&dir, trust), accept, health}`; `Channel::{role, peer, recv, reply}`.
+  `Server` is for a dumpable in-process endpoint. The hardened daemon uses
+  `Facade::{spawn, run}` and `Worker::{inherit, from_control, accept}` instead.
+  The executable calls `run_core_probe_if_requested` first in its worker entry.
+  `Facade::spawn` accepts a command only for its own executable inode.
 - `connect::<R>(&dir, &trust) -> Client<R>`; `Client::{call, server}`. `R` is
   `role::{Cli, UiMain, Overlay}`, and `Client<R>::call` takes only
   `R::Command`, so CLI code cannot build a UI command.
