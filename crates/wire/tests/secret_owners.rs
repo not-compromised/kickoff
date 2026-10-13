@@ -53,10 +53,22 @@ fn compile(source: &str) -> std::process::Output {
         .map(|f| format!("{f:?}"))
         .collect::<Vec<_>>()
         .join(",");
+    // Every probe shares one target directory, and as its own workspace root
+    // each has the same path identity, so one package name would make every
+    // probe the same Cargo unit. A probe written while another process held
+    // the target lock then predates that build's output, and Cargo reports the
+    // other probe's result as fresh. Naming the package after its source
+    // makes a reused result always the result of this same program.
+    let name = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        source.hash(&mut hasher);
+        format!("secret-owner-consumer-{:016x}", hasher.finish())
+    };
     let manifest = format!(
         r#"
 [package]
-name = "secret-owner-consumer"
+name = "{name}"
 version = "0.0.0"
 edition = "2024"
 [workspace]
