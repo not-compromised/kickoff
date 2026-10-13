@@ -46,7 +46,11 @@ approximate: game to game p50 ≤ 100 µs and p99 ≤ 500 µs
 (`kickoff-net --test latency`), and codec plus filter ≤ 2 µs per datagram
 (`kickoff-vlan --test hot_path`), and the send guard on an approved
 destination ≤ 50 ns per send (`kickoff-net --lib
-send_guard_on_an_approved_destination_within_budget`).
+send_guard_on_an_approved_destination_within_budget`). These time the wall
+clock, so the step runs one test at a time and needs a machine that other work
+does not saturate. A latency failure reports how long the test's threads
+waited for a CPU during the measurement; a wait near the measured tail means
+contention, not a slower path.
 
 ### Mutants (SI-33)
 

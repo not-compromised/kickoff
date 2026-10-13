@@ -56,11 +56,14 @@ cargo test --workspace --locked
 step "release latency (design §7)"
 # Debug builds assert only loose ceilings; these assert the §7 budgets
 # (p50 <= 100 us, p99 <= 500 us game to game; <= 2 us codec plus filter;
-# <= 50 ns for the send guard on an approved destination).
-cargo test --release --locked -p kickoff-session --test budget -- --nocapture
-cargo test --release --locked -p kickoff-net --test latency -- --nocapture
-cargo test --release --locked -p kickoff-net --lib send_guard_on_an_approved_destination_within_budget -- --nocapture
-cargo test --release --locked -p kickoff-vlan --test hot_path -- --nocapture
+# <= 50 ns for the send guard on an approved destination). They time the wall
+# clock, so they run one test at a time and need a machine not saturated by
+# other work. Both commands select the same packages: different selections
+# resolve different features, and each would rebuild iroh and every kickoff
+# crate with fat LTO.
+latency=(--release --locked -p kickoff-session -p kickoff-net -p kickoff-vlan)
+cargo test "${latency[@]}" --test budget --test latency --test hot_path -- --test-threads=1 --nocapture
+cargo test "${latency[@]}" --lib send_guard_on_an_approved_destination_within_budget -- --nocapture
 
 step "cargo deny"
 python3 scripts/advisory-exceptions.py --output "$deny_config"
