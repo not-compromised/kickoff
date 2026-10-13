@@ -48,9 +48,11 @@ approximate: game to game p50 ≤ 100 µs and p99 ≤ 500 µs
 destination ≤ 50 ns per send (`kickoff-net --lib
 send_guard_on_an_approved_destination_within_budget`). These time the wall
 clock, so the step runs one test at a time and needs a machine that other work
-does not saturate. A latency failure reports how long the test's threads
-waited for a CPU during the measurement; a wait near the measured tail means
-contention, not a slower path.
+does not saturate. A latency failure also reports the total time the test's
+threads spent waiting for a CPU during the run. That figure is diagnostic
+context only: it is summed over all threads and the whole run, so it cannot
+show that any single slow datagram was caused by contention. Treat every
+failure as a possible regression until a rerun on an idle machine passes.
 
 ### Mutants (SI-33)
 

@@ -1,7 +1,7 @@
 //! Shared by the design §7 latency tests. The budgets are wall-clock, so a
-//! failed measurement says how long this process's threads waited for a CPU
-//! meanwhile: a wait comparable to the measured tail means another process
-//! held the cores, not that the path is slow.
+//! failed measurement also reports how long this process's threads waited for
+//! a CPU over the run. That total is diagnostic context, not an explanation:
+//! it cannot attribute any single slow datagram to contention.
 #![allow(dead_code, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::time::Duration;
