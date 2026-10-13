@@ -12,6 +12,8 @@
 )]
 
 mod common;
+#[path = "../../../tests/support/latency.rs"]
+mod latency;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,10 +21,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use kickoff_wire::{LanDatagram, PeerSlot};
-
-fn percentile(sorted: &[Duration], p: usize) -> Duration {
-    sorted[(sorted.len() * p / 100).min(sorted.len() - 1)]
-}
+use latency::{contention, percentile, run_queue_wait};
 
 struct Flood {
     host: kickoff_session::Session,
@@ -231,35 +230,46 @@ async fn latency_p50_p99_over_10k_datagrams() {
     const COUNT: usize = 10_000;
     // Below both per-peer bursts (1000), refilled by the pause between batches.
     const BATCH: usize = 500;
+    // One unmeasured batch first, so first-use costs on a new link stay out
+    // of the steady-state figure.
+    const WARMUP: usize = BATCH;
     let mut samples = Vec::with_capacity(COUNT);
-    for i in 0..COUNT {
+    let mut waited = None;
+    for i in 0..WARMUP + COUNT {
+        if i == WARMUP {
+            waited = run_queue_wait();
+        }
         let payload = (i as u32).to_be_bytes();
         let frame = udp(2, Some(1), 50_000, GAME_PORT, &payload);
         let sent = Instant::now();
         alice.game.send_frame(frame).unwrap();
         let got = next_udp(&host.game, Duration::from_secs(5)).await.unwrap();
-        samples.push(sent.elapsed());
+        let took = sent.elapsed();
         assert_eq!(got.payload, payload);
+        if i >= WARMUP {
+            samples.push(took);
+        }
         if i % BATCH == BATCH - 1 {
             tokio::time::sleep(Duration::from_millis(400)).await;
         }
     }
+    let contention = contention(waited);
     samples.sort();
     let (p50, p99) = (percentile(&samples, 50), percentile(&samples, 99));
     eprintln!(
-        "game to game, one way, {COUNT} datagrams: p50 {p50:?}, p99 {p99:?}, max {:?}",
+        "game to game, one way, {COUNT} datagrams: p50 {p50:?}, p99 {p99:?}, max {:?}; {contention}",
         samples[COUNT - 1]
     );
     if cfg!(debug_assertions) {
-        assert!(p99 < Duration::from_millis(20), "p99 {p99:?}");
+        assert!(p99 < Duration::from_millis(20), "p99 {p99:?}; {contention}");
     } else {
         assert!(
             p50 <= Duration::from_micros(100),
-            "p50 {p50:?} over the §7 budget"
+            "p50 {p50:?} over the §7 budget; {contention}"
         );
         assert!(
             p99 <= Duration::from_micros(500),
-            "p99 {p99:?} over the §7 budget"
+            "p99 {p99:?} over the §7 budget; {contention}"
         );
     }
 }
