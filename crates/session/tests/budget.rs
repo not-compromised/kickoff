@@ -23,6 +23,11 @@ use common::*;
 use kickoff_wire::{LanDatagram, PeerSlot};
 use latency::{contention, percentile, run_queue_wait};
 
+/// Every test here floods a host or times datagrams against a wall-clock
+/// ceiling. Run concurrently, one test's flood takes the cores another test is
+/// timing, so each holds this for its whole run.
+static ALONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Flood {
     host: kickoff_session::Session,
     flood_link: Arc<kickoff_net::Link>,
@@ -132,7 +137,7 @@ async fn pings(other: &GuestNode, count: u32) -> Vec<Duration> {
         if back.is_some_and(|s| s.payload == seq.to_be_bytes()) {
             rtts.push(sent_at.elapsed());
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     rtts.sort();
     rtts
@@ -143,12 +148,19 @@ async fn pings(other: &GuestNode, count: u32) -> Vec<Duration> {
 /// fast meanwhile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_23_peer_over_budget_is_limited_and_another_keeps_its_latency() {
+    let _alone = ALONE.lock().await;
     let f = flood_setup().await;
     let stop = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
     let flooding = flood(Arc::clone(&f.flood_link), Some(20), Arc::clone(&stop));
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let rtts = pings(&f.other, 400).await;
+    let waited = run_queue_wait();
+    // A p99 over 400 pings fails on five preempted round trips; over 2000 it
+    // is a steady estimate of the same tail, so other processes' scheduling
+    // noise does not decide the result.
+    const PINGS: usize = 2000;
+    let rtts = pings(&f.other, PINGS as u32).await;
+    let contention = contention(waited);
     stop.store(true, Ordering::Relaxed);
     let sent = flooding.await.unwrap();
     let took = started.elapsed();
@@ -173,16 +185,19 @@ async fn si_23_peer_over_budget_is_limited_and_another_keeps_its_latency() {
         "{delivered} flood datagrams reached the game, budget {allowance}"
     );
     assert!(
-        rtts.len() >= 396,
-        "the other guest lost {} of 400 pings",
-        400 - rtts.len()
+        rtts.len() >= PINGS - PINGS / 100,
+        "the other guest lost {} of {PINGS} pings",
+        PINGS - rtts.len()
     );
     let ceiling = if cfg!(debug_assertions) {
         Duration::from_millis(20)
     } else {
         Duration::from_millis(2)
     };
-    assert!(p99 <= ceiling, "the other guest's p99 RTT is {p99:?}");
+    assert!(
+        p99 <= ceiling,
+        "the other guest's p99 RTT is {p99:?}; {contention}"
+    );
     assert!(
         f.host.members().iter().any(|m| m.slot.get() == 2),
         "a peer under 10x its budget was disconnected"
@@ -193,6 +208,7 @@ async fn si_23_peer_over_budget_is_limited_and_another_keeps_its_latency() {
 /// above 10x for 5 s).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn si_23_peer_far_over_budget_is_disconnected() {
+    let _alone = ALONE.lock().await;
     let f = flood_setup().await;
     let stop = Arc::new(AtomicBool::new(false));
     let flooding = flood(Arc::clone(&f.flood_link), None, Arc::clone(&stop));
@@ -222,6 +238,7 @@ async fn si_23_peer_far_over_budget_is_disconnected() {
 /// checks the budget itself and prints the numbers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn latency_p50_p99_over_10k_datagrams() {
+    let _alone = ALONE.lock().await;
     let host = host().await;
     let alice = Identity::new().await;
     let ticket = host.bound(alice.id());
