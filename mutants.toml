@@ -671,6 +671,8 @@ note = "the public Kick future owns publication after removing the peer"
 
 [[mutant]] si = "SI-14", crate = "kickoff-game", feature = "mutant-si14-done-code-ignored", test = "si_14_a_dump_ending_in_an_error_is_refused", note = "a dump whose NLMSG_DONE carries an errno is taken as complete"
 
+[[mutant]] si = "SI-38", crate = "kickoff-game", feature = "mutant-si38-helper-deadline-late", test = "si_38_an_expired_deadline_wins_over_a_readable_helper_pipe", note = "a readable helper pipe is served before the expired deadline, so a helper that keeps it readable runs until the output cap"
+
 # Named by the design for later milestones; the code they mutate does not exist on M2.
 
 [[pending]]

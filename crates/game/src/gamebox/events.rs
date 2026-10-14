@@ -109,10 +109,16 @@ impl Events {
                 self.changed |= self.watch.as_ref().is_some_and(HostWatch::changed);
                 continue;
             }
+            // The deadline wins over a descriptor that is always readable,
+            // such as a helper streaming output without end.
+            let expired = Instant::now() >= deadline;
+            if expired && !cfg!(feature = "mutant-si38-helper-deadline-late") {
+                return Ok(Wake::Timeout);
+            }
             if extra_ready {
                 return Ok(Wake::Extra);
             }
-            if Instant::now() >= deadline {
+            if expired {
                 return Ok(Wake::Timeout);
             }
         }
@@ -286,5 +292,40 @@ pub(super) fn timespec(d: Duration) -> Timespec {
     Timespec {
         tv_sec: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
         tv_nsec: i64::from(d.subsec_nanos()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn si_38_an_expired_deadline_wins_over_a_readable_helper_pipe() {
+        // A helper that keeps its pipe readable must still be stopped at
+        // its deadline: an expired wait reports Timeout even though output
+        // is waiting, and never Extra.
+        use std::io::Write;
+        use std::os::fd::AsFd;
+        let mut events = Events::new().unwrap();
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"output that is never read").unwrap();
+        let started = Instant::now();
+        let expired = started
+            .checked_sub(Duration::from_millis(1))
+            .unwrap_or(started);
+        for _ in 0..3 {
+            assert_eq!(
+                events.wait(Some(reader.as_fd()), expired).ok(),
+                Some(Wake::Timeout),
+                "a readable pipe outlived its deadline"
+            );
+        }
+        // Before the deadline the same pipe wakes the wait.
+        assert_eq!(
+            events
+                .wait(Some(reader.as_fd()), after(Duration::from_secs(1)))
+                .ok(),
+            Some(Wake::Extra)
+        );
     }
 }
