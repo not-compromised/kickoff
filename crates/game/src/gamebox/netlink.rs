@@ -145,27 +145,41 @@ fn dump(sock: &OwnedFd, request: RouteNetlinkMessage) -> Result<Vec<RouteNetlink
     let mut buf = vec![0u8; 1 << 16];
     loop {
         let (_, len) = rustix::net::recv(sock, &mut buf[..], RecvFlags::empty())?;
-        let mut rest = buf.get(..len).ok_or(Refused::Network)?;
-        while !rest.is_empty() {
-            let size = NetlinkBuffer::new_checked(rest)
-                .map_err(|_| Refused::Network)?
-                .length();
-            let size = usize::try_from(size).map_err(|_| Refused::Network)?;
-            let (one, tail) = rest.split_at_checked(size).ok_or(Refused::Network)?;
-            rest = tail;
-            let parsed = NetlinkMessage::<RouteNetlinkMessage>::deserialize(one)
-                .map_err(|_| Refused::Network)?;
-            if parsed.header.flags & NLM_F_DUMP_INTR != 0 {
-                return Err(Refused::Network);
-            }
-            match parsed.payload {
-                NetlinkPayload::Done(_) => return Ok(found),
-                NetlinkPayload::InnerMessage(inner) => found.push(inner),
-                NetlinkPayload::Noop => {}
-                _ => return Err(Refused::Network),
-            }
+        if read_chunk(buf.get(..len).ok_or(Refused::Network)?, &mut found)? {
+            return Ok(found);
         }
     }
+}
+
+/// Parses one received chunk of a dump into `found`; true once the dump is
+/// done. The kernel reports a dump that failed part way through as an
+/// errno in NLMSG_DONE, not always with NLM_F_DUMP_INTR, so only a zero code
+/// completes it; anything else would be a partial view.
+fn read_chunk(mut rest: &[u8], found: &mut Vec<RouteNetlinkMessage>) -> Result<bool, Refused> {
+    while !rest.is_empty() {
+        let size = NetlinkBuffer::new_checked(rest)
+            .map_err(|_| Refused::Network)?
+            .length();
+        let size = usize::try_from(size).map_err(|_| Refused::Network)?;
+        let (one, tail) = rest.split_at_checked(size).ok_or(Refused::Network)?;
+        rest = tail;
+        let parsed = NetlinkMessage::<RouteNetlinkMessage>::deserialize(one)
+            .map_err(|_| Refused::Network)?;
+        if parsed.header.flags & NLM_F_DUMP_INTR != 0 {
+            return Err(Refused::Network);
+        }
+        match parsed.payload {
+            NetlinkPayload::Done(done)
+                if done.code == 0 || cfg!(feature = "mutant-si14-done-code-ignored") =>
+            {
+                return Ok(true);
+            }
+            NetlinkPayload::InnerMessage(inner) => found.push(inner),
+            NetlinkPayload::Noop => {}
+            _ => return Err(Refused::Network),
+        }
+    }
+    Ok(false)
 }
 
 /// A socket subscribed to every IPv4 address, route and rule change. It is
@@ -253,4 +267,50 @@ pub(super) fn answer(
     i32::from_ne_bytes(field(16)?)
         .checked_neg()
         .ok_or(Refused::Network)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netlink_packet_core::DoneMessage;
+
+    fn bytes(payload: NetlinkPayload<RouteNetlinkMessage>) -> Vec<u8> {
+        let mut message = NetlinkMessage::new(NetlinkHeader::default(), payload);
+        message.finalize();
+        let mut out = vec![0u8; message.buffer_len()];
+        message.serialize(&mut out);
+        out
+    }
+
+    #[test]
+    fn si_14_a_dump_ending_in_an_error_is_refused() {
+        let mut address = AddressMessage::default();
+        address.header.family = AddressFamily::Inet;
+        address.header.prefix_len = 24;
+        address
+            .attributes
+            .push(AddressAttribute::Address(IpAddr::V4(
+                "203.0.113.1".parse().unwrap(),
+            )));
+        let partial = bytes(NetlinkPayload::InnerMessage(
+            RouteNetlinkMessage::NewAddress(address),
+        ));
+        for (code, complete) in [(0, true), (-4, false), (-105, false)] {
+            let mut message = DoneMessage::default();
+            message.code = code;
+            let done = bytes(NetlinkPayload::Done(message));
+            let mut found = Vec::new();
+            let result = read_chunk(&[partial.as_slice(), &done].concat(), &mut found);
+            if complete {
+                assert_eq!(result, Ok(true));
+                assert_eq!(found.len(), 1);
+            } else {
+                assert_eq!(
+                    result,
+                    Err(Refused::Network),
+                    "a dump that ended with errno {code} was taken as complete"
+                );
+            }
+        }
+    }
 }

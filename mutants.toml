@@ -669,6 +669,8 @@ note = "the public Kick future owns publication after removing the peer"
 
 [[mutant]] si = "SI-36", crate = "kickoff-game", feature = "mutant-si36-setuid-bwrap-allowed", test = "si_36_launch_refuses_a_setuid_or_setgid_bwrap", note = "a setuid or setgid bwrap is accepted"
 
+[[mutant]] si = "SI-14", crate = "kickoff-game", feature = "mutant-si14-done-code-ignored", test = "si_14_a_dump_ending_in_an_error_is_refused", note = "a dump whose NLMSG_DONE carries an errno is taken as complete"
+
 # Named by the design for later milestones; the code they mutate does not exist on M2.
 
 [[pending]]
