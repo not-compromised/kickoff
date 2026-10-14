@@ -609,3 +609,20 @@ note = "the public Kick future owns publication after removing the peer"
 [[unmutated]] test = "si_23_fragment_flood_does_not_starve_a_legitimate_peer", reason = "positive single-peer composition; removing either local capacity or peer reservation alone leaves the other protection, each independently mutated by the eight-versus-nine and colluding-peer tests"
 
 [[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-bind-any-port", test = "si_29_binding_skips_unusable_ports_before_publishing_a_reachable_endpoint", note = "binding publishes a local port the peer send guard refuses; the recipient denylist remains enforced"
+
+# Named by the design for later milestones; the code they mutate does not exist on M2.
+
+[[pending]]
+si = "SI-30"
+item = "mutant-si30-redaction-bypass"
+reason = "game-log export paths arrive with the gamebox launcher (M1 harness productized in M3)"
+
+[[pending]]
+si = "SI-30"
+item = "mutant-si30-raw-log-event"
+reason = "game-log export paths arrive with the gamebox launcher (M1 harness productized in M3)"
+
+[[pending]]
+si = "SI-7"
+item = "mutant-si7-supervisor-no-cgroup"
+reason = "the gamebox supervisor service and its kickoffd channel arrive with the bubblewrap launcher (M0/M3)"
