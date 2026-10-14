@@ -487,13 +487,15 @@ fn connection_limit() -> usize {
 const CORE_PROBE_ENV: &str = "KICKOFF_IPC_CORE_PROBE";
 
 fn harden_facade() -> Result<(), IpcError> {
-    // Linux skips piped core handlers only for the recursion sentinel 1;
-    // zero is ignored for pipes. The startup crash probe verifies this
-    // kernel convention rather than assuming it from a version number.
+    // Linux skips piped core handlers only for the recursion sentinel 1, and
+    // writes no core file below the ELF minimum dump size. An inherited hard
+    // limit of 0 cannot be raised; it still suppresses file dumps, and the
+    // startup probe refuses it for piped handlers.
+    let ceiling = rustix::process::getrlimit(Resource::Core).maximum;
     let limit = if cfg!(feature = "mutant-si30-facade-core-zero") {
         0
     } else {
-        1
+        ceiling.map_or(1, |hard| hard.min(1))
     };
     rustix::process::setrlimit(
         Resource::Core,
@@ -639,6 +641,14 @@ async fn probe_core_suppression(dir: &RuntimeDir, worker: &Command) -> Result<()
     use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    // A pipe handler ignores a zero limit, so the probe would only hand its
+    // crash to the handler before the same refusal.
+    if rustix::process::getrlimit(Resource::Core).maximum == Some(0)
+        && std::fs::read("/proc/sys/kernel/core_pattern")
+            .is_ok_and(|pattern| pattern.first() == Some(&b'|'))
+    {
+        return Err(IpcError::CoreDumpsEnabled);
+    }
     let parent = dir.socket_path().parent().ok_or(IpcError::UnsafeDir)?;
     let path = parent.join(format!(
         ".core-probe-{}-{}",
@@ -666,10 +676,16 @@ async fn probe_core_suppression(dir: &RuntimeDir, worker: &Command) -> Result<()
                 continue;
             };
             probe.0 = None;
-            if status.terminating_signal() != Some(6)
-                || status.as_raw() & 0x80 != 0
-                || std::fs::read_dir(&scratch.path)?.next().is_some()
-            {
+            // WCOREDUMP: the kernel wrote a core to a file, a pipe or a
+            // socket handler. A file left in the cwd is a dump whatever the
+            // status says.
+            let dumped = (status.signaled() && status.as_raw() & 0x80 != 0)
+                || (!cfg!(feature = "mutant-si30-probe-scratch-unchecked")
+                    && std::fs::read_dir(&scratch.path)?.next().is_some());
+            if dumped {
+                return Err(IpcError::CoreDumpsEnabled);
+            }
+            if status.terminating_signal() != Some(6) {
                 return Err(IpcError::Hardening);
             }
             return Ok(());

@@ -44,10 +44,20 @@ fn process_helper() {
         return;
     };
     if let Some(next) = launcher_target(&mode) {
-        // A launcher that leaks a descriptor hands it to the facade across
-        // exec.
-        let leaked = std::fs::File::open("/dev/null").unwrap();
-        rustix::io::fcntl_setfd(&leaked, rustix::io::FdFlags::empty()).unwrap();
+        // A launcher that leaks a descriptor or imposes a zero hard core
+        // limit hands both to the facade across exec.
+        let _leaked = if mode == "leaky-launcher" {
+            let leaked = std::fs::File::open("/dev/null").unwrap();
+            rustix::io::fcntl_setfd(&leaked, rustix::io::FdFlags::empty()).unwrap();
+            Some(leaked)
+        } else {
+            let zero = rustix::process::Rlimit {
+                current: Some(0),
+                maximum: Some(0),
+            };
+            rustix::process::setrlimit(rustix::process::Resource::Core, zero).unwrap();
+            None
+        };
         let error = command(next).exec();
         panic!("exec failed: {error}");
     }
@@ -152,6 +162,21 @@ fn process_helper() {
                     Err(_) => emit("rejected"),
                 }
             }
+            "facade-zero-core" => {
+                let base = std::env::var_os(BASE).unwrap();
+                let dir = kickoff_ipc::RuntimeDir::open_in(std::path::Path::new(&base)).unwrap();
+                let mut worker = command("worker");
+                worker.stdout(Stdio::null()).stderr(Stdio::null());
+                match Facade::spawn(&dir, trust_me(), worker).await {
+                    Ok(_facade) => {
+                        let limit = rustix::process::getrlimit(rustix::process::Resource::Core);
+                        assert_eq!((limit.current, limit.maximum), (Some(0), Some(0)));
+                        emit("ready-zero");
+                    }
+                    Err(IpcError::CoreDumpsEnabled) => emit("refused-core-dumps"),
+                    Err(error) => emit(&format!("error {error:?}")),
+                }
+            }
             "not-parent" => {
                 // This pair was created by this child, rather than inherited
                 // from its parent. Matching uid and executable alone is not
@@ -172,6 +197,7 @@ fn process_helper() {
 fn launcher_target(mode: &str) -> Option<&'static str> {
     match mode {
         "leaky-launcher" => Some("facade"),
+        "zero-core-launcher" => Some("facade-zero-core"),
         _ => None,
     }
 }
@@ -695,6 +721,65 @@ async fn si_30_facade_probe_closes_descriptors_inherited_from_its_launcher() {
         client.call(CliCommand::Status).await,
         Ok(Reply::Done)
     ));
+}
+
+#[test]
+fn si_30_facade_follows_a_zero_hard_core_limit() {
+    // A hard limit of 0 cannot be raised to the pipe sentinel 1. It still
+    // stops file dumps, so the facade starts; a `|` program or `@` socket
+    // handler ignores it, so the probe's dump must refuse startup by name.
+    let base = TempBase::new();
+    let _dir = base.dir();
+    let pattern = std::fs::read_to_string("/proc/sys/kernel/core_pattern").unwrap();
+    let expected = if pattern.starts_with('|') || pattern.starts_with('@') {
+        "refused-core-dumps"
+    } else {
+        "ready-zero"
+    };
+    let mut running = helper(&base, "zero-core-launcher");
+    assert_eq!(running.line(), expected);
+    assert!(std::fs::read_dir(base.kickoff()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".core-probe-")
+    }));
+}
+
+#[test]
+fn dumping_probe_helper() {
+    if std::env::var_os("KICKOFF_IPC_CORE_PROBE").is_some() {
+        // What a relative file core_pattern leaves in the probe's cwd.
+        let scratch = std::env::var_os("KICKOFF_IPC_CORE_PROBE").unwrap();
+        std::fs::write(std::path::Path::new(&scratch).join("core"), b"").unwrap();
+        std::process::abort();
+    }
+    process_helper();
+}
+
+#[tokio::test]
+async fn si_30_facade_refuses_by_name_when_the_probe_leaves_a_core() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    let mut worker = Command::new(me());
+    worker
+        .args([
+            "--exact",
+            "dumping_probe_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(MODE, "worker")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    assert_eq!(
+        Facade::spawn(&dir, trust_me(), worker).await.err(),
+        Some(IpcError::CoreDumpsEnabled),
+        "a crash that left a core file was not refused as kept crash dumps"
+    );
+    assert!(!dir.socket_path().exists());
+    assert!(std::fs::read_dir(base.kickoff()).unwrap().next().is_none());
 }
 
 #[tokio::test]

@@ -38,6 +38,15 @@ pub enum IpcError {
     Unsupported,
     #[error("kernel core-dump suppression probe failed")]
     Hardening,
+    /// The startup probe showed that this system's crash handling would keep
+    /// a dump of a Kickoff process. Kickoff refuses to start rather than risk
+    /// one; the Linux requirements in design §6.4 list the supported setups.
+    #[error(
+        "this system would keep crash dumps of Kickoff, so it will not start: \
+         core_pattern must be a file or a `|` program, and the hard core-size \
+         limit (ulimit -Hc) at least 1 when it is a program"
+    )]
+    CoreDumpsEnabled,
     #[error("runtime directory is missing or has the wrong owner, type or mode")]
     UnsafeDir,
     #[error("endpoint name taken by a live endpoint or by something that is not our socket")]
