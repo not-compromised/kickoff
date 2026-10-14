@@ -5,49 +5,60 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 use super::Refused;
+use super::barrier::Fault;
 
 pub(super) const PASTA: &str = "/usr/bin/pasta";
 pub(super) const NFT: &str = "/usr/bin/nft";
 const PASTA_IF: &str = "gb0";
 const LAN_IF: &str = "kick0";
 
+/// pasta's gateway inside the box; with pasta's defaults it would map to
+/// the host's loopback.
+pub(super) const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+
 /// pasta's options. No default is relied on: `-T` and `-U` default to
-/// `auto`, which forwards ports bound on the box's loopback to the host's.
-/// The box's address and gateway are in TEST-NET-1, never a real host.
-pub(super) const PASTA_ARGS: &[&str] = &[
-    "--config-net",
-    "--quiet",
-    "--foreground",
-    "-I",
-    PASTA_IF,
-    "-a",
-    "192.0.2.2/24",
-    "-g",
-    "192.0.2.1",
-    "-t",
-    "none",
-    "-u",
-    "none",
-    "-T",
-    "none",
-    "-U",
-    "none",
-    "--no-map-gw",
-    "--map-host-loopback",
-    "none",
-    "--map-guest-addr",
-    "none",
-    "--ipv4-only",
-    "-D",
-    "none",
-    "--search",
-    "none",
-    "--no-dhcp",
-    "--no-ndp",
-    "--no-dhcpv6",
-    "--no-ra",
-    "--",
-];
+/// `auto`, which forwards ports bound on the box's loopback to the host's,
+/// and the gateway maps to the host's loopback unless told not to. The
+/// box's address and gateway are in TEST-NET-1, never a real host.
+pub(super) fn pasta_args(fault: Fault) -> Vec<&'static str> {
+    let mut args = vec![
+        "--config-net",
+        "--quiet",
+        "--foreground",
+        "-I",
+        PASTA_IF,
+        "-a",
+        "192.0.2.2/24",
+        "-g",
+        "192.0.2.1",
+        "-t",
+        "none",
+        "-u",
+        "none",
+        "-T",
+        "none",
+        "-U",
+        "none",
+    ];
+    if fault != Fault::PastaMapsHost {
+        args.extend(["--no-map-gw", "--map-host-loopback", "none"]);
+    }
+    args.extend([
+        "--map-guest-addr",
+        "none",
+        "--ipv4-only",
+        "-D",
+        "none",
+        "--search",
+        "none",
+        "--no-dhcp",
+        "--no-ndp",
+        "--no-dhcpv6",
+        "--no-ra",
+        "--",
+    ]);
+    args
+}
 
 /// Ranges the box never reaches through pasta (design §3.2.4), plus pasta's
 /// own TEST-NET-1 subnet.
@@ -117,6 +128,17 @@ pub(super) fn deny_set() -> Result<Vec<Net4>, Refused> {
         .iter()
         .filter_map(|(a, len)| Net4::new(Ipv4Addr::from(*a), *len))
         .collect();
+    for (addr, len) in interfaces()? {
+        nets.extend(Net4::new(addr, 32));
+        nets.extend(Net4::new(addr, len));
+    }
+    nets.extend(routes(&std::fs::read_to_string("/proc/net/route")?)?);
+    Ok(minimal(nets))
+}
+
+/// Every IPv4 address on a host interface, with its prefix length.
+fn interfaces() -> Result<Vec<(Ipv4Addr, u8)>, Refused> {
+    let mut found = Vec::new();
     for ifa in nix::ifaddrs::getifaddrs()? {
         let (Some(addr), Some(mask)) = (ifa.address, ifa.netmask) else {
             continue;
@@ -125,11 +147,18 @@ pub(super) fn deny_set() -> Result<Vec<Net4>, Refused> {
             continue;
         };
         let len = u8::try_from(mask.ip().to_bits().count_ones()).map_err(|_| Refused::Network)?;
-        nets.extend(Net4::new(addr.ip(), 32));
-        nets.extend(Net4::new(addr.ip(), len));
+        found.push((addr.ip(), len));
     }
-    nets.extend(routes(&std::fs::read_to_string("/proc/net/route")?)?);
-    Ok(minimal(nets))
+    Ok(found)
+}
+
+/// The host's own non-loopback IPv4 addresses, which the box must not reach.
+pub(super) fn host_addresses() -> Result<Vec<Ipv4Addr>, Refused> {
+    Ok(interfaces()?
+        .into_iter()
+        .map(|(addr, _)| addr)
+        .filter(|addr| !addr.is_loopback())
+        .collect())
 }
 
 /// Destinations and gateways of the main routing table.
@@ -171,6 +200,11 @@ fn minimal(mut nets: Vec<Net4>) -> Vec<Net4> {
 pub(super) fn ruleset(deny: &[Net4]) -> String {
     let elements: Vec<String> = deny.iter().map(Net4::to_string).collect();
     let elements = elements.join(", ");
+    let deny_rule = if cfg!(feature = "mutant-si14-no-deny-set") {
+        String::new()
+    } else {
+        format!("\t\toifname \"{PASTA_IF}\" ip daddr @deny4 drop\n")
+    };
     format!(
         "table inet gamebox {{
 \tset deny4 {{
@@ -185,8 +219,7 @@ pub(super) fn ruleset(deny: &[Net4]) -> String {
 \t\tmeta nfproto ipv6 drop
 \t\toifname \"{LAN_IF}\" ip daddr {{ 10.75.0.0/24, 255.255.255.255 }} accept
 \t\toifname \"{LAN_IF}\" drop
-\t\toifname \"{PASTA_IF}\" ip daddr @deny4 drop
-\t\toifname \"{PASTA_IF}\" accept
+{deny_rule}\t\toifname \"{PASTA_IF}\" accept
 \t\tdrop
 \t}}
 

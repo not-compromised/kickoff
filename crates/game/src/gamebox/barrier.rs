@@ -34,9 +34,9 @@ impl fmt::Display for Check {
     }
 }
 
-/// A setup fault the barrier must catch: each leaves exactly one barrier
-/// property wrong. Kickoff's own probes inject them to prove the barrier
-/// refuses (SI-36); `None` is every real launch.
+/// A setup fault the launch must refuse: each leaves exactly one barrier
+/// property or startup-probe fact wrong. Kickoff's own probes inject them
+/// to prove the refusal (SI-36, SI-14); `None` is every real launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Fault {
     None,
@@ -50,16 +50,20 @@ pub(super) enum Fault {
     Capabilities,
     /// The barrier link keeps one of its pipe descriptors.
     Descriptors,
+    /// pasta keeps its default mapping of the gateway to the host's
+    /// loopback, which the setup link's startup probe must notice.
+    PastaMapsHost,
 }
 
 impl Fault {
-    pub(super) const ALL: [(&'static str, Fault); 6] = [
+    pub(super) const ALL: [(&'static str, Fault); 7] = [
         ("none", Fault::None),
         ("namespaces", Fault::Namespaces),
         ("nft", Fault::Nft),
         ("rlimits", Fault::Rlimits),
         ("capabilities", Fault::Capabilities),
         ("descriptors", Fault::Descriptors),
+        ("pasta-maps-host", Fault::PastaMapsHost),
     ];
 
     pub(super) fn parse(name: &str) -> Result<Fault, Refused> {

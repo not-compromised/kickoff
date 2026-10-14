@@ -13,6 +13,7 @@
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -25,7 +26,7 @@ use rustix::process::{Resource, Rlimit};
 use super::Refused;
 use super::barrier::{Check, FSIZE, Fault, NAMESPACES, NOFILE, Proc, identity};
 use super::install::require_null_stdio;
-use super::net::{NFT, same_ruleset};
+use super::net::{GATEWAY, NFT, same_ruleset};
 
 /// The barrier pipes' numbers from `inner` through bwrap to `barrier`.
 pub(super) const READY_FD: i32 = 3;
@@ -36,6 +37,8 @@ pub(super) const RULESET: &str = "ruleset.nft";
 pub(super) const SETUP_NS: &str = "@setup-ns:";
 pub(super) const READY: &str = "ready";
 pub(super) const RELEASE: &str = "release";
+/// How long the startup probe waits for a connection pasta should refuse.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 /// How long the barrier link waits for the supervisor's release.
 const RELEASE_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -61,8 +64,9 @@ fn run(args: &[OsString]) -> Result<Infallible, Refused> {
         .collect::<Result<_, _>>()?;
     match (stage.to_str(), own.as_slice()) {
         (Some("enter"), [parent, scope]) => enter(parent, scope, next),
-        (Some("inner"), [scope, run, fault]) => {
-            inner(scope, Path::new(run), Fault::parse(fault)?, next)
+        (Some("inner"), [scope, run, fault, port]) => {
+            let port = port.parse().map_err(|_| Refused::Malformed)?;
+            inner(scope, Path::new(run), Fault::parse(fault)?, port, next)
         }
         (Some("barrier"), [fault, ns @ ..]) if ns.len() == NAMESPACES.len().saturating_mul(2) => {
             let (host, setup) = ns.split_at(NAMESPACES.len());
@@ -90,7 +94,13 @@ fn enter(parent: &str, scope: &str, next: &[OsString]) -> Result<Infallible, Ref
 /// link cannot see its parent. pasta is the supervisor's direct child, and
 /// the supervisor tears the scope down when it exits at any phase; this
 /// link's own death kills everything in its PID namespace.
-fn inner(scope: &str, run: &Path, fault: Fault, next: &[OsString]) -> Result<Infallible, Refused> {
+fn inner(
+    scope: &str,
+    run: &Path,
+    fault: Fault,
+    canary: u16,
+    next: &[OsString],
+) -> Result<Infallible, Refused> {
     sweep(&[])?;
     arm_parent_death()?;
     // The first descriptors opened after the sweep: READY_FD and RELEASE_FD.
@@ -103,6 +113,14 @@ fn inner(scope: &str, run: &Path, fault: Fault, next: &[OsString]) -> Result<Inf
         return Err(Refused::NetworkSetup);
     }
     require_scope(scope)?;
+    // Startup probe (design §3.2.6 requirement 6), before the ruleset could
+    // hide the answer: the supervisor listens on the host's loopback, and
+    // the gateway must not lead there.
+    if !cfg!(feature = "mutant-si14-no-startup-probe")
+        && TcpStream::connect_timeout(&SocketAddr::from((GATEWAY, canary)), PROBE_TIMEOUT).is_ok()
+    {
+        return Err(Refused::PastaMapsHost);
+    }
     for path in [
         "/proc/sys/net/ipv6/conf/all/disable_ipv6",
         "/proc/sys/net/ipv6/conf/default/disable_ipv6",

@@ -18,6 +18,8 @@ mutant-si38-no-bindsto = []
 mutant-si38-sigterm-stop = []
 mutant-si36-no-fd-sweep = []
 mutant-si36-barrier-skip = []
+mutant-si14-no-deny-set = []
+mutant-si14-no-startup-probe = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kickoff-local.workspace = true

@@ -118,17 +118,19 @@ impl Supervisor {
     }
 
     pub fn wait_exit(&self) {
-        let started = Instant::now();
-        while systemctl(&["is-active", "--quiet", &self.unit])
-            .status
-            .success()
-        {
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the supervisor did not exit"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(
+            self.exited_within(Duration::from_secs(10)),
+            "the supervisor did not exit: {}",
+            self.report()
+        );
+    }
+
+    pub fn exited_within(&self, deadline: Duration) -> bool {
+        within(deadline, || {
+            !systemctl(&["is-active", "--quiet", &self.unit])
+                .status
+                .success()
+        })
     }
 
     pub fn main_pid(&self) -> i32 {

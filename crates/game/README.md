@@ -22,7 +22,7 @@ kickoff-gamebox (user service; sweeps descriptors first)
 ```
 
 The supervisor's request is a closed set of probes (`probe standin`,
-`probe inventory [--fault F]`); no path, command or argument comes from
+`probe inventory [--fault F]`, `probe network`); no path, command or argument comes from
 input. The three binaries find each other only as installed siblings.
 
 **Teardown.** Normal stop (SIGTERM to the supervisor, box exit or a refused
@@ -65,6 +65,18 @@ Any failure kills the cgroup. Each property except the cgroup name and
 - **The deny set is computed once per launch** from `getifaddrs` and
   `/proc/net/route`; recomputation on netlink events and the QAD public
   address are not implemented.
+- **Startup probes (requirement 6) cover the gateway mapping only.** Before
+  the ruleset loads, `inner` connects to pasta's gateway on a port the
+  supervisor listens on at the host's loopback; a connection refuses the
+  launch, and the supervisor confirms at the barrier that it accepted
+  nothing. Not yet probed: pasta's `-T`/`-U` `auto` forwarding (explicitly
+  off) and bwrap not being setuid.
+- **The SI-14 oracle is a UDP send.** The ruleset drops, so a TCP connect to
+  a forbidden destination hangs; a dropped UDP send fails at once with
+  EPERM. Each forbidden destination must give exactly EPERM, and a DNS
+  exchange with a public resolver is the positive control (the test needs
+  internet access). The host's own addresses are tested, but no synthetic
+  LAN with public addresses and no route change yet.
 - **Absolute tool paths** (`/usr/bin/{systemd-run,systemctl,pasta,bwrap,nft,nsenter}`).
 - **The supervisor's run directory** is `box/` (mode 0700, created
   exclusively) inside the service's `RuntimeDirectory=`, so the manager

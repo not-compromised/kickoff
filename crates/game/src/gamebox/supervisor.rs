@@ -3,6 +3,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::net::{Ipv4Addr, TcpListener};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -34,13 +35,21 @@ enum Request {
     /// double-forked descendant: each teardown path is tested without the
     /// box's own fast paths (design §3.2.6, SI-38).
     StandIn,
-    /// The whole chain with the probe as payload, optionally with one
-    /// barrier property faulted.
-    Probe(&'static str, Fault),
+    /// The whole chain with a probe as payload, optionally with one setup
+    /// fault the launch must refuse.
+    Probe(Payload, Fault),
 }
 
-/// Probe payloads a request may name; see the probe binary.
-const PROBES: [&str; 1] = ["inventory"];
+/// The probe payloads; see the probe binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Payload {
+    /// Holds only if stdio is all it has (SI-36).
+    Inventory,
+    /// Tries the host and private destinations, the internet and changes
+    /// to its network; exits 0 only if the box allows exactly the internet
+    /// (SI-14).
+    Network,
+}
 
 impl Request {
     fn parse(args: &[OsString]) -> Result<Request, Refused> {
@@ -48,18 +57,16 @@ impl Request {
             .iter()
             .map(|a| a.to_str().ok_or(Refused::Malformed))
             .collect::<Result<_, _>>()?;
-        let probe = |name: &str| {
-            PROBES
-                .iter()
-                .find(|p| **p == name)
-                .copied()
-                .ok_or(Refused::Malformed)
+        let payload = |name: &str| match name {
+            "inventory" => Ok(Payload::Inventory),
+            "network" => Ok(Payload::Network),
+            _ => Err(Refused::Malformed),
         };
         match args.as_slice() {
             ["probe", "standin"] => Ok(Request::StandIn),
-            ["probe", name] => Ok(Request::Probe(probe(name)?, Fault::None)),
+            ["probe", name] => Ok(Request::Probe(payload(name)?, Fault::None)),
             ["probe", name, "--fault", fault] => {
-                Ok(Request::Probe(probe(name)?, Fault::parse(fault)?))
+                Ok(Request::Probe(payload(name)?, Fault::parse(fault)?))
             }
             _ => Err(Refused::Malformed),
         }
@@ -134,6 +141,10 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
             let ready = open_pipe(&run.0.join(READY), OFlags::RDONLY | OFlags::NONBLOCK)?;
             let release = open_pipe(&run.0.join(RELEASE), OFlags::RDWR)?;
             let release_id = identity(&run.0.join(RELEASE))?;
+            // The startup probe's target: the gateway must not lead here.
+            let canary = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+            canary.set_nonblocking(true)?;
+            let canary_port = canary.local_addr()?.port().to_string();
             let view = View {
                 run: &run.0,
                 link: &link,
@@ -144,21 +155,27 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
             };
             chain
                 .arg(PASTA)
-                .args(net::PASTA_ARGS)
+                .args(net::pasta_args(fault))
                 .arg(&link)
                 .args(["inner", &name])
                 .arg(&run.0)
-                .args([fault.name(), "--", BWRAP])
+                .args([fault.name(), &canary_port, "--", BWRAP])
                 .args(view.bwrap_args(fault))
                 .arg(in_box(LINK))
                 .args(["barrier", fault.name()])
                 .args(&host)
                 .args(NAMESPACES.iter().map(|ns| format!("{SETUP_NS}{ns}")))
                 .arg("--")
-                .arg(in_box(PROBE))
-                .arg(payload);
+                .arg(in_box(PROBE));
+            match payload {
+                Payload::Inventory => chain.arg("inventory"),
+                Payload::Network => chain
+                    .arg("network")
+                    .args(net::host_addresses()?.iter().map(Ipv4Addr::to_string)),
+            };
             Some(Boxed {
                 _run: run,
+                canary,
                 ready,
                 release: Some(release),
                 release_id,
@@ -208,6 +225,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
 struct Boxed {
     /// Held, not read: the box's mounts come from it until teardown.
     _run: RunDir,
+    canary: TcpListener,
     ready: OwnedFd,
     release: Option<OwnedFd>,
     release_id: (u64, u64),
@@ -326,6 +344,12 @@ impl Boxed {
         link.rlimits()?;
         link.privileges()?;
         link.descriptors(&link.descriptor_numbers()?, &[self.release_id])?;
+        if !cfg!(feature = "mutant-si14-no-startup-probe") {
+            match self.canary.accept() {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                _ => return Err(Refused::PastaMapsHost),
+            }
+        }
 
         let out = Command::new(NSENTER)
             .arg(format!("--target={monitor}"))

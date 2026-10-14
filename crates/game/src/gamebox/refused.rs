@@ -32,6 +32,8 @@ pub enum Refused {
     BoxEnded(i32),
     #[error("the probe holds a descriptor beyond stdio")]
     Leaked,
+    #[error("pasta maps the gateway to the host")]
+    PastaMapsHost,
     #[error("i/o error: {0:?}")]
     Io(io::ErrorKind),
 }
@@ -52,6 +54,7 @@ impl Refused {
             Refused::Io(_) => 72,
             Refused::Network => 73,
             Refused::Leaked => 76,
+            Refused::PastaMapsHost => 77,
             Refused::NetworkSetup => 74,
             Refused::BoxEnded(_) => 75,
             Refused::Barrier(check) => match check {
