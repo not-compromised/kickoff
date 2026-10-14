@@ -191,7 +191,8 @@ scaffolding M2.
   through `posix_spawn` (`WorkerLaunch`, not `Command`); safe Rust cannot own
   a leaked descriptor to mark it close-on-exec. The worker closes every
   descriptor above stdio itself at entry (`KICKOFF_IPC_WORKER`), which no
-  thread of the facade can race; neither the pinned rustix nor nix offers a
+  thread of the facade can race. The listing drops only its own descriptor
+  and looks nothing up, and any close failure refuses startup; neither the pinned rustix nor nix offers a
   safe `close_range` or `closefrom` file action. The probe's close list is
   built in the facade, so a descriptor another thread opens during that
   spawn makes the probe refuse: startup fails closed. The worker becomes

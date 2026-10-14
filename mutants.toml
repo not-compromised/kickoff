@@ -262,6 +262,17 @@ test = "si_36_worker_never_holds_a_descriptor_opened_while_it_is_spawned"
 note = "the worker keeps descriptors another facade thread opened while it was spawned"
 
 [[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+feature = "mutant-si36-fd-errors-skipped"
+test = "si_36_worker_entry_close_fails_closed_on_any_error"
+note = "a listed descriptor that fails to close is skipped and stays open"
+
+[[unmutated]]
+test = "si_36_descriptor_listing_leaves_out_only_its_own_descriptor"
+reason = "the listing has no lookup or filter left to remove; it pins that only the listing descriptor is dropped, the class of the reviewed lookup-error skip"
+
+[[mutant]]
 si = "SI-30"
 crate = "kickoff-ipc"
 feature = "mutant-si30-socket-handler-allowed"

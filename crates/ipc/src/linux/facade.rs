@@ -630,27 +630,68 @@ fn close_inherited() -> Result<(), IpcError> {
     if cfg!(feature = "mutant-si36-worker-inherits-fds") {
         return Ok(());
     }
-    for fd in open_descriptors()? {
-        if fd >= 3 {
-            nix::unistd::close(fd).map_err(io::Error::from)?;
+    close_above_stdio(&open_descriptors()?, |fd| {
+        nix::unistd::close(fd).map_err(io::Error::from)
+    })
+}
+
+/// Every listed descriptor above stdio must close. A failure of any kind
+/// leaves it open, so it refuses startup rather than being skipped.
+fn close_above_stdio(
+    listed: &[i32],
+    mut close: impl FnMut(i32) -> io::Result<()>,
+) -> Result<(), IpcError> {
+    for &fd in listed.iter().filter(|fd| **fd >= 3) {
+        match close(fd) {
+            Ok(()) => {}
+            Err(_) if cfg!(feature = "mutant-si36-fd-errors-skipped") => {}
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
 }
 
-/// Descriptor numbers open in this process. Collecting closes the enumeration
-/// fd before the caller acts, so it cannot be confused with inherited
-/// authority.
+/// Descriptor numbers open in this process, from `/proc/self/fd` read
+/// through a descriptor whose number is known, so that one alone is left
+/// out. Nothing listed is looked up, so no lookup error can hide an entry.
 fn open_descriptors() -> Result<Vec<i32>, IpcError> {
-    let entries: Vec<_> = std::fs::read_dir("/proc/self/fd")?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<Result<_, _>>()?;
-    let mut open = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let Some(fd) = entry.to_str().and_then(|name| name.parse::<i32>().ok()) else {
-            return Err(IpcError::Hardening);
-        };
-        if std::fs::symlink_metadata(std::path::Path::new("/proc/self/fd").join(&entry)).is_ok() {
+    use rustix::fs::{Dir, Mode, OFlags};
+    use std::os::fd::AsRawFd;
+    let fd = rustix::fs::open(
+        "/proc/self/fd",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let listing = fd.as_raw_fd();
+    let mut dir = Dir::new(fd).map_err(io::Error::from)?;
+    let mut names = Vec::new();
+    while let Some(entry) = dir.read() {
+        names.push(
+            entry
+                .map_err(io::Error::from)?
+                .file_name()
+                .to_bytes()
+                .to_vec(),
+        );
+    }
+    listed_descriptors(names.iter().map(Vec::as_slice), listing)
+}
+
+fn listed_descriptors<'a>(
+    names: impl Iterator<Item = &'a [u8]>,
+    listing: i32,
+) -> Result<Vec<i32>, IpcError> {
+    let mut open = Vec::new();
+    for name in names {
+        if name == b"." || name == b".." {
+            continue;
+        }
+        let fd = std::str::from_utf8(name)
+            .ok()
+            .and_then(|name| name.parse::<i32>().ok())
+            .ok_or(IpcError::Hardening)?;
+        if fd != listing {
             open.push(fd);
         }
     }
@@ -835,6 +876,42 @@ mod tests {
     use super::*;
 
     type Case = (Option<&'static [u8]>, Option<u64>, Result<(), IpcError>);
+
+    #[test]
+    fn si_36_descriptor_listing_leaves_out_only_its_own_descriptor() {
+        let names: [&[u8]; 8] = [b".", b"..", b"0", b"1", b"2", b"3", b"5", b"9"];
+        assert_eq!(
+            listed_descriptors(names.into_iter(), 5),
+            Ok(vec![0, 1, 2, 3, 9])
+        );
+        let names: [&[u8]; 2] = [b"3", b"not-a-number"];
+        assert_eq!(
+            listed_descriptors(names.into_iter(), 5),
+            Err(IpcError::Hardening)
+        );
+    }
+
+    #[test]
+    fn si_36_worker_entry_close_fails_closed_on_any_error() {
+        for errno in [io::ErrorKind::PermissionDenied, io::ErrorKind::Other] {
+            let mut attempted = Vec::new();
+            let result = close_above_stdio(&[0, 1, 2, 3, 7, 9], |fd| {
+                attempted.push(fd);
+                if fd == 7 { Err(errno.into()) } else { Ok(()) }
+            });
+            assert!(
+                result.is_err(),
+                "a descriptor that failed to close ({errno:?}) was skipped"
+            );
+            assert_eq!(attempted, [3, 7], "stdio was closed or the sweep went on");
+        }
+        let mut attempted = Vec::new();
+        let result = close_above_stdio(&[0, 1, 2, 3, 9], |fd| {
+            attempted.push(fd);
+            Ok(())
+        });
+        assert_eq!((result, attempted), (Ok(()), vec![3, 9]));
+    }
 
     #[test]
     fn si_30_core_pattern_policy_follows_the_host_table() {
