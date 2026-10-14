@@ -423,6 +423,11 @@ const RECYCLE_ENV: &str = "KIPC_RECYCLE_BASE";
 const ROLE_ENV: &str = "KIPC_RECYCLE_ROLE";
 const SOCKET_ENV: &str = "KIPC_RECYCLE_SOCKET";
 
+/// Written by the `hold` role once it is running, beside the socket.
+fn held_mark(socket: &Path) -> std::path::PathBuf {
+    socket.with_extension("held")
+}
+
 fn run_role(exe: &Path, role: &str, socket: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["--exact", "pid_recycle_role", "--test-threads=1"])
@@ -461,6 +466,10 @@ fn pid_recycle_role() {
             let mut stream = std::os::unix::net::UnixStream::from(fd);
             let _ = stream.write_all(&hello(kickoff_ipc::PROTOCOL_VERSION, CLI));
             let _ = stream.write_all(&frame(&[0]));
+            // Every thread this process starts exists by now; the helper waits
+            // for this mark before it chooses the next pid, so none of them
+            // can take the pid meant for the trusted squatter.
+            std::fs::write(held_mark(Path::new(&socket)), b"").unwrap();
             let mut sink = Vec::new();
             let _ = stream.read_to_end(&mut sink);
         }
@@ -503,6 +512,19 @@ fn pid_recycle_helper() {
             .unwrap();
         let old_pid = connector.id();
         assert!(connector.wait().unwrap().success());
+        // The hold child is still starting; a thread it creates after the
+        // next pid is chosen would take that pid instead of the squatter.
+        let held = held_mark(dir.socket_path());
+        let deadline = std::time::Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .unwrap();
+        while !held.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hold child never started"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         // The connection now lives in the `hold` child; its connecting pid
         // is free. Hand it to a trusted process.
