@@ -5,14 +5,15 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::print_stdout
+    clippy::print_stdout,
+    clippy::arithmetic_side_effects
 )]
 #[path = "../../../tests/support/exec.rs"]
 mod exec;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::io::Write;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -20,9 +21,12 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const CANARY: &str = "leak-canary";
-/// Where a launcher leaks the canary in kickoffd: a fresh number, since
+/// Where a launcher leaks the canaries in kickoffd: fresh numbers, since
 /// dup2 onto the same number would keep close-on-exec.
 const LEAKED_FD: i32 = 200;
+const LEAKED_SOCKET: i32 = 201;
+const LEAKED_EVENTFD: i32 = 202;
+const LEAKED_EPOLL: i32 = 203;
 const RUNTIME_HELPER: &str = "KICKOFFD_TEST_RUNTIME";
 const RUNTIME_LINE: &str = "KICKOFFD-RUNTIME ";
 
@@ -134,8 +138,8 @@ enum Launch {
 
 /// Starts the installed daemon as a launcher would, through posix_spawn so
 /// the test decides exactly which descriptors it inherits: stdio as
-/// `launch` says, `leak` without close-on-exec at [`LEAKED_FD`], nothing else.
-fn launch(install: &Install, launch: Launch, leak: Option<&std::fs::File>) -> Daemon {
+/// `launch` says, each leak without close-on-exec at its number, nothing else.
+fn launch(install: &Install, launch: Launch, leaks: &[(BorrowedFd<'_>, i32)]) -> Daemon {
     use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, posix_spawn};
     let program = CString::new(install.daemon.as_os_str().as_bytes()).unwrap();
     let mut env: Vec<CString> = std::env::vars_os()
@@ -159,9 +163,9 @@ fn launch(install: &Install, launch: Launch, leak: Option<&std::fs::File>) -> Da
             Launch::ClosedStdio => actions.add_close(target).unwrap(),
         }
     }
-    if let Some(leak) = leak {
-        assert_ne!(leak.as_raw_fd(), LEAKED_FD);
-        actions.add_dup2(leak.as_raw_fd(), LEAKED_FD).unwrap();
+    for (leak, number) in leaks {
+        assert_ne!(leak.as_raw_fd(), *number);
+        actions.add_dup2(leak.as_raw_fd(), *number).unwrap();
     }
     let attr = PosixSpawnAttr::init().unwrap();
     let pid = posix_spawn(
@@ -219,7 +223,7 @@ fn client_helper() {
 #[test]
 fn si_7_installed_daemon_modes_authenticate_with_hardening() {
     let install = Install::new("modes");
-    let mut daemon = launch(&install, Launch::NullStdio, None);
+    let mut daemon = launch(&install, Launch::NullStdio, &[]);
     install.serve_one_client(&mut daemon);
     // Worker mode alone, without an inherited facade pair, must fail closed.
     assert!(
@@ -240,7 +244,7 @@ fn si_36_kickoffd_closes_a_descriptor_its_launcher_leaked() {
     let canary = install.base.join(CANARY);
     std::fs::write(&canary, b"").unwrap();
     let leaked = std::fs::File::options().append(true).open(&canary).unwrap();
-    let mut daemon = launch(&install, Launch::NullStdio, Some(&leaked));
+    let mut daemon = launch(&install, Launch::NullStdio, &[(leaked.as_fd(), LEAKED_FD)]);
     drop(leaked);
     install.serve_one_client(&mut daemon);
     let held = write_through(&daemon.pid(), &canary);
@@ -254,11 +258,8 @@ fn si_36_kickoffd_closes_a_descriptor_its_launcher_leaked() {
 #[test]
 fn si_36_kickoffd_descriptor_table_equals_its_allowlist() {
     let install = Install::new("inventory");
-    let canary = install.base.join(CANARY);
-    std::fs::write(&canary, b"").unwrap();
-    let leaked = std::fs::File::options().append(true).open(&canary).unwrap();
-    let mut daemon = launch(&install, Launch::ClosedStdio, Some(&leaked));
-    drop(leaked);
+    let canaries = Canaries::new(&install);
+    let mut daemon = launch(&install, Launch::ClosedStdio, &canaries.leaks());
     install.serve_one_client(&mut daemon);
     // Closed stdio comes back as /dev/null, so no later open can take 0-2.
     // Above it: the runtime, the listener and the worker's control pair.
@@ -276,7 +277,7 @@ fn si_36_kickoffd_descriptor_table_equals_its_allowlist() {
         let table = descriptors(&daemon.pid());
         let actual = table.as_ref().map(split_stdio);
         if actual.as_ref().is_ok_and(|actual| *actual == expected) {
-            return;
+            break;
         }
         if Instant::now() >= deadline {
             panic!(
@@ -285,6 +286,255 @@ fn si_36_kickoffd_descriptor_table_equals_its_allowlist() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    canaries.assert_absent_from(&daemon.pid());
+    assert_own_descriptors(&daemon.pid(), &install.daemon);
+}
+
+/// One leaked descriptor of each kind kickoffd holds above stdio, so a
+/// leaked one kept in place of its own still shows: kind strings and counts
+/// cannot tell an inherited socket, eventfd or epoll from kickoffd's own.
+struct Canaries {
+    file: std::fs::File,
+    /// Leaked; its peer stays in this process.
+    socket: std::os::unix::net::UnixStream,
+    peer: std::os::unix::net::UnixStream,
+    eventfd: OwnedFd,
+    /// Watches `peer`, which kickoffd never holds.
+    epoll: OwnedFd,
+}
+
+impl Canaries {
+    fn new(install: &Install) -> Canaries {
+        use rustix::event::{EventfdFlags, epoll, eventfd};
+        let path = install.base.join(CANARY);
+        std::fs::write(&path, b"").unwrap();
+        let file = std::fs::File::options().append(true).open(&path).unwrap();
+        let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let eventfd = eventfd(0, EventfdFlags::CLOEXEC).unwrap();
+        let epoll = epoll::create(epoll::CreateFlags::CLOEXEC).unwrap();
+        epoll::add(
+            &epoll,
+            &peer,
+            epoll::EventData::new_u64(0),
+            epoll::EventFlags::IN,
+        )
+        .unwrap();
+        Canaries {
+            file,
+            socket,
+            peer,
+            eventfd,
+            epoll,
+        }
+    }
+
+    fn leaks(&self) -> [(BorrowedFd<'_>, i32); 4] {
+        [
+            (self.file.as_fd(), LEAKED_FD),
+            (self.socket.as_fd(), LEAKED_SOCKET),
+            (self.eventfd.as_fd(), LEAKED_EVENTFD),
+            (self.epoll.as_fd(), LEAKED_EPOLL),
+        ]
+    }
+
+    /// No descriptor of `pid` is one of these, by socket inode or eventfd id;
+    /// a kept canary epoll fails [`assert_own_descriptors`].
+    fn assert_absent_from(&self, pid: &str) {
+        let sockets = [inode(&self.socket), inode(&self.peer)];
+        let eventfd = fdinfo_field("self", self.eventfd.as_raw_fd(), "eventfd-id:");
+        for (fd, target) in links(pid) {
+            assert!(
+                !sockets
+                    .iter()
+                    .any(|ino| target == format!("socket:[{ino}]")),
+                "kickoffd holds the leaked socket at {fd}"
+            );
+            if target == "anon_inode:[eventfd]" {
+                assert_ne!(
+                    fdinfo_field(pid, fd, "eventfd-id:"),
+                    eventfd,
+                    "kickoffd holds the leaked eventfd at {fd}"
+                );
+            }
+        }
+    }
+}
+
+/// Each anonymous descriptor of kickoffd is its own. Every epoll entry names
+/// a descriptor kickoffd holds at that number with that inode, and every
+/// eventfd is one an epoll watches. Each connected socket pairs with one
+/// that neither kickoffd nor its launcher (this process) holds: the worker's
+/// end, whose own table is unreadable because the worker is nondumpable.
+/// kickoffd's only child is that worker.
+fn assert_own_descriptors(pid: &str, daemon: &Path) {
+    let table = links(pid);
+    let mut watched = Vec::new();
+    for (fd, target) in &table {
+        if target != "anon_inode:[eventpoll]" {
+            continue;
+        }
+        for (tfd, ino) in epoll_entries(pid, *fd) {
+            let held = std::fs::metadata(format!("/proc/{pid}/fd/{tfd}")).map(|m| m.ino());
+            assert_eq!(
+                held.ok(),
+                Some(ino),
+                "kickoffd's epoll {fd} watches {tfd}, which is not kickoffd's descriptor"
+            );
+            watched.push(tfd);
+        }
+    }
+    let ours = links("self");
+    let mut paired = 0;
+    for (fd, target) in &table {
+        if target == "anon_inode:[eventfd]" {
+            assert!(
+                watched.contains(fd),
+                "kickoffd's eventfd {fd} is not one its runtime watches"
+            );
+        }
+        let Some(ino) = socket_inode(target) else {
+            continue;
+        };
+        let Some(peer) = unix_peer(ino) else {
+            continue;
+        };
+        assert_eq!(unix_peer(peer), Some(ino), "socket {fd} is not paired");
+        let peer = format!("socket:[{peer}]");
+        assert!(
+            !table.values().chain(ours.values()).any(|t| *t == peer),
+            "kickoffd's socket {fd} is connected to kickoffd or its launcher"
+        );
+        paired += 1;
+    }
+    assert_eq!(paired, 1, "kickoffd's control socket was not found paired");
+    let children = children(pid);
+    assert_eq!(children.len(), 1, "kickoffd's children: {children:?}");
+    let mut worker = daemon.as_os_str().as_bytes().to_vec();
+    worker.extend_from_slice(b"\0--ipc-worker\0");
+    assert_eq!(
+        std::fs::read(format!("/proc/{}/cmdline", children[0])).unwrap(),
+        worker,
+        "kickoffd's child is not its worker"
+    );
+}
+
+/// Link targets of `pid`'s descriptors.
+fn links(pid: &str) -> BTreeMap<i32, String> {
+    let mut table = BTreeMap::new();
+    for entry in std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap() {
+        let path = entry.unwrap().path();
+        let Ok(target) = std::fs::read_link(&path) else {
+            // Closed while listed.
+            continue;
+        };
+        let fd = path.file_name().unwrap().to_str().unwrap().parse().unwrap();
+        table.insert(fd, target.to_string_lossy().into_owned());
+    }
+    table
+}
+
+fn inode(socket: &std::os::unix::net::UnixStream) -> u64 {
+    rustix::fs::fstat(socket).unwrap().st_ino
+}
+
+fn socket_inode(target: &str) -> Option<u32> {
+    target
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
+fn fdinfo_field(pid: &str, fd: i32, field: &str) -> String {
+    let info = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).unwrap();
+    let value = info
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .unwrap_or_else(|| panic!("no {field} in fdinfo {fd} of {pid}: {info}"));
+    value.trim().to_owned()
+}
+
+/// (target number, target inode) of each entry of epoll `fd` in `pid`.
+fn epoll_entries(pid: &str, fd: i32) -> Vec<(i32, u64)> {
+    let info = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).unwrap();
+    info.lines()
+        .filter_map(|line| line.strip_prefix("tfd:"))
+        .map(|entry| {
+            let mut words = entry.split_whitespace();
+            let tfd = words.next().unwrap().parse().unwrap();
+            let ino = words.find_map(|word| word.strip_prefix("ino:")).unwrap();
+            (tfd, u64::from_str_radix(ino, 16).unwrap())
+        })
+        .collect()
+}
+
+/// Live processes whose parent is `pid`.
+fn children(pid: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap() {
+        let name = entry.unwrap().file_name();
+        let Some(child) = name
+            .to_str()
+            .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{child}/stat")) else {
+            continue;
+        };
+        let mut fields = stat.rsplit_once(')').unwrap().1.split_whitespace();
+        let state = fields.next();
+        if fields.next() == Some(pid) && state != Some("Z") {
+            found.push(child.to_owned());
+        }
+    }
+    found
+}
+
+/// The peer inode of Unix socket `inode`, or `None` if it has none, from
+/// NETLINK_SOCK_DIAG (unix_diag_req with UDIAG_SHOW_PEER).
+fn unix_peer(inode: u32) -> Option<u32> {
+    use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketType, netlink};
+    const SOCK_DIAG_BY_FAMILY: u16 = 20;
+    const NLM_F_REQUEST: u16 = 1;
+    const NLMSG_ERROR: u16 = 2;
+    const UDIAG_SHOW_PEER: u32 = 4;
+    const UNIX_DIAG_PEER: u16 = 2;
+    let diag = rustix::net::socket(
+        AddressFamily::NETLINK,
+        SocketType::DGRAM,
+        Some(netlink::SOCK_DIAG),
+    )
+    .unwrap();
+    let mut request = Vec::new();
+    request.extend(40u32.to_ne_bytes());
+    request.extend(SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+    request.extend(NLM_F_REQUEST.to_ne_bytes());
+    request.extend([0; 8]);
+    request.extend([1, 0, 0, 0]); // AF_UNIX, protocol, padding
+    request.extend(u32::MAX.to_ne_bytes()); // every state
+    request.extend(inode.to_ne_bytes());
+    request.extend(UDIAG_SHOW_PEER.to_ne_bytes());
+    request.extend([0xff; 8]); // no cookie
+    rustix::net::send(&diag, &request, SendFlags::empty()).unwrap();
+    let mut reply = vec![0u8; 8192];
+    let (len, _) = rustix::net::recv(&diag, &mut reply[..], RecvFlags::empty()).unwrap();
+    let reply = &reply[..len];
+    let u16_at = |at: usize| u16::from_ne_bytes(reply[at..at + 2].try_into().unwrap());
+    let u32_at = |at: usize| u32::from_ne_bytes(reply[at..at + 4].try_into().unwrap());
+    assert_ne!(u16_at(4), NLMSG_ERROR, "sock_diag refused socket {inode}");
+    assert_eq!(u32_at(20), inode, "sock_diag answered for another socket");
+    // nlmsghdr (16) and unix_diag_msg (16), then 4-aligned attributes.
+    let mut at = 32;
+    while at + 8 <= reply.len() {
+        let attr_len = usize::from(u16_at(at));
+        if u16_at(at + 2) == UNIX_DIAG_PEER {
+            return Some(u32_at(at + 4));
+        }
+        assert!(attr_len >= 4, "malformed sock_diag attribute");
+        at += attr_len.next_multiple_of(4);
+    }
+    None
 }
 
 /// What kickoffd's runtime opens, measured in a fresh process with the same

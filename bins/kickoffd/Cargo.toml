@@ -21,4 +21,4 @@ iroh-base.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 nix.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["event", "net"] }
