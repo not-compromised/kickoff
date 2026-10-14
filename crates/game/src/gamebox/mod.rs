@@ -18,6 +18,7 @@ mod netlink;
 mod probe;
 mod refused;
 mod scope;
+mod startup;
 mod supervisor;
 mod view;
 

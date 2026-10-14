@@ -4,8 +4,10 @@
 use std::fmt;
 use std::net::Ipv4Addr;
 
+use super::Refused;
 use super::barrier::Fault;
 use super::netlink::HostView;
+use super::startup::Canaries;
 
 pub(super) const PASTA: &str = "/usr/bin/pasta";
 pub(super) const NFT: &str = "/usr/bin/nft";
@@ -20,8 +22,22 @@ pub(super) const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 /// `auto`, which forwards ports bound on the box's loopback to the host's,
 /// and the gateway maps to the host's loopback unless told not to. The
 /// box's address and gateway are in TEST-NET-1, never a real host.
-pub(super) fn pasta_args(fault: Fault) -> Vec<&'static str> {
-    let mut args = vec![
+pub(super) fn pasta_args(fault: Fault, canaries: &Canaries) -> Result<Vec<String>, Refused> {
+    let inbound = canaries.inbound_port().to_string();
+    let (tcp, udp) = (
+        canaries.tcp_port()?.to_string(),
+        canaries.udp_port()?.to_string(),
+    );
+    // The forwarding faults forward exactly the startup probes' ports.
+    let (t, u) = match fault {
+        Fault::PastaForwardsInbound => (inbound.clone(), inbound),
+        _ => ("none".to_owned(), "none".to_owned()),
+    };
+    let (big_t, big_u) = match fault {
+        Fault::PastaForwardsLoopback => (tcp, udp),
+        _ => ("none".to_owned(), "none".to_owned()),
+    };
+    let mut args: Vec<String> = [
         "--config-net",
         "--quiet",
         "--foreground",
@@ -31,33 +47,32 @@ pub(super) fn pasta_args(fault: Fault) -> Vec<&'static str> {
         "192.0.2.2/24",
         "-g",
         "192.0.2.1",
-        "-t",
-        "none",
-        "-u",
-        "none",
-        "-T",
-        "none",
-        "-U",
-        "none",
-    ];
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    args.extend(["-t".to_owned(), t, "-u".to_owned(), u]);
+    args.extend(["-T".to_owned(), big_t, "-U".to_owned(), big_u]);
     if fault != Fault::PastaMapsHost {
-        args.extend(["--no-map-gw", "--map-host-loopback", "none"]);
+        args.extend(["--no-map-gw", "--map-host-loopback", "none"].map(str::to_owned));
     }
-    args.extend([
-        "--map-guest-addr",
-        "none",
-        "--ipv4-only",
-        "-D",
-        "none",
-        "--search",
-        "none",
-        "--no-dhcp",
-        "--no-ndp",
-        "--no-dhcpv6",
-        "--no-ra",
-        "--",
-    ]);
-    args
+    args.extend(
+        [
+            "--map-guest-addr",
+            "none",
+            "--ipv4-only",
+            "-D",
+            "none",
+            "--search",
+            "none",
+            "--no-dhcp",
+            "--no-ndp",
+            "--no-dhcpv6",
+            "--no-ra",
+            "--",
+        ]
+        .map(str::to_owned),
+    );
+    Ok(args)
 }
 
 /// Ranges the box never reaches through pasta (design §3.2.4), plus pasta's

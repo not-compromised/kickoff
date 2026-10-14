@@ -3,7 +3,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::Ipv4Addr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -16,11 +16,12 @@ use super::Refused;
 use super::barrier::{Check, Fault, NAMESPACES, Proc, Sides, identity};
 use super::events::{Events, Halt, POLL, Wake, after};
 use super::gate;
-use super::install::{LINK, PROBE, sibling};
+use super::install::{LINK, PROBE, require_unprivileged, sibling};
 use super::link::{READY, RELEASE, RULESET, SETUP_NS};
 use super::net::{self, PASTA, same_ruleset};
 use super::netlink::{self, HostWatch};
 use super::scope::{self, Limits, Owner, REGISTRATION_DEADLINE, Scope, TEARDOWN_DEADLINE};
+use super::startup::Canaries;
 use super::view::{BWRAP, View, in_box};
 
 const NSENTER: &str = "/usr/bin/nsenter";
@@ -158,6 +159,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
             None
         }
         Request::Probe(payload, fault) => {
+            require_unprivileged(Path::new(BWRAP))?;
             let run = RunDir::create()?;
             let host = host_namespaces()?;
             gate::hold("host-view");
@@ -172,9 +174,9 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
             let release = open_pipe(&run.0.join(RELEASE), OFlags::RDWR)?;
             let release_id = identity(&run.0.join(RELEASE))?;
             // The startup probe's target: the gateway must not lead here.
-            let canary = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-            canary.set_nonblocking(true)?;
-            let canary_port = canary.local_addr()?.port().to_string();
+            let canaries = Canaries::open()?;
+            let canary_port = canaries.tcp_port()?.to_string();
+            let udp_port = canaries.udp_port()?.to_string();
             let witness = witness_dir();
             let view = View {
                 witness: witness.as_deref(),
@@ -187,11 +189,11 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
             };
             chain
                 .arg(PASTA)
-                .args(net::pasta_args(fault))
+                .args(net::pasta_args(fault, &canaries)?)
                 .arg(&link)
                 .args(["inner", &name])
                 .arg(&run.0)
-                .args([fault.name(), &canary_port, &prefix, "--", BWRAP])
+                .args([fault.name(), &canary_port, &udp_port, &prefix, "--", BWRAP])
                 .args(view.bwrap_args(fault))
                 .arg(in_box(LINK))
                 .args(["barrier", fault.name(), sides.name(), &prefix])
@@ -213,7 +215,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
             };
             Some(Boxed {
                 _run: run,
-                canary,
+                canaries,
                 ready,
                 release: Some(release),
                 release_id,
@@ -316,7 +318,7 @@ struct Boxed {
     sides: Sides,
     /// Held, not read: the box's mounts come from it until teardown.
     _run: RunDir,
-    canary: TcpListener,
+    canaries: Canaries,
     ready: OwnedFd,
     release: Option<OwnedFd>,
     release_id: (u64, u64),
@@ -376,6 +378,7 @@ impl Boxed {
             }
         }
         gate::hold("barrier");
+        self.canaries.held()?;
         if self.sides.outside() {
             self.check_from_outside(events, chain, scope, name)?;
         }
@@ -429,12 +432,6 @@ impl Boxed {
         link.privileges()?;
         link.prefix_size(self.prefix)?;
         link.descriptors(&link.descriptor_numbers()?, &[self.release_id])?;
-        if !cfg!(feature = "mutant-si14-no-startup-probe") {
-            match self.canary.accept() {
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                _ => return Err(Refused::PastaMapsHost.into()),
-            }
-        }
 
         let mut list = if gate::stall_helper() {
             let mut stalled = Command::new("/usr/bin/sleep");

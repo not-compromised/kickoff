@@ -66,13 +66,15 @@ fn run(args: &[OsString]) -> Result<Infallible, Refused> {
         .collect::<Result<_, _>>()?;
     match (stage.to_str(), own.as_slice()) {
         (Some("enter"), [parent, scope]) => enter(parent, scope, next),
-        (Some("inner"), [scope, run, fault, port, prefix]) => {
+        (Some("inner"), [scope, run, fault, port, udp, prefix]) => {
             let port = port.parse().map_err(|_| Refused::Malformed)?;
+            let udp = udp.parse().map_err(|_| Refused::Malformed)?;
             let prefix = prefix.parse().map_err(|_| Refused::Malformed)?;
             let setup = Setup {
                 run: Path::new(run),
                 fault: Fault::parse(fault)?,
                 canary: port,
+                udp_canary: udp,
                 prefix,
             };
             inner(scope, &setup, next)
@@ -118,8 +120,9 @@ fn enter(parent: &str, scope: &str, next: &[OsString]) -> Result<Infallible, Ref
 struct Setup<'a> {
     run: &'a Path,
     fault: Fault,
-    /// The supervisor's loopback port the startup probe must not reach.
+    /// The supervisor's loopback ports the startup probes must not reach.
     canary: u16,
+    udp_canary: u16,
     /// Bytes of the prefix's writable layer.
     prefix: u64,
 }
@@ -129,6 +132,7 @@ fn inner(scope: &str, setup: &Setup<'_>, next: &[OsString]) -> Result<Infallible
         run,
         fault,
         canary,
+        udp_canary,
         prefix,
     } = *setup;
     sweep(&[])?;
@@ -145,14 +149,7 @@ fn inner(scope: &str, setup: &Setup<'_>, next: &[OsString]) -> Result<Infallible
         return Err(Refused::NetworkSetup);
     }
     require_scope(scope)?;
-    // Startup probe (design §3.2.6 requirement 6), before the ruleset could
-    // hide the answer: the supervisor listens on the host's loopback, and
-    // the gateway must not lead there.
-    if !cfg!(feature = "mutant-si14-no-startup-probe")
-        && TcpStream::connect_timeout(&SocketAddr::from((GATEWAY, canary)), PROBE_TIMEOUT).is_ok()
-    {
-        return Err(Refused::PastaMapsHost);
-    }
+    startup_probes(canary, udp_canary)?;
     for path in [
         "/proc/sys/net/ipv6/conf/all/disable_ipv6",
         "/proc/sys/net/ipv6/conf/default/disable_ipv6",
@@ -210,6 +207,26 @@ fn inner(scope: &str, setup: &Setup<'_>, next: &[OsString]) -> Result<Infallible
         )
         .collect::<Result<Vec<_>, _>>()?;
     exec(&next)
+}
+
+/// Startup probes (design §3.2.6 requirement 6), before the ruleset could
+/// hide the answer. The supervisor listens on the host's loopback: neither
+/// pasta's gateway nor the box's own loopback may lead there. The UDP
+/// datagram is checked on arrival by the supervisor.
+fn startup_probes(tcp: u16, udp: u16) -> Result<(), Refused> {
+    if cfg!(feature = "mutant-si14-no-startup-probe") {
+        return Ok(());
+    }
+    if TcpStream::connect_timeout(&SocketAddr::from((GATEWAY, tcp)), PROBE_TIMEOUT).is_ok() {
+        return Err(Refused::PastaMapsHost);
+    }
+    let loopback = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, tcp));
+    if TcpStream::connect_timeout(&loopback, PROBE_TIMEOUT).is_ok() {
+        return Err(Refused::PastaForwards);
+    }
+    let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let _ = socket.send_to(b"kickoff probe", (std::net::Ipv4Addr::LOCALHOST, udp));
+    Ok(())
 }
 
 /// The cgroup fault: this link (and so the box) moves into a child cgroup of

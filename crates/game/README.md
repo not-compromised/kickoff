@@ -92,12 +92,17 @@ the game-launch request.
   network changed". Recomputing and reloading the deny set live is a later
   chunk; until then a long session on a host whose routes change (a VPN
   reconnecting) ends.
-- **Startup probes (requirement 6) cover the gateway mapping only.** Before
-  the ruleset loads, `inner` connects to pasta's gateway on a port the
-  supervisor listens on at the host's loopback; a connection refuses the
-  launch, and the supervisor confirms at the barrier that it accepted
-  nothing. Not yet probed: pasta's `-T`/`-U` `auto` forwarding (explicitly
-  off) and bwrap not being setuid.
+- **Startup probes (requirement 6).** Before the ruleset loads, the setup
+  link connects to pasta's gateway and to the box's own loopback on the port
+  where the supervisor listens on the host's loopback, and sends a datagram
+  to the box's loopback on the port of the supervisor's UDP canary. At the
+  barrier the supervisor confirms neither canary heard anything and that a
+  free host port (29500-29529) is still closed for TCP and UDP. Faults
+  forward exactly those ports (`-T`/`-U`, `-t`/`-u`) or keep the gateway
+  mapping; each is refused by the probes alone. pasta 2026_07_28's own
+  defaults forwarded nothing in either direction here; the explicit `none`
+  options and the probes keep it that way whatever a later pasta does. The
+  supervisor also refuses a setuid or setgid bwrap.
 - **The SI-14 oracle is a UDP send.** The ruleset drops, so a TCP connect to
   a forbidden destination hangs; a dropped UDP send fails at once with
   EPERM. Each forbidden destination must give exactly EPERM, and a DNS

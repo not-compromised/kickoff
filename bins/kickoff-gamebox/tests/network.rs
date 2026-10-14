@@ -22,22 +22,39 @@ fn si_14_box_reaches_the_internet_and_no_host_or_private_destination() {
 }
 
 #[test]
-fn si_14_startup_probe_refuses_a_pasta_that_maps_the_host() {
-    // With pasta's default gateway mapping the gateway leads to the host's
-    // loopback. The ruleset would still drop it; the startup probe must
-    // refuse the launch on its own.
-    let supervisor = Supervisor::start(&["probe", "inventory", "--fault", "pasta-maps-host"]);
-    let dir = supervisor.scope_dir();
-    assert!(
-        supervisor.exited_within(std::time::Duration::from_secs(10)),
-        "a pasta that maps the host was launched: {}",
-        supervisor.report()
-    );
-    let report = supervisor.report();
-    assert!(
-        !report.contains("barrier: released")
-            && report.contains("the box ended before the launch barrier, status 77"),
-        "a pasta that maps the host was not refused: {report}"
-    );
-    assert!(within(DEADLINE, || !dir.exists()));
+fn si_14_startup_probes_refuse_a_pasta_linking_box_and_host() {
+    // Each fault is a pasta that links the box and the host: the default
+    // gateway mapping to the host's loopback, the box's loopback forwarded
+    // to the host's (-T/-U), and a host port forwarded into the box
+    // (-t/-u). The ruleset would still drop the first two and the input
+    // chain the third; the startup probes must refuse each on their own.
+    let cases = [
+        (
+            "pasta-maps-host",
+            "the box ended before the launch barrier, status 77",
+        ),
+        (
+            "pasta-forwards-loopback",
+            "the box ended before the launch barrier, status 88",
+        ),
+        (
+            "pasta-forwards-inbound",
+            "refused: pasta forwards ports between the box and the host",
+        ),
+    ];
+    for (fault, refusal) in cases {
+        let supervisor = Supervisor::start(&["probe", "inventory", "--fault", fault]);
+        let dir = supervisor.scope_dir();
+        assert!(
+            supervisor.exited_within(std::time::Duration::from_secs(10)),
+            "{fault}: a pasta linking the box and the host was launched: {}",
+            supervisor.report()
+        );
+        let report = supervisor.report();
+        assert!(
+            !report.contains("barrier: released") && report.contains(refusal),
+            "{fault}: not refused with `{refusal}`: {report}"
+        );
+        assert!(within(DEADLINE, || !dir.exists()));
+    }
 }

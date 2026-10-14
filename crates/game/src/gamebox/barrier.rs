@@ -68,10 +68,14 @@ pub(super) enum Fault {
     /// The box shares the setup link's cgroup namespace and sees the host's
     /// cgroup path.
     CgroupNamespace,
+    /// pasta forwards the box's loopback ports to the host's (`-T`, `-U`).
+    PastaForwardsLoopback,
+    /// pasta forwards a host port into the box (`-t`, `-u`).
+    PastaForwardsInbound,
 }
 
 impl Fault {
-    pub(super) const ALL: [(&'static str, Fault); 10] = [
+    pub(super) const ALL: [(&'static str, Fault); 12] = [
         ("none", Fault::None),
         ("namespaces", Fault::Namespaces),
         ("nft", Fault::Nft),
@@ -82,6 +86,8 @@ impl Fault {
         ("prefix-unsized", Fault::PrefixUnsized),
         ("cgroup", Fault::Cgroup),
         ("cgroup-namespace", Fault::CgroupNamespace),
+        ("pasta-forwards-loopback", Fault::PastaForwardsLoopback),
+        ("pasta-forwards-inbound", Fault::PastaForwardsInbound),
     ];
 
     pub(super) fn parse(name: &str) -> Result<Fault, Refused> {

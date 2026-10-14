@@ -38,6 +38,10 @@ pub enum Refused {
     HelperFailed,
     #[error("the host network changed")]
     HostChanged,
+    #[error("pasta forwards ports between the box and the host")]
+    PastaForwards,
+    #[error("bwrap is setuid or setgid")]
+    SetuidTool,
     #[error("i/o error: {0:?}")]
     Io(io::ErrorKind),
 }
@@ -61,6 +65,8 @@ impl Refused {
             Refused::PastaMapsHost => 77,
             Refused::HelperFailed => 78,
             Refused::HostChanged => 79,
+            Refused::PastaForwards => 88,
+            Refused::SetuidTool => 89,
             Refused::NetworkSetup => 74,
             Refused::BoxEnded(_) => 75,
             Refused::Barrier(check) => match check {
