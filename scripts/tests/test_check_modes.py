@@ -113,6 +113,15 @@ class CheckModes(unittest.TestCase):
                 self.assertIn("usage", result.stderr)
                 self.assertEqual((steps, calls), ([], []))
 
+    def test_hosted_ci_runs_both_parts(self):
+        # Text checks, since the runner's python3 is not guaranteed PyYAML.
+        workflow = (ROOT / ".github/workflows/check.yml").read_text()
+        parts = re.findall(r"^ +part: \[(.*)\]$", workflow, re.MULTILINE)
+        self.assertEqual([[part.strip() for part in found.split(",")] for found in parts], [["fast", "mutants"]])
+        self.assertEqual(re.findall(r"^ +run: .*check\.sh.*", workflow, re.MULTILINE), ["        run: scripts/check.sh \"$PART\""])
+        self.assertIn("PART: ${{ matrix.part }}", workflow)
+        self.assertIn('RESULT: ${{ needs.linux.result }}\n        run: test "$RESULT" = success', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,9 +33,11 @@ scripts/check.sh mutants    # only the mutant step (SI-33)
 ```
 
 A revision passes the gate only when `fast` and `mutants` both pass on it;
-neither part alone proves anything. Hosted CI runs the two parts as parallel
-jobs on separate runners, so the release latency step (in `fast`) never
-shares a machine with the mutant builds. `scripts/tests/test_check_modes.py`
+neither part alone proves anything. Hosted CI
+(`.github/workflows/check.yml`) runs the two parts as parallel jobs on
+separate runners, so the release latency step (in `fast`) never shares a
+machine with the mutant builds; its `gate passed` job is green only when
+both succeeded, and is the check to require. `scripts/tests/test_check_modes.py`
 lists each part's steps and fails unless `fast` followed by `mutants` runs
 exactly the commands of the whole gate.
 
