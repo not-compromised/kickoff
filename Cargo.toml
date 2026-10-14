@@ -41,6 +41,10 @@ serde-reflection = { version = "=0.6.0", default-features = false }
 netwatch = { version = "=0.19.3", default-features = false }
 # The admitted-set snapshot read on every handshake and datagram (§2.5); already in iroh's tree.
 arc-swap = { version = "=1.9.2", default-features = false }
+# kickoff-game: the gamebox reads the host's addresses and routes in every
+# table over rtnetlink (design §3.2.4); both already in iroh's tree.
+netlink-packet-core = { version = "=0.9.0", default-features = false }
+netlink-packet-route = { version = "=0.33.0", default-features = false }
 # kickoff-secret: volatile wipes that the optimizer cannot elide, and
 # constant-time comparison. Both were already in the lock through iroh.
 zeroize = { version = "=1.9.1", default-features = false, features = ["alloc"] }

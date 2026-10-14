@@ -1601,6 +1601,8 @@ name = "kickoff-game"
 version = "0.0.0"
 dependencies = [
  "kickoff-local",
+ "netlink-packet-core 0.9.0",
+ "netlink-packet-route 0.33.0",
  "nix",
  "rustix",
  "thiserror 2.0.21",

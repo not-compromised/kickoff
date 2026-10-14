@@ -36,6 +36,8 @@ pub enum Refused {
     PastaMapsHost,
     #[error("a helper failed or did not finish in time")]
     HelperFailed,
+    #[error("the host network changed")]
+    HostChanged,
     #[error("i/o error: {0:?}")]
     Io(io::ErrorKind),
 }
@@ -58,6 +60,7 @@ impl Refused {
             Refused::Leaked => 76,
             Refused::PastaMapsHost => 77,
             Refused::HelperFailed => 78,
+            Refused::HostChanged => 79,
             Refused::NetworkSetup => 74,
             Refused::BoxEnded(_) => 75,
             Refused::Barrier(check) => match check {

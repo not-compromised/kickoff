@@ -14,6 +14,7 @@ mod gate;
 mod install;
 mod link;
 mod net;
+mod netlink;
 mod probe;
 mod refused;
 mod scope;

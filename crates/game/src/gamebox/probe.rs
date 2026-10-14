@@ -15,6 +15,7 @@ pub fn probe_main() -> ExitCode {
         Some("network") => return network(args.get(1..).unwrap_or_default()),
         Some("files") => return files(),
         Some("display") => return display(),
+        Some("lans") => return lans(),
         _ => {}
     }
     let arg = args.first();
@@ -122,6 +123,31 @@ fn resolves(resolver: std::net::Ipv4Addr) -> bool {
                 .recv(&mut reply)
                 .is_ok_and(|n| n >= 2 && reply.get(..2) == Some(&query[..2]))
     })
+}
+
+/// Globally addressed LANs the SI-14 tests put on the supervisor's host,
+/// one per kind of route: a connected subnet and a gateway route in the
+/// main table, and a subnet in a policy table. Exit 0 only if each is
+/// dropped (EPERM) while a public destination is not; otherwise 70 plus
+/// the index, or 73 if the public destination was dropped too.
+fn lans() -> ExitCode {
+    use std::net::{Ipv4Addr, UdpSocket};
+    let send = |addr: [u8; 4]| {
+        UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .and_then(|socket| socket.send_to(b"kickoff probe", (Ipv4Addr::from(addr), 9)))
+    };
+    let lans = [[203, 0, 113, 7], [192, 88, 99, 7], [198, 51, 100, 7]];
+    for (code, lan) in (70u8..).zip(lans) {
+        let dropped =
+            send(lan).is_err_and(|e| e.raw_os_error() == Some(nix::errno::Errno::EPERM as i32));
+        if !dropped {
+            return ExitCode::from(code);
+        }
+    }
+    if send([1, 1, 1, 1]).is_err() {
+        return ExitCode::from(73);
+    }
+    ExitCode::SUCCESS
 }
 
 /// SI-34 from inside the box. Exit 0 only if every write, truncate, rename,

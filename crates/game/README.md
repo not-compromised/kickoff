@@ -73,9 +73,18 @@ Any failure kills the cgroup. Each property except the cgroup name and
   by `enter` and `inner`.
 - **The nft check compares tokens.** nft wraps long element lists by a rule
   of its own; whitespace runs compare equal and every other byte must match.
-- **The deny set is computed once per launch** from `getifaddrs` and
-  `/proc/net/route`; recomputation on netlink events and the QAD public
-  address are not implemented.
+- **The deny set comes from rtnetlink, across every routing table.** One dump
+  each of IPv4 addresses and routes: every address and its subnet, every
+  non-default route destination in any table (policy tables included), every
+  gateway including multipath next hops. A route through a nexthop object
+  refuses the launch (its gateway is not in the route). Not covered: the
+  host's public address as seen by QAD.
+- **Any host network change stops the box (fail closed).** The supervisor
+  subscribes to IPv4 address, route and rule notifications before it reads
+  the view; any notification, or a lost one, stops the box with "the host
+  network changed". Recomputing and reloading the deny set live is a later
+  chunk; until then a long session on a host whose routes change (a VPN
+  reconnecting) ends.
 - **Startup probes (requirement 6) cover the gateway mapping only.** Before
   the ruleset loads, `inner` connects to pasta's gateway on a port the
   supervisor listens on at the host's loopback; a connection refuses the

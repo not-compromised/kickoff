@@ -19,6 +19,7 @@ use super::gate;
 use super::install::{LINK, PROBE, sibling};
 use super::link::{READY, RELEASE, RULESET, SETUP_NS};
 use super::net::{self, PASTA, same_ruleset};
+use super::netlink::{self, HostWatch};
 use super::scope::{self, Owner, REGISTRATION_DEADLINE, Scope, TEARDOWN_DEADLINE};
 use super::view::{BWRAP, View, in_box};
 
@@ -54,6 +55,8 @@ enum Payload {
     Files,
     /// Looks for host display and bus sockets (SI-35, direct half).
     Display,
+    /// Sends to the test fixtures' globally addressed LANs (SI-14).
+    Lans,
 }
 
 impl Request {
@@ -67,6 +70,7 @@ impl Request {
             "network" => Ok(Payload::Network),
             "files" => Ok(Payload::Files),
             "display" => Ok(Payload::Display),
+            "lans" => Ok(Payload::Lans),
             _ => Err(Refused::Malformed),
         };
         match args.as_slice() {
@@ -137,7 +141,13 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
         Request::Probe(payload, fault) => {
             let run = RunDir::create()?;
             let host = host_namespaces()?;
-            let ruleset = net::ruleset(&net::deny_set()?);
+            gate::hold("host-view");
+            // Watching starts before the view is read, so a change between
+            // the two is seen.
+            let watch = HostWatch::open()?;
+            let network = netlink::host_view()?;
+            events.watch(watch);
+            let ruleset = net::ruleset(&net::deny_set(&network));
             std::fs::write(run.0.join(RULESET), &ruleset)?;
             let ready = open_pipe(&run.0.join(READY), OFlags::RDONLY | OFlags::NONBLOCK)?;
             let release = open_pipe(&run.0.join(RELEASE), OFlags::RDWR)?;
@@ -172,9 +182,12 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
                 Payload::Inventory => chain.arg("inventory"),
                 Payload::Files => chain.arg("files"),
                 Payload::Display => chain.arg("display"),
-                Payload::Network => chain
-                    .arg("network")
-                    .args(net::host_addresses()?.iter().map(Ipv4Addr::to_string)),
+                Payload::Network => chain.arg("network").args(
+                    net::host_addresses(&network)
+                        .iter()
+                        .map(Ipv4Addr::to_string),
+                ),
+                Payload::Lans => chain.arg("lans"),
             };
             Some(Boxed {
                 _run: run,
@@ -267,6 +280,7 @@ fn conclude(halt: Halt) -> Result<End, Refused> {
     match halt {
         Halt::Stop => Ok(End::Stopped),
         Halt::Ended(status) => Ok(End::Exited(status)),
+        Halt::HostChanged => Err(Refused::HostChanged),
         Halt::Refused(refused) => Err(refused),
     }
 }
@@ -336,9 +350,7 @@ impl Boxed {
         }
         gate::hold("barrier");
         self.check_from_outside(events, chain, scope, name)?;
-        if events.stop_pending()? {
-            return Err(Halt::Stop);
-        }
+        events.pending()?;
         let release = self.release.take().ok_or(Refused::Malformed)?;
         std::fs::File::from(release).write_all(b"G")?;
         Ok(())

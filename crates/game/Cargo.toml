@@ -19,6 +19,8 @@ mutant-si38-sigterm-stop = []
 mutant-si38-no-limits = []
 mutant-si38-helper-unbounded = []
 mutant-si38-registration-deaf = []
+mutant-si14-main-table-only = []
+mutant-si14-no-host-watch = []
 mutant-si36-no-fd-sweep = []
 mutant-si36-barrier-skip = []
 mutant-si14-no-deny-set = []
@@ -28,6 +30,8 @@ mutant-si35-host-x11-mounted = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kickoff-local.workspace = true
-nix = { workspace = true, features = ["signal", "net"] }
-rustix = { workspace = true, features = ["event", "thread"] }
+netlink-packet-core.workspace = true
+netlink-packet-route.workspace = true
+nix = { workspace = true, features = ["signal"] }
+rustix = { workspace = true, features = ["event", "thread", "net"] }
 thiserror.workspace = true

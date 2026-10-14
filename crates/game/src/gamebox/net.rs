@@ -4,8 +4,8 @@
 use std::fmt;
 use std::net::Ipv4Addr;
 
-use super::Refused;
 use super::barrier::Fault;
+use super::netlink::HostView;
 
 pub(super) const PASTA: &str = "/usr/bin/pasta";
 pub(super) const NFT: &str = "/usr/bin/nft";
@@ -120,71 +120,34 @@ impl fmt::Display for Net4 {
 }
 
 /// The deny set: the fixed ranges, every address on every host interface
-/// and its connected subnet, every routed subnet and every gateway, as the
-/// host's netlink view shows them now. Contained networks are dropped, so
+/// and its connected subnet, every route destination in every table and
+/// every gateway, as `view` shows them. Contained networks are dropped, so
 /// the set loads without overlapping intervals.
-pub(super) fn deny_set() -> Result<Vec<Net4>, Refused> {
+pub(super) fn deny_set(view: &HostView) -> Vec<Net4> {
     let mut nets: Vec<Net4> = FIXED
         .iter()
         .filter_map(|(a, len)| Net4::new(Ipv4Addr::from(*a), *len))
         .collect();
-    for (addr, len) in interfaces()? {
-        nets.extend(Net4::new(addr, 32));
-        nets.extend(Net4::new(addr, len));
+    for (addr, len) in &view.addresses {
+        nets.extend(Net4::new(*addr, 32));
+        nets.extend(Net4::new(*addr, *len));
     }
-    nets.extend(routes(&std::fs::read_to_string("/proc/net/route")?)?);
-    Ok(minimal(nets))
-}
-
-/// Every IPv4 address on a host interface, with its prefix length.
-fn interfaces() -> Result<Vec<(Ipv4Addr, u8)>, Refused> {
-    let mut found = Vec::new();
-    for ifa in nix::ifaddrs::getifaddrs()? {
-        let (Some(addr), Some(mask)) = (ifa.address, ifa.netmask) else {
-            continue;
-        };
-        let (Some(addr), Some(mask)) = (addr.as_sockaddr_in(), mask.as_sockaddr_in()) else {
-            continue;
-        };
-        let len = u8::try_from(mask.ip().to_bits().count_ones()).map_err(|_| Refused::Network)?;
-        found.push((addr.ip(), len));
+    for (dst, len) in &view.routes {
+        nets.extend(Net4::new(*dst, *len));
     }
-    Ok(found)
+    for gateway in &view.gateways {
+        nets.extend(Net4::new(*gateway, 32));
+    }
+    minimal(nets)
 }
 
 /// The host's own non-loopback IPv4 addresses, which the box must not reach.
-pub(super) fn host_addresses() -> Result<Vec<Ipv4Addr>, Refused> {
-    Ok(interfaces()?
-        .into_iter()
-        .map(|(addr, _)| addr)
+pub(super) fn host_addresses(view: &HostView) -> Vec<Ipv4Addr> {
+    view.addresses
+        .iter()
+        .map(|(addr, _)| *addr)
         .filter(|addr| !addr.is_loopback())
-        .collect())
-}
-
-/// Destinations and gateways of the main routing table.
-fn routes(table: &str) -> Result<Vec<Net4>, Refused> {
-    let hex = |s: &str| -> Result<Ipv4Addr, Refused> {
-        let n = u32::from_str_radix(s, 16).map_err(|_| Refused::Network)?;
-        Ok(Ipv4Addr::from(n.to_ne_bytes()))
-    };
-    let mut nets = Vec::new();
-    for line in table.lines().skip(1) {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        let (Some(dest), Some(gateway), Some(mask)) = (cols.get(1), cols.get(2), cols.get(7))
-        else {
-            return Err(Refused::Network);
-        };
-        let gateway = hex(gateway)?;
-        if !gateway.is_unspecified() {
-            nets.extend(Net4::new(gateway, 32));
-        }
-        let mask = hex(mask)?;
-        if !mask.is_unspecified() {
-            let len = u8::try_from(mask.to_bits().count_ones()).map_err(|_| Refused::Network)?;
-            nets.extend(Net4::new(hex(dest)?, len));
-        }
-    }
-    Ok(nets)
+        .collect()
 }
 
 fn minimal(mut nets: Vec<Net4>) -> Vec<Net4> {
@@ -272,12 +235,19 @@ mod tests {
     }
 
     #[test]
-    fn route_table_gives_gateways_and_routed_subnets() {
-        let table = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
-                     eth0\t00000000\t0164A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
-                     eth0\t0064A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n";
-        let nets = routes(table).unwrap();
-        assert_eq!(nets, [net("192.168.100.1/32"), net("192.168.100.0/24")]);
+    fn deny_set_covers_addresses_routes_in_any_table_and_gateways() {
+        let view = HostView {
+            addresses: vec![("203.0.113.1".parse().unwrap(), 24)],
+            routes: vec![("198.51.100.0".parse().unwrap(), 24)],
+            gateways: vec!["192.88.99.1".parse().unwrap()],
+        };
+        let shown: Vec<String> = deny_set(&view).iter().map(Net4::to_string).collect();
+        for want in ["203.0.113.0/24", "198.51.100.0/24", "192.88.99.1"] {
+            assert!(
+                shown.iter().any(|s| s == want),
+                "{want} missing from {shown:?}"
+            );
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ use nix::sys::signalfd::SignalFd;
 use rustix::event::{PollFd, PollFlags, Timespec};
 
 use super::Refused;
+use super::netlink::HostWatch;
 
 pub(super) const POLL: Duration = Duration::from_millis(5);
 
@@ -23,6 +24,9 @@ pub(super) enum Halt {
     Stop,
     /// The chain's first process (pasta) ended.
     Ended(ExitStatus),
+    /// The host's addresses, routes or rules changed, so the box's deny set
+    /// may be stale (design §3.2.4). The box is stopped: fail closed.
+    HostChanged,
     Refused(Refused),
 }
 
@@ -49,6 +53,8 @@ pub(super) struct Events {
     signals: SignalFd,
     stopping: bool,
     child: bool,
+    watch: Option<HostWatch>,
+    changed: bool,
 }
 
 impl Events {
@@ -63,11 +69,21 @@ impl Events {
             signals: SignalFd::new(&mask)?,
             stopping: false,
             child: false,
+            watch: None,
+            changed: false,
         })
     }
 
+    /// From now on every wait also ends on a host network change.
+    pub(super) fn watch(&mut self, watch: HostWatch) {
+        if !cfg!(feature = "mutant-si14-no-host-watch") {
+            self.watch = Some(watch);
+        }
+    }
+
     /// Waits for a child to end, `extra` to become readable or `deadline`.
-    /// A stop, once seen, is returned by this and every later wait.
+    /// A stop or a host change, once seen, is returned by this and every
+    /// later wait.
     pub(super) fn wait(
         &mut self,
         extra: Option<BorrowedFd<'_>>,
@@ -77,19 +93,20 @@ impl Events {
             if self.stopping {
                 return Err(Halt::Stop);
             }
+            if self.changed {
+                return Err(Halt::HostChanged);
+            }
             if std::mem::take(&mut self.child) {
                 return Ok(Wake::Child);
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            let mut fds = vec![PollFd::new(&self.signals, PollFlags::IN)];
-            if let Some(fd) = extra {
-                fds.push(PollFd::from_borrowed_fd(fd, PollFlags::IN));
-            }
-            rustix::event::poll(&mut fds, Some(&timespec(left))).map_err(Refused::from)?;
-            let signalled = fds.first().is_some_and(|f| !f.revents().is_empty());
-            let extra_ready = fds.get(1).is_some_and(|f| !f.revents().is_empty());
+            let (signalled, watched, extra_ready) = self.poll(extra, left)?;
             if signalled {
                 self.read_signal()?;
+                continue;
+            }
+            if watched {
+                self.changed |= self.watch.as_ref().is_some_and(HostWatch::changed);
                 continue;
             }
             if extra_ready {
@@ -101,18 +118,49 @@ impl Events {
         }
     }
 
-    /// Whether a stop arrived, without waiting. The barrier is never
-    /// released once one has.
-    pub(super) fn stop_pending(&mut self) -> Result<bool, Halt> {
+    /// Which of the signal descriptor, the watch and `extra` are readable.
+    fn poll(
+        &self,
+        extra: Option<BorrowedFd<'_>>,
+        timeout: Duration,
+    ) -> Result<(bool, bool, bool), Refused> {
+        let mut fds = vec![PollFd::new(&self.signals, PollFlags::IN)];
+        let watch_at = self.watch.as_ref().map(|w| {
+            fds.push(PollFd::from_borrowed_fd(w.as_fd(), PollFlags::IN));
+            fds.len().saturating_sub(1)
+        });
+        let extra_at = extra.map(|fd| {
+            fds.push(PollFd::from_borrowed_fd(fd, PollFlags::IN));
+            fds.len().saturating_sub(1)
+        });
+        rustix::event::poll(&mut fds, Some(&timespec(timeout)))?;
+        let ready = |at: Option<usize>| {
+            at.and_then(|i| fds.get(i))
+                .is_some_and(|f| !f.revents().is_empty())
+        };
+        Ok((ready(Some(0)), ready(watch_at), ready(extra_at)))
+    }
+
+    /// A stop or host change that already arrived, without waiting. The
+    /// barrier is never released once one has.
+    pub(super) fn pending(&mut self) -> Result<(), Halt> {
         loop {
-            let mut fds = [PollFd::new(&self.signals, PollFlags::IN)];
-            let ready = rustix::event::poll(&mut fds, Some(&timespec(Duration::ZERO)))
-                .map_err(Refused::from)?;
-            if ready == 0 {
-                return Ok(self.stopping);
+            let (signalled, watched, _) = self.poll(None, Duration::ZERO)?;
+            if signalled {
+                self.read_signal()?;
+            } else if watched {
+                self.changed |= self.watch.as_ref().is_some_and(HostWatch::changed);
+            } else {
+                break;
             }
-            self.read_signal()?;
         }
+        if self.stopping {
+            return Err(Halt::Stop);
+        }
+        if self.changed {
+            return Err(Halt::HostChanged);
+        }
+        Ok(())
     }
 
     fn read_signal(&mut self) -> Result<(), Refused> {
