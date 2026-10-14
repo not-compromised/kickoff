@@ -41,6 +41,7 @@ mutant-si30-facade-core-zero = []
 mutant-si30-late-facade-core = []
 mutant-si30-facade-no-probe = []
 mutant-si30-probe-fd-unchecked = []
+mutant-si30-probe-inherits-fds = []
 
 [dependencies]
 postcard.workspace = true

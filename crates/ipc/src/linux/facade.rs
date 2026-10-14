@@ -509,22 +509,27 @@ fn harden_facade() -> Result<(), IpcError> {
 /// Call first at normal executable entry, before arguments or runtime setup.
 /// It applies the facade policy before checking the probe marker. The worker
 /// subsequently makes itself nondumpable and lowers both limits to zero.
-/// A facade launches the genuine exec probe with only its marker, null stdio
-/// and a private cwd, and checks kernel wait status. No secrets may exist yet.
+/// A facade launches the genuine exec probe with only its marker, which names
+/// the private scratch directory the probe crashes in, null stdio and no other
+/// descriptor, and checks kernel wait status. No secrets may exist yet.
 pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
     if !cfg!(feature = "mutant-si30-late-facade-core") {
         harden_facade()?;
     }
-    if std::env::var_os(CORE_PROBE_ENV).as_deref() != Some(std::ffi::OsStr::new("1")) {
+    let Some(scratch) = std::env::var_os(CORE_PROBE_ENV) else {
         return Ok(());
-    }
+    };
     harden_facade()?;
     if rustix::process::dumpable_behavior().map_err(io::Error::from)?
         != rustix::process::DumpableBehavior::Dumpable
         || std::env::vars_os().count() != 1
+        || !std::path::Path::new(&scratch).is_absolute()
     {
         return Err(IpcError::Hardening);
     }
+    // A relative file core_pattern writes into the cwd, where the facade
+    // looks for it after the crash.
+    std::env::set_current_dir(&scratch)?;
     let expected = std::fs::metadata("/dev/null")?;
     for stat in [
         rustix::fs::fstat(std::io::stdin()),
@@ -536,23 +541,31 @@ pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
             return Err(IpcError::Hardening);
         }
     }
-    // Refuse leaked descriptors. Collecting closes the enumeration fd before
-    // the check, so it cannot be confused with inherited authority.
-    let fds: Vec<_> = std::fs::read_dir("/proc/self/fd")?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<Result<_, _>>()?;
-    for entry in fds {
-        let Some(fd) = entry.to_str().and_then(|name| name.parse::<u32>().ok()) else {
-            return Err(IpcError::Hardening);
-        };
-        if !cfg!(feature = "mutant-si30-probe-fd-unchecked")
-            && fd >= 3
-            && std::fs::symlink_metadata(std::path::Path::new("/proc/self/fd").join(&entry)).is_ok()
-        {
+    for fd in open_descriptors()? {
+        if !cfg!(feature = "mutant-si30-probe-fd-unchecked") && fd >= 3 {
             return Err(IpcError::Hardening);
         }
     }
     std::process::abort();
+}
+
+/// Descriptor numbers open in this process. Collecting closes the enumeration
+/// fd before the caller acts, so it cannot be confused with inherited
+/// authority.
+fn open_descriptors() -> Result<Vec<i32>, IpcError> {
+    let entries: Vec<_> = std::fs::read_dir("/proc/self/fd")?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<_, _>>()?;
+    let mut open = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(fd) = entry.to_str().and_then(|name| name.parse::<i32>().ok()) else {
+            return Err(IpcError::Hardening);
+        };
+        if std::fs::symlink_metadata(std::path::Path::new("/proc/self/fd").join(&entry)).is_ok() {
+            open.push(fd);
+        }
+    }
+    Ok(open)
 }
 
 struct Scratch {
@@ -569,9 +582,61 @@ impl Drop for Scratch {
     }
 }
 
+/// Kills and reaps a spawned probe unless its status was already collected.
+struct ProbeGuard(Option<rustix::process::Pid>);
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty());
+        }
+    }
+}
+
+/// posix_spawn rather than `Command`: its file actions close, by number, the
+/// descriptors this process inherited without close-on-exec from whatever
+/// launched it. Safe Rust cannot own those, and the probe must not carry them
+/// into a crash.
+fn spawn_probe(worker: &Command, scratch: &std::path::Path) -> Result<ProbeGuard, IpcError> {
+    use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, posix_spawn};
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let cstring = |bytes: &[u8]| CString::new(bytes).map_err(|_| IpcError::Hardening);
+    let program = cstring(worker.get_program().as_bytes())?;
+    let mut argv = vec![program.clone()];
+    for arg in worker.get_args() {
+        argv.push(cstring(arg.as_bytes())?);
+    }
+    let mut marker = format!("{CORE_PROBE_ENV}=").into_bytes();
+    marker.extend_from_slice(scratch.as_os_str().as_bytes());
+    let envp = [cstring(&marker)?];
+    let null = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/null")?;
+    let mut actions = PosixSpawnFileActions::init().map_err(io::Error::from)?;
+    for target in 0..3 {
+        actions
+            .add_dup2(null.as_raw_fd(), target)
+            .map_err(io::Error::from)?;
+    }
+    if !cfg!(feature = "mutant-si30-probe-inherits-fds") {
+        for fd in open_descriptors()? {
+            if fd >= 3 {
+                actions.add_close(fd).map_err(io::Error::from)?;
+            }
+        }
+    }
+    let attr = PosixSpawnAttr::init().map_err(io::Error::from)?;
+    let pid =
+        posix_spawn(program.as_c_str(), &actions, &attr, &argv, &envp).map_err(io::Error::from)?;
+    let pid = rustix::process::Pid::from_raw(pid.as_raw()).ok_or(IpcError::Hardening)?;
+    Ok(ProbeGuard(Some(pid)))
+}
+
 async fn probe_core_suppression(dir: &RuntimeDir, worker: &Command) -> Result<(), IpcError> {
     use std::os::unix::fs::DirBuilderExt;
-    use std::os::unix::process::ExitStatusExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = dir.socket_path().parent().ok_or(IpcError::UnsafeDir)?;
@@ -586,29 +651,28 @@ async fn probe_core_suppression(dir: &RuntimeDir, worker: &Command) -> Result<()
         path,
         inode: (meta.dev(), meta.ino()),
     };
-    let mut probe = Command::new(worker.get_program());
-    probe
-        .args(worker.get_args())
-        .env_clear()
-        .env(CORE_PROBE_ENV, "1")
-        .current_dir(&scratch.path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard(probe.spawn()?);
+    let mut probe = spawn_probe(worker, &scratch.path)?;
     timeout(Duration::from_secs(3), async {
         let mut tick = interval(Duration::from_millis(5));
         loop {
             tick.tick().await;
-            if let Some(status) = child.0.try_wait()? {
-                if status.signal() != Some(6) || status.core_dumped() {
-                    return Err(IpcError::Hardening);
-                }
-                if std::fs::read_dir(&scratch.path)?.next().is_some() {
-                    return Err(IpcError::Hardening);
-                }
-                return Ok(());
+            let Some(pid) = probe.0 else {
+                return Err(IpcError::Hardening);
+            };
+            let Some((_, status)) =
+                rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG)
+                    .map_err(io::Error::from)?
+            else {
+                continue;
+            };
+            probe.0 = None;
+            if status.terminating_signal() != Some(6)
+                || status.as_raw() & 0x80 != 0
+                || std::fs::read_dir(&scratch.path)?.next().is_some()
+            {
+                return Err(IpcError::Hardening);
             }
+            return Ok(());
         }
     })
     .await

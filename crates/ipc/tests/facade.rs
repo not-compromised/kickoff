@@ -12,6 +12,7 @@ use kickoff_ipc::role::Cli;
 use kickoff_ipc::{CliCommand, Facade, IpcError, Reply, Request, Trust, Worker, connect};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -42,6 +43,18 @@ fn process_helper() {
     let Ok(mode) = std::env::var(MODE) else {
         return;
     };
+    if let Some(next) = launcher_target(&mode) {
+        // A launcher that leaks a descriptor hands it to the facade across
+        // exec.
+        let leaked = std::fs::File::open("/dev/null").unwrap();
+        rustix::io::fcntl_setfd(&leaked, rustix::io::FdFlags::empty()).unwrap();
+        let error = command(next).exec();
+        panic!("exec failed: {error}");
+    }
+    if mode == "probe-direct" || mode == "probe-direct-leak" {
+        probe_directly(mode == "probe-direct-leak");
+        return;
+    }
     if mode == "early-core-policy" {
         let limit = rustix::process::getrlimit(rustix::process::Resource::Core);
         assert_eq!(limit.current, Some(1));
@@ -139,20 +152,6 @@ fn process_helper() {
                     Err(_) => emit("rejected"),
                 }
             }
-            "probe-fd-leak" => {
-                let base = std::env::var_os(BASE).unwrap();
-                let dir = kickoff_ipc::RuntimeDir::open_in(std::path::Path::new(&base)).unwrap();
-                let file = std::fs::File::open("/dev/null").unwrap();
-                rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty()).unwrap();
-                let mut worker = command("worker");
-                worker.stdout(Stdio::null()).stderr(Stdio::null());
-                let result = Facade::spawn(&dir, trust_me(), worker).await;
-                assert!(
-                    matches!(result, Err(IpcError::Hardening)),
-                    "probe inherited an unlisted descriptor"
-                );
-                emit("fd-refused");
-            }
             "not-parent" => {
                 // This pair was created by this child, rather than inherited
                 // from its parent. Matching uid and executable alone is not
@@ -167,6 +166,78 @@ fn process_helper() {
             }
             _ => panic!("unknown test mode"),
         }
+    });
+}
+
+fn launcher_target(mode: &str) -> Option<&'static str> {
+    match mode {
+        "leaky-launcher" => Some("facade"),
+        _ => None,
+    }
+}
+
+/// Runs the installed probe as the facade does, except that one descriptor
+/// may be left open. Everything else this helper inherited, including
+/// whatever the test runner leaked, is closed in the probe.
+fn probe_directly(leak: bool) {
+    use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, posix_spawn};
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::DirBuilderExt;
+    let scratch = std::path::Path::new(&std::env::var_os(BASE).unwrap()).join("probe-scratch");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&scratch)
+        .unwrap();
+    let null = std::fs::File::open("/dev/null").unwrap();
+    let kept = std::fs::File::open("/dev/null").unwrap();
+    let mut actions = PosixSpawnFileActions::init().unwrap();
+    for target in 0..3 {
+        actions.add_dup2(null.as_raw_fd(), target).unwrap();
+    }
+    if leak {
+        // dup2 onto itself would keep close-on-exec; a fresh number clears it.
+        actions.add_dup2(kept.as_raw_fd(), 200).unwrap();
+    }
+    let open: Vec<i32> = std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .map(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    for fd in open.into_iter().filter(|fd| *fd >= 3 && *fd != 200) {
+        actions.add_close(fd).unwrap();
+    }
+    let program = CString::new(me().as_os_str().as_bytes()).unwrap();
+    let argv = [
+        program.clone(),
+        c"--exact".to_owned(),
+        c"process_helper".to_owned(),
+        c"--nocapture".to_owned(),
+        c"--test-threads=1".to_owned(),
+    ];
+    let mut marker = b"KICKOFF_IPC_CORE_PROBE=".to_vec();
+    marker.extend_from_slice(scratch.as_os_str().as_bytes());
+    let envp = [CString::new(marker).unwrap()];
+    let attr = PosixSpawnAttr::init().unwrap();
+    let pid = posix_spawn(program.as_c_str(), &actions, &attr, &argv, &envp).unwrap();
+    let pid = rustix::process::Pid::from_raw(pid.as_raw()).unwrap();
+    let (_, status) = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty())
+        .unwrap()
+        .unwrap();
+    drop((null, kept));
+    let dumped = status.as_raw() & 0x80 != 0;
+    emit(match (status.terminating_signal(), status.exit_status()) {
+        (Some(6), _) if !dumped => "crashed",
+        (None, Some(code)) if code != 0 => "refused",
+        _ => "other",
     });
 }
 
@@ -199,18 +270,22 @@ impl Running {
         }
     }
 }
-fn facade(base: &TempBase, mode: &str) -> Running {
+fn helper(base: &TempBase, mode: &str) -> Running {
     let mut child = command(mode)
         .env(BASE, base.path())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     let output = BufReader::new(child.stdout.take().unwrap());
-    let mut running = Running {
+    Running {
         child,
         output,
         worker: None,
-    };
+    }
+}
+
+fn facade(base: &TempBase, mode: &str) -> Running {
+    let mut running = helper(base, mode);
     assert_eq!(running.line(), "ready");
     let pid = std::fs::read_to_string(base.path().join("worker.pid"))
         .unwrap()
@@ -592,20 +667,34 @@ async fn si_30_facade_core_probe_timeout_reaps_child_and_scratch() {
 #[test]
 fn si_30_facade_crash_probe_refuses_inherited_capabilities() {
     let base = TempBase::new();
-    let _dir = base.dir();
-    let mut child = command("probe-fd-leak")
-        .env(BASE, base.path())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let output = BufReader::new(child.stdout.take().unwrap());
-    let mut running = Running {
-        child,
-        output,
-        worker: None,
-    };
-    assert_eq!(running.line(), "fd-refused");
-    assert!(running.child.wait().unwrap().success());
+    // Control: the same direct launch without the extra descriptor crashes,
+    // so the refusal below is the descriptor check and nothing else.
+    let mut clean = helper(&base, "probe-direct");
+    assert_eq!(clean.line(), "crashed");
+    assert!(clean.child.wait().unwrap().success());
+    std::fs::remove_dir(base.path().join("probe-scratch")).unwrap();
+    let mut leaky = helper(&base, "probe-direct-leak");
+    assert_eq!(
+        leaky.line(),
+        "refused",
+        "the probe crashed while holding an inherited descriptor"
+    );
+    assert!(leaky.child.wait().unwrap().success());
+}
+
+#[tokio::test]
+async fn si_30_facade_probe_closes_descriptors_inherited_from_its_launcher() {
+    // Desktop launchers and CI runners pass descriptors without
+    // close-on-exec. They must neither reach the crash probe nor stop
+    // Kickoff from starting.
+    let base = TempBase::new();
+    let dir = base.dir();
+    let _running = facade(&base, "leaky-launcher");
+    let mut client = connect::<Cli>(&dir, &trust_me()).await.unwrap();
+    assert!(matches!(
+        client.call(CliCommand::Status).await,
+        Ok(Reply::Done)
+    ));
 }
 
 #[tokio::test]
