@@ -3,8 +3,13 @@
 //! through `/proc/<pid>`; the payload execs only after both agree.
 
 use std::fmt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+
+use rustix::event::{PollFd, PollFlags, Timespec};
+use rustix::fs::{AtFlags, Mode, OFlags};
 
 use super::Refused;
 
@@ -93,27 +98,98 @@ pub(super) const RLIMITS: [(&str, &str); 3] = [
 pub(super) const FSIZE: u64 = 4 << 30;
 pub(super) const NOFILE: u64 = 8192;
 
-/// A process's `/proc` directory: `/proc/self` or `/proc/<pid>`.
-pub(super) struct Proc(pub PathBuf);
+/// A process's `/proc` directory. Another process is pinned: its
+/// directory is opened once and every read goes through that descriptor,
+/// with a pidfd to confirm it still runs, so a recycled PID can never mix
+/// two processes' answers.
+pub(super) struct Proc(Base);
+
+enum Base {
+    This,
+    Pinned { dir: OwnedFd, pidfd: OwnedFd },
+}
 
 impl Proc {
     pub(super) fn this() -> Proc {
-        Proc(PathBuf::from("/proc/self"))
+        Proc(Base::This)
     }
 
-    pub(super) fn pid(pid: i32) -> Proc {
-        Proc(PathBuf::from(format!("/proc/{pid}")))
+    pub(super) fn pid(pid: i32) -> Result<Proc, Refused> {
+        let dir = rustix::fs::open(
+            format!("/proc/{pid}"),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let raw = rustix::process::Pid::from_raw(pid).ok_or(Refused::Malformed)?;
+        let pidfd = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty())?;
+        let proc = Proc(Base::Pinned { dir, pidfd });
+        // If the directory's process died before the pidfd was taken, its
+        // entries are gone and this fails.
+        proc.read("stat")?;
+        proc.still_running()?;
+        Ok(proc)
+    }
+
+    /// The pinned process has not exited (a pidfd turns readable when it
+    /// does). Checks end with this, so every answer came from a live process.
+    pub(super) fn still_running(&self) -> Result<(), Refused> {
+        if let Base::Pinned { pidfd, .. } = &self.0 {
+            let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
+            if rustix::event::poll(
+                &mut fds,
+                Some(&Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }),
+            )? != 0
+            {
+                return Err(Refused::Barrier(Check::Cgroup));
+            }
+        }
+        Ok(())
+    }
+
+    fn open(&self, name: &str) -> Result<OwnedFd, Refused> {
+        let flags = OFlags::RDONLY | OFlags::CLOEXEC;
+        Ok(match &self.0 {
+            Base::This => rustix::fs::open(format!("/proc/self/{name}"), flags, Mode::empty())?,
+            Base::Pinned { dir, .. } => rustix::fs::openat(dir, name, flags, Mode::empty())?,
+        })
+    }
+
+    fn stat(&self, name: &str) -> Result<rustix::fs::Stat, Refused> {
+        Ok(match &self.0 {
+            Base::This => rustix::fs::stat(format!("/proc/self/{name}"))?,
+            Base::Pinned { dir, .. } => rustix::fs::statat(dir, name, AtFlags::empty())?,
+        })
     }
 
     fn read(&self, name: &str) -> Result<String, Refused> {
-        Ok(std::fs::read_to_string(self.0.join(name))?)
+        let mut text = String::new();
+        std::fs::File::from(self.open(name)?)
+            .take(1 << 16)
+            .read_to_string(&mut text)?;
+        Ok(text)
     }
 
     pub(super) fn namespace(&self, ns: &str) -> Result<String, Refused> {
-        let link = std::fs::read_link(self.0.join("ns").join(ns))?;
-        link.into_os_string()
-            .into_string()
-            .map_err(|_| Refused::Malformed)
+        let name = format!("ns/{ns}");
+        let link = match &self.0 {
+            Base::This => rustix::fs::readlink(format!("/proc/self/{name}"), Vec::new())?,
+            Base::Pinned { dir, .. } => rustix::fs::readlinkat(dir, name, Vec::new())?,
+        };
+        link.into_string().map_err(|_| Refused::Malformed)
+    }
+
+    /// A descriptor for one of the process's namespaces, for `setns`.
+    pub(super) fn namespace_fd(&self, ns: &str) -> Result<OwnedFd, Refused> {
+        self.open(&format!("ns/{ns}"))
+    }
+
+    /// Device and inode of the process's executable.
+    pub(super) fn exe(&self) -> Result<(u64, u64), Refused> {
+        let stat = self.stat("exe")?;
+        Ok((stat.st_dev, stat.st_ino))
     }
 
     /// Each of [`NAMESPACES`] differs from the host's, and every one but
@@ -193,11 +269,13 @@ impl Proc {
             return Err(bad);
         }
         for fd in numbers {
-            let meta = std::fs::metadata(self.0.join("fd").join(fd.to_string()))?;
-            let id = (meta.dev(), meta.ino());
+            let stat = self.stat(&format!("fd/{fd}"))?;
+            let id = (stat.st_dev, stat.st_ino);
+            let fifo =
+                rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Fifo;
             let ok = match fd {
                 0..=2 => id == (null.dev(), null.ino()),
-                _ => meta.file_type().is_fifo() && pipes.contains(&id),
+                _ => fifo && pipes.contains(&id),
             };
             if !ok {
                 return Err(bad);
@@ -206,17 +284,11 @@ impl Proc {
         Ok(())
     }
 
-    /// Descriptor numbers of another process.
+    /// Descriptor numbers of another process, through the same strict
+    /// listing as the sweep.
     pub(super) fn descriptor_numbers(&self) -> Result<Vec<i32>, Refused> {
-        let mut numbers = Vec::new();
-        for entry in std::fs::read_dir(self.0.join("fd"))? {
-            let name = entry?.file_name();
-            numbers.push(
-                name.to_str()
-                    .and_then(|n| n.parse().ok())
-                    .ok_or(Refused::Malformed)?,
-            );
-        }
+        let dir = self.open("fd")?;
+        let mut numbers = kickoff_local::fds::descriptors_in(dir)?;
         numbers.sort_unstable();
         Ok(numbers)
     }

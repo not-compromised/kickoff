@@ -27,6 +27,12 @@ pub fn close_descriptors_above_stdio_except(keep: &[i32]) -> io::Result<()> {
     })
 }
 
+/// Descriptor numbers in another process's `fd` directory, open on `dir`,
+/// listed and closed as strictly as this process's own.
+pub fn descriptors_in(dir: OwnedFd) -> io::Result<Vec<i32>> {
+    list_and_close(dir, read_names, checked_close, Listing::Other)
+}
+
 /// Every listed descriptor above stdio must close, or startup is refused.
 /// Not every error leaves the descriptor open: Linux releases the number
 /// even when close reports EINTR or EIO, and EBADF means it was not open.
@@ -55,9 +61,19 @@ pub fn open_descriptors() -> io::Result<Vec<i32>> {
         Mode::empty(),
     )
     .map_err(io::Error::from)?;
-    list_and_close(listing, read_names, |fd| {
-        nix::unistd::close(fd).map_err(io::Error::from)
-    })
+    list_and_close(listing, read_names, checked_close, Listing::Own)
+}
+
+fn checked_close(fd: OwnedFd) -> io::Result<()> {
+    nix::unistd::close(fd).map_err(io::Error::from)
+}
+
+/// Whose `fd` directory a listing reads. In this process's own, the
+/// listing's descriptor is itself an entry and is left out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    Own,
+    Other,
 }
 
 /// Lists the descriptor directory open on `listing` through `read`, then
@@ -70,6 +86,7 @@ fn list_and_close(
     listing: OwnedFd,
     read: impl FnOnce(BorrowedFd<'_>) -> io::Result<Vec<Vec<u8>>>,
     close: impl FnOnce(OwnedFd) -> io::Result<()>,
+    whose: Listing,
 ) -> io::Result<Vec<i32>> {
     let own = listing.as_raw_fd();
     let names = read(listing.as_fd());
@@ -92,7 +109,7 @@ fn list_and_close(
         {
             continue;
         }
-        if fd != own {
+        if whose == Listing::Other || fd != own {
             open.push(fd);
         }
     }
@@ -149,7 +166,7 @@ mod tests {
         let held = [open_dir("/"), open_dir("/proc")];
         let listing = open_dir("/proc/self/fd");
         let own = listing.as_raw_fd();
-        let listed = list_and_close(listing, read_names, checked_close).unwrap();
+        let listed = list_and_close(listing, read_names, checked_close, Listing::Own).unwrap();
         for fd in &held {
             assert!(
                 listed.contains(&fd.as_raw_fd()),
@@ -169,14 +186,16 @@ mod tests {
         let mut names: Vec<Vec<u8>> = [".", "..", "0", "1", "2"].map(Vec::from).into();
         names.extend([own, b"2147483647".to_vec()]);
         assert_eq!(
-            list_and_close(listing, |_| Ok(names), checked_close).map_err(|e| e.kind()),
+            list_and_close(listing, |_| Ok(names), checked_close, Listing::Own)
+                .map_err(|e| e.kind()),
             Ok(vec![0, 1, 2, i32::MAX]),
             "an enumerated descriptor was dropped, so it would stay open"
         );
         let listing = open_dir("/proc/self/fd");
         let names = vec![b"3".to_vec(), b"not-a-number".to_vec()];
         assert_eq!(
-            list_and_close(listing, |_| Ok(names), checked_close).map_err(|e| e.kind()),
+            list_and_close(listing, |_| Ok(names), checked_close, Listing::Own)
+                .map_err(|e| e.kind()),
             Err(io::ErrorKind::InvalidData)
         );
     }
@@ -319,10 +338,15 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         let mut closed = Vec::new();
-        let listed = list_and_close(listing, read_names, |fd| {
-            closed.push(fd.as_raw_fd());
-            checked_close(fd)
-        })
+        let listed = list_and_close(
+            listing,
+            read_names,
+            |fd| {
+                closed.push(fd.as_raw_fd());
+                checked_close(fd)
+            },
+            Listing::Own,
+        )
         .map_err(|e| e.kind());
         assert_eq!(
             listed,
@@ -342,11 +366,16 @@ mod tests {
             let listing = open_dir("/proc/self/fd");
             let own = listing.as_raw_fd();
             let mut closed = Vec::new();
-            let listed = list_and_close(listing, read_names, |fd| {
-                closed.push(fd.as_raw_fd());
-                drop(fd);
-                Err(errno.into())
-            })
+            let listed = list_and_close(
+                listing,
+                read_names,
+                |fd| {
+                    closed.push(fd.as_raw_fd());
+                    drop(fd);
+                    Err(errno.into())
+                },
+                Listing::Own,
+            )
             .map_err(|e| e.kind());
             assert_eq!(
                 listed,
@@ -382,5 +411,34 @@ mod tests {
         });
         assert!(result.is_ok());
         assert_eq!(attempted, [3, 9]);
+    }
+}
+
+#[cfg(test)]
+mod other_tests {
+    use super::*;
+
+    #[test]
+    fn another_process_listing_keeps_every_number() {
+        // Listing another process's directory leaves nothing out, not even
+        // a number equal to the listing's own descriptor here.
+        let child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let dir = rustix::fs::open(
+            format!("/proc/{}/fd", child.id()),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        let mut listed = descriptors_in(dir).unwrap();
+        listed.sort_unstable();
+        let mut child = child;
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(listed.starts_with(&[0, 1, 2]), "{listed:?}");
     }
 }

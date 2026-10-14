@@ -351,40 +351,36 @@ impl Boxed {
         scope: &Scope,
         name: &str,
     ) -> Result<(), Halt> {
-        let procs = scope.procs()?;
-        let links: Vec<i32> = procs
-            .iter()
-            .copied()
-            .filter(|pid| exe_is(*pid, self.link_id))
+        // Each process is pinned once; every later read goes through it.
+        let procs: Vec<Proc> = scope
+            .procs()?
+            .into_iter()
+            .filter_map(|pid| Proc::pid(pid).ok())
             .collect();
-        let [pid] = links.as_slice() else {
+        let bwrap = identity(Path::new(BWRAP))?;
+        let mut links = procs
+            .iter()
+            .filter(|p| p.exe().is_ok_and(|e| e == self.link_id));
+        let (Some(link), None) = (links.next(), links.next()) else {
             return Err(Refused::Barrier(Check::Cgroup).into());
         };
-        let link = Proc::pid(*pid);
         let suffix = format!("/{name}.scope");
 
         // bwrap's monitor is the setup link after its exec: it stayed in
         // pasta's namespaces, whose user namespace owns the box's network.
-        let bwrap = identity(Path::new(BWRAP))?;
         let net = link.namespace("net")?;
         let user = link.namespace("user")?;
-        let monitors: Vec<i32> = procs
-            .iter()
-            .copied()
-            .filter(|pid| {
-                let p = Proc::pid(*pid);
-                exe_is(*pid, bwrap)
-                    && p.namespace("net").is_ok_and(|n| n == net)
-                    && p.namespace("user").is_ok_and(|u| u != user)
-            })
-            .collect();
-        let [monitor] = monitors.as_slice() else {
+        let mut monitors = procs.iter().filter(|p| {
+            p.exe().is_ok_and(|e| e == bwrap)
+                && p.namespace("net").is_ok_and(|n| n == net)
+                && p.namespace("user").is_ok_and(|u| u != user)
+        });
+        let (Some(monitor), None) = (monitors.next(), monitors.next()) else {
             return Err(Refused::Barrier(Check::Namespaces).into());
         };
-        let setup = Proc::pid(*monitor);
         let setup: Vec<String> = NAMESPACES
             .iter()
-            .map(|ns| setup.namespace(ns))
+            .map(|ns| monitor.namespace(ns))
             .collect::<Result<_, _>>()?;
         link.namespaces_separate(&self.host, &setup)?;
         link.cgroup_is(|path| path.ends_with(&suffix))?;
@@ -400,16 +396,29 @@ impl Boxed {
 
         let mut list = if gate::stall_helper() {
             let mut stalled = Command::new("/usr/bin/sleep");
-            stalled.arg("3600");
+            stalled
+                .arg("3600")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null());
             stalled
         } else {
+            // nsenter enters the monitor's namespaces through descriptors
+            // pinned here, handed over as its stdin and stderr, never by PID.
             let mut list = Command::new(NSENTER);
-            list.arg(format!("--target={monitor}"))
-                .args(["--user", "--net", "--preserve-credentials", "--"])
-                .args([net::NFT, "list", "ruleset"]);
+            list.args([
+                "--user=/proc/self/fd/0",
+                "--net=/proc/self/fd/2",
+                "--preserve-credentials",
+                "--",
+                net::NFT,
+                "list",
+                "ruleset",
+            ])
+            .stdin(Stdio::from(monitor.namespace_fd("user")?))
+            .stderr(Stdio::from(monitor.namespace_fd("net")?));
             list
         };
-        list.env_clear().stdin(Stdio::null()).stderr(Stdio::null());
+        list.env_clear();
         gate::mark("helper");
         let (status, out) = if cfg!(feature = "mutant-si38-helper-unbounded") {
             let out = list.output()?;
@@ -421,6 +430,8 @@ impl Boxed {
         if !status.success() || !same_ruleset(&listed, &self.ruleset) {
             return Err(Refused::Barrier(Check::Nft).into());
         }
+        link.still_running()?;
+        monitor.still_running()?;
         Ok(())
     }
 }
@@ -522,10 +533,6 @@ fn home() -> Result<PathBuf, Refused> {
 fn host_namespaces() -> Result<Vec<String>, Refused> {
     let me = Proc::this();
     NAMESPACES.iter().map(|ns| me.namespace(ns)).collect()
-}
-
-fn exe_is(pid: i32, id: (u64, u64)) -> bool {
-    identity(Path::new(&format!("/proc/{pid}/exe"))).is_ok_and(|e| e == id)
 }
 
 fn open_pipe(path: &Path, flags: OFlags) -> Result<OwnedFd, Refused> {
