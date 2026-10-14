@@ -98,6 +98,7 @@ the game-launch request.
   to the box's loopback on the port of the supervisor's UDP canary. At the
   barrier the supervisor confirms neither canary heard anything and that a
   free host port (29500-29529) is still closed for TCP and UDP. Faults
+  (the inbound one bound on the host's loopback only)
   forward exactly those ports (`-T`/`-U`, `-t`/`-u`) or keep the gateway
   mapping; each is refused by the probes alone. pasta 2026_07_28's own
   defaults forwarded nothing in either direction here; the explicit `none`

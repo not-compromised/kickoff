@@ -28,9 +28,13 @@ pub(super) fn pasta_args(fault: Fault, canaries: &Canaries) -> Result<Vec<String
         canaries.tcp_port()?.to_string(),
         canaries.udp_port()?.to_string(),
     );
-    // The forwarding faults forward exactly the startup probes' ports.
+    // The forwarding faults forward exactly the startup probes' ports; the
+    // inbound one binds on the host's loopback only, never its LAN.
     let (t, u) = match fault {
-        Fault::PastaForwardsInbound => (inbound.clone(), inbound),
+        Fault::PastaForwardsInbound => {
+            let port = format!("127.0.0.1/{inbound}");
+            (port.clone(), port)
+        }
         _ => ("none".to_owned(), "none".to_owned()),
     };
     let (big_t, big_u) = match fault {
