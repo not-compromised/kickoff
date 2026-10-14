@@ -3,6 +3,12 @@
 //! reads the host's view, and the test gives that namespace globally
 //! addressed LANs: a connected subnet and a gateway route in the main
 //! table, and a subnet reached only through a policy table.
+//!
+//! What these tests prove: the deny set taken at launch covers every one of
+//! those LANs, and a host network change during a session ends the box
+//! within the teardown deadline. What they do not prove: that no packet
+//! reaches a LAN the host adds mid-session. Between the change and the box's
+//! end the loaded deny set still permits it (see the crate README).
 
 #![allow(clippy::unwrap_used, clippy::panic)]
 
@@ -66,7 +72,7 @@ fn give_lans(supervisor: &Supervisor) {
 }
 
 #[test]
-fn si_14_deny_set_covers_lans_in_every_routing_table() {
+fn si_14_startup_deny_set_covers_lans_in_every_routing_table() {
     let supervisor = start_in_own_network("lans");
     give_lans(&supervisor);
     supervisor.release_gate("host-view");
@@ -80,7 +86,7 @@ fn si_14_deny_set_covers_lans_in_every_routing_table() {
 }
 
 #[test]
-fn si_14_host_network_change_stops_the_box() {
+fn si_14_host_network_change_ends_the_box_within_the_deadline() {
     let supervisor = start_in_own_network("inventory");
     give_lans(&supervisor);
     supervisor.release_gate("host-view");

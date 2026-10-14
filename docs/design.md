@@ -1141,6 +1141,7 @@ Settled by M1 (V, §3.2.5): native umu runs the copy under gamescope with legend
 | How the tap descriptor reaches kickoffd under the bubblewrap spawn path | M3 | M3 (§3.2.6) |
 | Same-name reswap inside one game process | Map Maker, mid-session map change | M1, the Map Maker live test |
 | pasta flags give no inbound forward and no host access | SI-14 | M0 (i), M3 |
+| Egress to a LAN the host gains during a session has no delivery window. Today the deny set is the launch-time snapshot (every routing table), and a host address, route or rule change ends the box only once the supervisor sees the netlink notification; until then the loaded set still permits the new destination. The in-box ruleset cannot close this; a fix needs an enforcement point independent of the watcher (for example host-side), and live recompute would also need a continuous subscription, validated complete snapshots, atomic replacement while egress is blocked, restart on change during a recompute, refusal on overflow or error, and handling of pasta's existing sockets and queued traffic | M3: any real peer session, or the real game with a peer | M3 |
 | systemd-coredump honours `RLIMIT_CORE 0` for the game | SI-30 | M0 |
 | Rocket League and Epic's SDK run at Low integrity under a separate account | contained mode (§8.2) | W1b |
 | A Steam copy launches (with Steam running, or with Epic authentication) | Steam players | W1b |

@@ -89,8 +89,10 @@ the game-launch request.
 - **Any host network change stops the box (fail closed).** The supervisor
   subscribes to IPv4 address, route and rule notifications before it reads
   the view; any notification, or a lost one, stops the box with "the host
-  network changed". Recomputing and reloading the deny set live is a later
-  chunk; until then a long session on a host whose routes change (a VPN
+  network changed". This ends the box after a change; it does not stop
+  every packet to the new destination before that (see "Known residual"
+  below). Recomputing and reloading the deny set live is a later chunk;
+  until then a long session on a host whose routes change (a VPN
   reconnecting) ends.
 - **Startup probes (requirement 6).** Before the ruleset loads, the setup
   link connects to pasta's gateway and to the box's own loopback on the port
@@ -129,6 +131,26 @@ the game-launch request.
   `player`, no `--disable-userns` (umu's pressure-vessel nests bwrap).
 - **Signal mask.** Every link resets it: the supervisor blocks SIGTERM and
   SIGCHLD to read them from a signalfd, and the mask survives exec.
+
+## Known residual: a LAN added during a session
+
+The deny set is a snapshot taken at launch. When the host gains an address
+or route during a session, the box keeps the old set loaded until the
+supervisor reads the netlink notification and kills the scope; in that
+window a game sending in a loop can reach the new destination through
+pasta. The SI-14 tests prove the snapshot (every table) and that the box
+ends within the teardown deadline, not zero delivery after a change.
+
+The box cannot close this from inside: its ruleset is only as current as
+the last load, and whatever reloads it learns of the change after the
+kernel already routes by it. Closing it needs an enforcement point that
+does not depend on the watcher, for example on the host side of pasta's
+sockets. Live recompute, if added, also needs a continuous subscription,
+snapshots validated as complete, atomic ruleset replacement while egress is
+blocked, a restart when the network changes during a recompute, refusal on
+overflow or error, and a decision for pasta's existing sockets and queued
+traffic. This blocks M3: no real peer session, and no real game with a
+peer, until it is closed (design §11).
 
 ## Tests
 

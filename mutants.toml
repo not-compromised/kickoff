@@ -657,8 +657,8 @@ note = "the public Kick future owns publication after removing the peer"
 
 [[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-bindsto", test = "si_38_kill_at_each_startup_phase_leaves_nothing", note = "with the supervisor killed before the first link arms its parent-death signal, nothing but the binding ends the box"
 
-[[mutant]] si = "SI-14", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si14-main-table-only", test = "si_14_deny_set_covers_lans_in_every_routing_table", note = "the deny set reads only the main routing table, as /proc/net/route does"
-[[mutant]] si = "SI-14", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si14-no-host-watch", test = "si_14_host_network_change_stops_the_box", note = "the supervisor does not watch host address, route and rule changes, so the box runs with a stale deny set"
+[[mutant]] si = "SI-14", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si14-main-table-only", test = "si_14_startup_deny_set_covers_lans_in_every_routing_table", note = "the deny set reads only the main routing table, as /proc/net/route does"
+[[mutant]] si = "SI-14", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si14-no-host-watch", test = "si_14_host_network_change_ends_the_box_within_the_deadline", note = "the supervisor does not watch host address, route and rule changes, so the box runs with a stale deny set"
 
 [[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-limits", test = "si_38_box_limits_are_enforced", note = "without the scope's limits the fork probe passes the task limit"
 [[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-prefix-unsized", test = "si_38_box_limits_are_enforced", note = "the prefix's writable layer is not a sized tmpfs; the barrier's size check refuses the launch"
