@@ -1,8 +1,19 @@
 # Kickoff design
 
-Status: draft 3, 2026-10-11. Revises draft 2 against the round-2 security review (`docs/reviews/r2-sol.md`: 44 partial resolutions, new findings R2-1 to R2-15, rebuttal verdicts and milestone-order changes) and adds the maintainer's audience requirement: an ordinary player gets from one link to a custom map with no technical steps. How every round-2 item was handled: `docs/reviews/r2-resolution.md` (round 1: `r1-resolution.md`). The standing security rules and the tests that enforce them are in `docs/SECURITY-INVARIANTS.md`; they are release requirements.
+Status: draft 3, 2026-10-11, updated 2026-10-13 with the facts of the first real-game session (M1, see "Changes from M1" below). Revises draft 2 against the round-2 security review (`docs/reviews/r2-sol.md`: 44 partial resolutions, new findings R2-1 to R2-15, rebuttal verdicts and milestone-order changes) and adds the maintainer's audience requirement: an ordinary player gets from one link to a custom map with no technical steps. How every round-2 item was handled: `docs/reviews/r2-resolution.md` (round 1: `r1-resolution.md`). The standing security rules and the tests that enforce them are in `docs/SECURITY-INVARIANTS.md`; they are release requirements.
 
-**Evidence tags.** **(V)** verified by a command, a source line at the pinned version, or a scratch experiment; **(L)** likely, from public documentation or source without a local test; **(U)** unverified. Linux (V) checks ran read-only on "the reference Linux machine" (Arch, kernel 7.2, btrfs `/home`, Hyprland 0.56.2, AMD RX 9060 XT, Heroic flatpak). Evidence logs were captured on the maintainer's machines and are not published. Each milestone re-runs every (V) it depends on.
+**Evidence tags.** **(V)** verified by a command, a source line at the pinned version, or a scratch experiment; **(L)** likely, from public documentation or source without a local test; **(U)** unverified. Linux (V) checks ran read-only on "the reference Linux machine" (Arch, kernel 7.2, btrfs `/home`, Hyprland 0.56.2, AMD RX 9060 XT, Heroic flatpak). The M1 facts come from a supervised session of the real game inside the gamebox on the same machine, with anti-cheat off. Evidence logs were captured on the maintainer's machines and are not published. Each milestone re-runs every (V) it depends on.
+
+Changes from M1 (2026-10-13), the first real-game session:
+- **Rocket League's LAN protocol is measured** for the host side: discovery on 14001/UDP, the query and reply formats, the host's sockets and how maps load (§3.1). The join exchange and client game traffic still need two instances.
+- **The host advertises its own address as text, and picked the wrong interface** in the gamebox. Because that field is peer-controlled, guests rebuild every discovery reply in trusted code, with the expected address, on every platform (SI-42); whether other messages need option A or B is chosen in M3 after measurements (§3.1.1). Windows multiplayer is gated on it (§3.3, §10).
+- **The discovery reply broadcasts the host's account id and display name** to everyone on the virtual LAN (§3.1, §6.4).
+- **The game syncs settings and save data with the player's account even with anti-cheat off.** New invariant SI-43: Kickoff copies settings unmodified and fresh, and its UI automation has exclusive input, confirms only on two matching observations and stops on the first mismatched result. A game-initiated UI change in the last instant before a confirm, and Epic's side, stay residual risks (§8.6, §6.5).
+- **Gamebox notes:** gamescope's sandbox needs the GPU primary node; the anti-cheat-off proof is read from the game process's command line; the game's own log holds the one-time login code, so it leaves the gamebox only through redaction (§3.2, §6.4).
+- **M0 direction:** bubblewrap, pasta, setpriv, prlimit and a systemd scope are recommended in place of patched spawn bindings, pending review. Teardown rests on a scope bound to a surviving owner and stopped with SIGKILL, and a launch barrier proves the box before Wine runs (§3.2.6).
+- **Spike mode:** real-account sessions before M0 is green are a named experimental mode, with peers prohibited, mandatory checks before each session and stated limits (§3.2.5, §10).
+- Review of these changes: `docs/reviews/r3-sol-m1-facts.md`, resolved in `r3-resolution.md`.
+- **M1 is partly done** (§10, §11).
 
 Changes from draft 2:
 - **Audience and onboarding** are a goal next to security: one link, solo maps in two clicks, a built-in map browser, measurable first-run targets, GPL-3.0 and free (§1, §5.7, §8.4).
@@ -120,8 +131,8 @@ Some earlier choices make steps harder, and each is still open:
 ```
 
 - **kickoffd** owns sessions, networking, the library and the copies, and runs as the user. Linux separates its local listener facade from its hardened worker. The facade authenticates callers without reading their payload and transfers their sockets through a private inherited control pair. Kernel peer credentials continue to identify the listener creator, so clients can verify the facade's executable while the worker remains nondumpable. Facade death closes transferred channels; worker death terminates the facade. Both suppress core dumps through the distinct policies in §6.4. The worker's startup order is fixed (SI-36):
-  1. Close every descriptor except the supervisor socketpair, checked to be an `AF_UNIX` stream pair; reopen stdio on `/dev/null`.
-  2. Start `kickoff-gamebox`, which needs mounts and namespaces that Landlock forbids.
+  1. Close every descriptor except the supervisor socketpair, checked to be an `AF_UNIX` stream pair; reopen stdio on `/dev/null`. Under the recommended spawn path (§3.2.6) there is no socketpair: kickoffd keeps no inherited descriptor at all, and step 1 closes everything but stdio.
+  2. Start `kickoff-gamebox`, which needs mounts and namespaces that Landlock forbids. Under §3.2.6 the user manager starts it as `kickoff-gamebox.service` (kickoffd's unit `Wants=` it, and it is `BindsTo=` kickoffd's unit), and kickoffd only accepts its connection (§2.7).
   3. Apply Landlock, requiring ABI 6 or later (Linux 6.12 or later; ABI 10 on the reference machine, V `landlock_create_ruleset` version query). Every filesystem right of the running ABI is handled, including truncate and device ioctl. Writes are allowed only beneath `~/.local/share/kickoff` and `$XDG_RUNTIME_DIR/kickoff`. TCP connect is allowed to port 443 only, and abstract Unix sockets and signals are scoped. Below ABI 6, kickoffd refuses to start and `kickoff doctor` explains why.
   4. Set `PR_SET_NO_NEW_PRIVS`, `PR_SET_DUMPABLE 0` and `RLIMIT_CORE 0`.
   5. Probe the online root: a create, write, truncate, rename and unlink must each fail, or kickoffd exits.
@@ -292,6 +303,11 @@ Every local channel works the same way:
 1. **Exclusive endpoint in a private place.** Linux: `$XDG_RUNTIME_DIR/kickoff/` is created with mode 0700 and refused if it already exists with another owner or mode; the socket is created with `bind` (no unlink-and-retry), mode 0600. Windows: the daemon pipe and the service pipe use `FILE_FLAG_FIRST_PIPE_INSTANCE` and `PIPE_REJECT_REMOTE_CLIENTS`. The DACL grants clients read and write but not `FILE_CREATE_PIPE_INSTANCE`. A name collision fails closed.
 2. **Kernel-authenticated caller.** Linux: `SO_PEERCRED` uid equals ours, and `SO_PEERPIDFD` gives a pidfd for the peer. The peer's `exe` is read through `/proc/<pid>` and must be an installed Kickoff binary; afterwards `pidfd_send_signal(pidfd, 0)` must still succeed, so a recycled PID cannot pass. Windows: `GetNamedPipeClientProcessId`, then the token must have the same user SID and logon session, medium integrity or higher, and no AppContainer; the image path must be under the protected install directory.
 3. **Authenticated server.** The client checks the server the same way: the Linux kickoffd listener facade's uid, executable and live pidfd, or kickoff-svc's SYSTEM token and image path. The Linux facade hands an accepted socket, plus a bounded connection lease, to its own hardened child through an unnamed inherited stream pair. That private capability channel accepts only the exact descriptor count and types its protocol requires; it is never reachable through the public endpoint. The worker authenticates the facade and rechecks the client from the transferred socket's kernel credentials before processing its version handshake. The facade never reads client payload, and its lifetime stays pinned while any transferred channel exists.
+   **The supervisor channel (Linux, under §3.2.6)** is the one channel where both ends are Kickoff daemons, and each authenticates the other:
+   - kickoff-gamebox connects to kickoffd's socket as the gamebox-supervisor role. It checks the server as in item 3: same uid, and an exe that is the installed `kickoffd`, confirmed through `SO_PEERPIDFD`.
+   - kickoffd accepts the role only from a peer with the same uid, an exe that is the installed `kickoff-gamebox` (through `SO_PEERPIDFD`, the pidfd still valid after the check), and whose `/proc/<pid>/cgroup` is the cgroup of `kickoff-gamebox.service`. A process the user started by hand therefore cannot take the role.
+   - kickoffd holds at most one supervisor connection. A second is refused, and losing the first ends every game (the scope is bound to the service).
+   - **Inherited descriptors:** the service unit passes kickoff-gamebox stdio on `/dev/null` and nothing else (`StandardInput=null`, no socket activation, no `OpenFile=`). Its first action is `close_range(3, ~0)`, and it opens its kickoffd connection only afterwards. Descriptors it later passes to kickoffd (the tap, §3.2.6 requirement 5) are type-checked on receipt as in §2.1 step 6.
 4. **Role-scoped, versioned commands.** Each role (CLI, UI main window, overlay, gamebox supervisor, service client) has a fixed postcard enum. No command carries a path, URL, shell string or launch command. A version handshake opens every channel; a mismatch closes it before any side effect. Client channels accept no ancillary data: a message carrying `SCM_RIGHTS` or credentials, or truncated control data (`MSG_CTRUNC`), closes the channel after any received descriptors are closed.
 5. **Leases are connections.** A Windows LAN lease lives exactly as long as its pipe connection and its bound game process (§3.3).
 
@@ -309,20 +325,79 @@ Same-user malware can still act as the user, which is outside Kickoff's boundary
 
 ### 3.1 Game ports and the filter
 
+Measured in M1 with one game instance hosting a LAN match in the gamebox, its sockets listed and its kick0 traffic captured (host side only).
+
 | Item | Value | Confidence |
 |---|---|---|
-| Game traffic | UDP, listen server port 7777, set by `PORT=` | (L) RocketPlugin.h:22, RLBot wiki |
-| Client source port | ephemeral | (U) |
-| Discovery | UE3 beacon defaults: UDP 14001, broadcast, 8-byte nonce; RL's own values sit in encrypted `Coalesced_INT.bin` | (U) |
-| Embedded IPs in payloads, max packet size | unknown | (U), M1 |
+| LAN mode with anti-cheat off | Create LAN Match and Join LAN Match are available under `-noeac`; online Private Match is not ("Anti-cheat is required") | (V) |
+| Host sockets | UDP `0.0.0.0:7777`, the listen server (the log calls its driver `TcpNetDriver`, but the socket is UDP); UDP `0.0.0.0:14001`, the discovery beacon; one ephemeral UDP socket. No TCP listener | (V) |
+| Game port setting | 7777 is set by `PORT=` in the map URL | (L) RocketPlugin.h:22, RLBot wiki |
+| Discovery | the query is a limited broadcast to `255.255.255.255:14001`, sent from source port 14001; the reply goes to the same broadcast address | (V) |
+| Discovery query | `ProjectX.LanMessage_HostQuery_X`, 483 bytes; no addresses, no account data | (V) |
+| Host reply | `ProjectX.LanMessage_HostResponse_X`, 793 bytes, **broadcast** to `255.255.255.255:14001`, not unicast to the asker; carries the host's address and account identity | (V) |
+| Map load | by package name: `LoadMap: <Package>_P?Game=TAGame.GameInfo_Soccar_TA?…?Lan?Listen?…` | (V) |
+| Join exchange, client source port | not observed; needs a second game instance | (U), M1 two-instance session |
+| Client game traffic: packet sizes, rates, embedded addresses | not observed | (U), M1 two-instance session |
 
-`GamePorts` is compiled-in data, replaced by measured values in M1. Configuration cannot override it (NET-1). The filter is a second layer: the namespace (Linux) or WFP (Windows) is the boundary.
+**Discovery message format (V).** Each message is a u32 big-endian length, a type name of that length, then a JSON body.
+- **Query** (`ProjectX.LanMessage_HostQuery_X`): `Filter` (empty for "all"), `BuildID` (the game build's id, a signed 32-bit integer), `bHost` (false) and `Nonce`.
+- **Reply** (`ProjectX.LanMessage_HostResponse_X`): echoes the query's `Nonce`. `ServerID` is `"<ip>:7777"`, the host's own IPv4 address as text (§3.1.1). `MetaData` holds `OwnerID` (the host's Epic account id), `OwnerName` (its display name), `ServerName`, `ServerMap`, `bPassword` (a flag; the password itself is not sent), `NumPlayers`, `MaxPlayers` (10) and `BuildID`.
+- Both fit one QUIC datagram on a relay path (1162 bytes, §3.4) and the discovery payload budget (1252 bytes, §6.3), so discovery never fragments.
+- **Privacy.** Because the reply is broadcast, everyone on the virtual LAN receives the host's account id and display name: in a Kickoff session, every admitted guest, which means friends, and in an "Anyone with the link" session anyone the host admitted. Relays carry LAN datagrams inside QUIC and see only ciphertext (§6.4).
+
+`GamePorts` is compiled-in data: 7777 and 14001, measured above. The client side is completed by the two-instance session. Configuration cannot override it (NET-1). The filter is a second layer: the namespace (Linux) or WFP (Windows) is the boundary.
 
 1. UDP over IPv4 only. ARP is answered locally and never forwarded. IPv6, VLAN tags, IP options and fragments are dropped and counted.
 2. Outbound from the local game passes if `src_port` or `dst_port` is in `GamePorts`. It records a flow keyed by (peer identity, generation, 5-tuple), with a 30 s idle timeout and at most 64 per peer.
 3. Inbound from a peer passes if `dst_port` is in `GamePorts` or it matches a live flow of the same generation.
 4. A compiled denylist always wins: 22, 53, 67, 68, 137, 138, 1900, 5353, 5355, 9002 (BakkesMod RCON), 47984-48010, 49123, 49124, 53317.
-5. Broadcast passes only to discovery ports: host to guests, and guest to host only. Budgets are in §6.3.
+5. Broadcast passes only to discovery ports: host to guests, and guest to host only. Budgets are in §6.3. The host's discovery reply is itself a broadcast (V), so it fans out to every guest.
+
+#### 3.1.1 The address in the discovery reply
+
+Two problems share one field. Guest-side reconstruction of every discovery reply solves the security problem, and for discovery it also solves the functional one. Whether a further fix is needed for other messages waits for M3 measurements.
+
+**The functional problem (V).** The host's reply names the address guests should join as text, `ServerID: "<ip>:7777"`. Inside the gamebox the host game advertised the address of its internet-facing interface, the pasta interface (`192.0.2.2` in the test layout), not its game-LAN address on kick0 (`10.75.0.1`). The box's `/etc/hosts` mapped its hostname to `127.0.1.1` and the game did not advertise that either, so it does not use hostname resolution. It picks from interface enumeration or the default route; which of the two is (U). An honest host's reply therefore names an address that, inside a guest's gamebox, is the guest's own pasta interface or an internet host, never the host's game. Without the guest-side reconstruction below, LAN play through Kickoff does not work.
+
+**The security problem: `ServerID` is peer-controlled.** A malicious host, through its Kickoff or a compromised game, can put any address in it, and an unprotected guest game will try to join that address. Where the join traffic would go:
+- **Guest-local addresses**: the guest's loopback, its pasta address or its own kick0 address. The kernel delivers these inside the guest's namespace without passing pasta, so egress rules on the pasta interface never see them. Any UDP listener in that namespace (the game's own sockets, anything Wine opens) becomes a target. Host-desktop services are not reachable this way as long as the namespace and pasta exclusions hold (§3.2).
+- **Public addresses**: through pasta on Linux, or through the physical interface on Windows, whose policy §3.3 leaves unchanged. The target learns the guest's public address and receives traffic the host chose.
+- **Forbidden services**: denylisted ports (§3.1 rule 4), the host's own addresses and connected subnets. On Linux the egress deny set (§3.2.4) blocks the non-local ones; on Windows nothing does.
+The join exchange and client game traffic are not observed yet (M1 (o)); any other address-bearing field they carry gets the same treatment before M4.
+
+**Required on every platform: guest-side discovery reconstruction (SI-42).** Each guest's Kickoff handles every discovery reply a peer sends before its game receives anything. It relies on nothing the host's Kickoff did, and **never forwards the received bytes**:
+1. **Parse, in `kickoff-parse`.** A long-lived `kickoff-parse` job (§5.6) parses the reply. It accepts only canonical input:
+   - the exact reply type name, at most 1252 bytes;
+   - no duplicate keys, and no escape sequences in any key or string value (this guards against a parser differential);
+   - exactly the field set of §3.1, with a `ServerID` that is well-formed as `<IPv4>:<port>`.
+   Its output is data, not a verdict: either `Rejected`, or one bounded, typed `DiscoveryReply` value carrying the nonce, the build id, the player counts, the password flag and each `MetaData` string, each with a length cap (64 bytes; 32 for the display name). The received `ServerID` value is not part of the output.
+2. **Check and rebuild, in trusted code.** kickoffd checks the value again itself: types, caps, `NumPlayers ≤ MaxPlayers ≤ 10`, and strings free of any character that would need escaping. It then **rebuilds the reply** with a fixed encoder in `wire` (`#![forbid(unsafe_code)]`, hand-written, an encoder only: no JSON decoder and no `serde_json`, which stays a dependency of `parse` alone). The encoder emits the measured field order, and `ServerID` comes from authenticated session state: the host's slot address and the compiled game port, today `10.75.0.1:7777`. A future host transfer or configurable port changes that state, never the parser's output. The rebuilt bytes are the only discovery reply the guest's game ever receives.
+3. **Drop on any failure.** A `Rejected` result, a failed trusted check, a helper crash or a missed deadline drops the reply and counts it in the session's health. Nothing is delivered for that reply.
+
+A compromised parser can therefore change at most the bounded metadata of a reply, re-checked and re-encoded by trusted code. It cannot choose the destination, and it cannot get hostile bytes delivered. Because the guest always writes the expected `ServerID`, an honest host's wrong address (the functional problem above) no longer breaks discovery. Only discovery replies take this hop, at most 10 per second per sender (§6.3), so game traffic does not pay for it. The code sits in the shared `vlan` path, so it covers Windows guests in every game mode, stock mode included. Windows multiplayer is gated on it (§3.3, §10). Whether the guest game accepts a rebuilt reply is (U), checked in M1 (q) by delivering a rebuilt reply to a real guest game.
+
+**Defence in depth.**
+- **Linux:** the guest gamebox's pasta egress is narrowed to explicit protocols and destinations, not port numbers: TLS to the destinations the game is measured to use, and DNS only to the configured public resolvers. The narrowing is applied once M1 (p) has measured the game's real internet traffic in a LAN session.
+- **Windows:** while a LAN lease is held, a WFP filter may block the game image's UDP on non-Kickoff interfaces, if W1a shows the game needs no internet UDP during LAN play. This is the one exception to "physical interfaces keep exactly the policy they had" (§3.3), and it lives only as long as the lease.
+
+**What remains of the functional fix: option A or B, decided in M3.** Guest-side reconstruction already gives discovery the right address. A or B is still needed only if the join exchange or client game traffic (M1 (o)) also carries the host's own address, or if the host game refuses joins addressed to its kick0 address.
+
+| Option | How | Security cost | Other costs |
+|---|---|---|---|
+| **A. Make kick0's address the one the game advertises** | Lay out the gamebox so the game's address choice lands on kick0 while internet still flows through pasta: interface creation order, route metrics, or a layout in which the game sees no other IPv4 address it would pick | No rewrite on the host side. The guest still rebuilds every reply (SI-42) | Relies on undocumented address selection in the game and Wine. Each launch checks it with a layout probe in the gamebox and a fixed-byte comparison of the host game's first reply. A game or Proton update can break it |
+| **B. Rewrite `ServerID` on the host** | The host's Kickoff replaces `ServerID` in its own game's reply with `10.75.0.1:7777`, re-encodes it and fixes the length prefix and checksums, with the same parse-then-rebuild split as the guest | A second use of the parser, on the host's own (untrusted) game output; the bytes sent are trusted-encoder output | Ties the host side to the message format as well. Works on Windows hosts, where no gamebox layout exists to arrange |
+
+Measurements before M3 chooses (M1 (o), (p), (q)):
+- how the guest game handles `ServerID` (whether it joins the address directly, and which syntax it accepts), and whether it accepts a rebuilt reply;
+- which address Wine's APIs report under each candidate layout;
+- the game's real internet traffic during a LAN session;
+- whether a Windows host advertises its Kickoff adapter's address when that adapter has metric 1 (§3.3 install step 3), which would make B unnecessary there.
+
+Tests that must exist before LAN play (SI-42):
+- **Delivery oracle.** A recorder on the guest side of kick0 logs every discovery datagram delivered to the guest's game. Each invalid input (a duplicate `ServerID` key with a safe first value, escapes, an unknown or missing field, an oversized or truncated message, a wrong type name) produces **zero deliveries**, whatever its destination would have been. Each valid input produces exactly one delivery, byte-identical to the trusted encoder's output for the expected values, never to the input.
+- **Steering oracle.** Replies naming public destinations, guest-local destinations (loopback, the pasta address, the guest's kick0 address, a canary UDP listener in the guest namespace) and forbidden services lead to no guest game packet to any of them, on kick0, the loopback and the pasta or physical interface.
+- **Dishonest-helper test.** A substituted parser job returns a valid-looking `DiscoveryReply` for hostile input, returns values with overlong strings, characters that need escaping or impossible counts, returns output over its cap, and stalls. Nothing hostile reaches the game: deliveries are trusted-encoder output with the expected `ServerID`, or nothing.
+- **Mutants:** forwarding the original bytes when the helper accepts; first-key-wins duplicate handling in the parser; taking `ServerID` from the parser output.
 
 ### 3.2 Linux: the gamebox
 
@@ -352,7 +427,7 @@ Draft 2 bind-mounted the host's X11 and Wayland sockets into the gamebox. On the
 That is keystroke injection into a terminal, clipboard theft from a password manager, and screen capture.
 
 **Design.**
-1. **Display sandbox.** kickoff-gamebox starts `gamescope --backend wayland` in its own bwrap: new user, pid, ipc and mount namespaces, a network namespace with no interfaces, no home, the render node, and a private tmpfs `/tmp` and runtime directory. It gets no game command; gamescope runs without a child when none is given (`steamcompmgr.cpp:8516-8545`, V gamescope 3.16.28). It gets no PipeWire socket; gamescope then only warns that screen capture is unavailable (`main.cpp:1100`, V). The SDL backend is never used: it copies the host clipboard into the nested X server (`SDLBackend.cpp:666`, V).
+1. **Display sandbox.** kickoff-gamebox starts `gamescope --backend wayland` in its own bwrap: new user, pid, ipc and mount namespaces, a network namespace with no interfaces, no home, the GPU's render node **and its primary node** (`/dev/dri/card*`), and a private tmpfs `/tmp` and runtime directory. Gamescope needs the primary node as well as the render node (V, M1). The primary node goes to gamescope's sandbox only, never to the game's, which keeps only the render node (§3.2 table). It gets no game command; gamescope runs without a child when none is given (`steamcompmgr.cpp:8516-8545`, V gamescope 3.16.28). It gets no PipeWire socket; gamescope then only warns that screen capture is unavailable (`main.cpp:1100`, V). The SDL backend is never used: it copies the host clipboard into the nested X server (`SDLBackend.cpp:666`, V).
 2. **Two independent filters on the host connection.**
    - **Compositor security context.** kickoff-gamebox creates a listener with `wp_security_context_manager_v1` (sandbox engine `dev.kickoff`). Hyprland 0.56.2 hides every global outside a fixed whitelist from clients of such a listener (`ProtocolManager.cpp:348-403`, `Compositor.cpp:262-266`, V source). On the reference machine an existing flatpak security-context socket offers 40 globals: virtual keyboard and pointer, data-control, screencopy, toplevel export, foreign-toplevel, layer shell, input method and global shortcuts are all absent (V, registry dump).
    - **WlFilter**, a long-lived `kickoff-parse` job with no filesystem and no network, sits between gamescope and the security-context connections. It forwards exactly 14 globals: `wl_compositor`, `wl_subcompositor`, `wl_shm`, `wl_seat`, `wl_output`, `xdg_wm_base`, `zwp_linux_dmabuf_v1`, `wp_viewporter`, `wp_presentation`, `wp_single_pixel_buffer_manager_v1`, `zwp_relative_pointer_manager_v1`, `zwp_pointer_constraints_v1`, `wp_fractional_scale_manager_v1` and `wp_color_manager_v1`. The first ten are gamescope's mandatory set (`WaylandBackend.cpp:2005, 2813`, V), and all 14 are in Hyprland's sandboxed set (V).
@@ -369,12 +444,13 @@ What a compromised game can do to the host display is then what gamescope does f
 2. It forks the gamebox init into new user, net, mount, pid and IPC namespaces. The user namespace maps the user's uid to itself.
 3. While the child still holds capabilities in its own namespaces, it creates a **non-persistent** tap `kick0` with MAC `02:4b:4f:00:00:<slot>` and `10.75.0.<slot>/24`, and adds `255.255.255.255/32 dev kick0`. Inside the gamebox that route only redirects the game's own broadcasts (Wine reads only `/proc/net/route`, V). It loads the nft tables (§3.2.4) and disables IPv6.
 4. The tap fd goes to kickoffd over `SCM_RIGHTS`, where its type is checked (§2.1).
-5. kickoff-gamebox starts `pasta` attached to the child's namespaces with every option explicit: `-t none -u none -T none -U none`, `--no-map-gw` (no host-loopback mapping), `--ipv4-only`, and no `--dns-forward`. No pasta default is relied on (L, passt man page; M0 checks each mapping with probes).
+5. kickoff-gamebox starts `pasta` attached to the child's namespaces with every option explicit: `-t none -u none -T none -U none`, `--no-map-gw` (no host-loopback mapping), `--map-host-loopback none`, `--map-guest-addr none`, `--ipv4-only`, `-D none`, `--search none`, `--no-dhcp --no-ndp --no-dhcpv6 --no-ra`, and no `--dns-forward`. No pasta default is relied on: `-T` and `-U` default to `auto`, which would forward ports bound on the box's loopback to the host's loopback (L, passt man page). M1 ran with this set, and its canaries found the host, its loopback services, its LAN, the gateway mapping, link-local and multicast unreachable while public DNS and HTTPS worked (V).
 6. It starts the display sandbox and WlFilter (§3.2.1), and waits on gamescope's ready pipe (`-R`).
 7. The child execs `bwrap` with `--unshare-pid --die-with-parent --new-session --cap-drop ALL` and the view in the table above. bwrap runs `umu-run RocketLeague.exe -noeac <auth args>`. Every descriptor except stdio (`/dev/null`) is closed before exec (`close_range`). The game has no capabilities over its own namespaces, so it cannot change the tap, the routes or nft.
 8. Limits inherited by the game: `RLIMIT_CORE` 0, `RLIMIT_FSIZE` 4 GiB, `RLIMIT_NOFILE` 8192, `PR_SET_NO_NEW_PRIVS`.
+9. **Anti-cheat-off proof.** Once `RocketLeague.exe` runs, kickoff-gamebox reads the game process's command line and requires exactly one element equal to `-noeac`; otherwise it kills the cgroup. The proof must come from the process: the flag is visible in the game's command line, and the game's `Launch.log` does not record it (V, M1).
 
-**Teardown and fail-closed by lifetime (R2-7, NET-12).** `Stop`, game exit, kickoffd death (the supervisor watches its pidfd) or supervisor death (`PR_SET_PDEATHSIG` on the gamebox init) leads to `cgroup.kill` on `game-<id>`, then `rmdir`. That kills the game, its descendants, the display sandbox, WlFilter and pasta in one kernel operation (Linux 5.14 or later). The tap is non-persistent and dies with the namespace. Kickoff leaves no route, firewall rule or device on the host.
+**Teardown and fail-closed by lifetime (R2-7, NET-12).** `Stop`, game exit, kickoffd death (the supervisor watches its pidfd) or supervisor death (`PR_SET_PDEATHSIG` on the gamebox init) leads to `cgroup.kill` on `game-<id>`, then `rmdir`. That kills the game, its descendants, the display sandbox, WlFilter and pasta in one kernel operation (Linux 5.14 or later). The tap is non-persistent and dies with the namespace. Kickoff leaves no route, firewall rule or device on the host. Stop is always the cgroup kill, never a signal to the leader: in M1 a `SIGTERM` to a stand-in run's leader took up to about two minutes to tear the box down and lost its last log lines, while stopping the run's systemd scope, which kills its whole cgroup, was the reliable stop (V).
 
 #### 3.2.3 Audio
 
@@ -390,7 +466,7 @@ There is no host DNS forwarder: the reference machine's resolver is `127.0.0.53`
 
 The flatpak portal fact still drives the launch path. Inside the Heroic flatpak, pressure-vessel asks the host's flatpak portal to spawn the game in the host network namespace, so a namespace built around Heroic would not hold. The gamebox therefore runs native `umu-launcher` with the launcher's existing Proton and the Steam runtime in `~/.local/share/umu`, which the flatpak shares with the host (V). The gamebox has no session bus, so a portal escape cannot happen silently.
 
-**M0, containment probes with no game and no account.** Wine probe executables run exactly where the game would. Every item must pass before M1 uses a real account or any custom map:
+**M0, containment probes with no game and no account.** Wine probe executables run exactly where the game would. Every item must pass before any custom map, and before any real-account session outside spike mode (below; §10 gates):
 - (f) display: XTEST, virtual-keyboard and clipboard attempts against canary host windows; a clipboard read and write; a screen-capture attempt; enumeration of host toplevels. No host effect may occur.
 - (g) the descriptor inventory of the probe process equals stdio only.
 - (h) cgroup accounting: fork, memory and tmpfs-fill probes stop at their limits; `cgroup.kill` leaves no survivor, including a double-forked descendant and pasta.
@@ -406,11 +482,75 @@ The flatpak portal fact still drives the launch path. Inside the Heroic flatpak,
 - (d) the copy boots without `EasyAntiCheat/` and `Launcher.exe`, read-only, and M1 lists every path it writes;
 - (e) the canary probes of SI-14 and SI-35 run beside the real game;
 - (m) frame time and input latency with gamescope and the filter, against the same game without them (§7);
-- (n) first-match stutter with an ephemeral shader cache, which decides whether a persisted, size-capped cache is worth its cross-session channel.
+- (n) first-match stutter with an ephemeral shader cache, which decides whether a persisted, size-capped cache is worth its cross-session channel;
+- (o) a two-instance session: the join exchange, the client's source port and the client's game traffic (sizes, rates, embedded addresses), captured on both kick0 taps (§3.1);
+- (p) the game's real internet traffic during LAN play, as protocols and destinations, which decides how far the guest's egress can be narrowed (§3.1.1);
+- (q) how a guest game handles `ServerID` (accepted syntax and ports, direct join or not) and which address Wine reports under each candidate gamebox layout (§3.1.1).
+
+**M1 status after the first session** (one instance, hosting; 2026-10-13):
+- (a) done: the copy booted to the main menu, logged in through pasta, GPU-accelerated under gamescope. WlFilter was not yet in the display path, so gamescope still held the host's Wayland clipboard.
+- (c) done.
+- (d) done for booting `-noeac` from a read-only copy without the EAC bootstrap and `Launcher.exe`; the list of paths the game writes is still to do.
+- (e) partly: the network, file and display canaries (host home, host loopback services, LAN, gateway, overlay-network addresses, link-local, multicast, host X11, Wayland and D-Bus sockets) passed in the same gamebox, each paired with a positive control, but before the game ran, not beside it. Wine sees only `C:` and `Z:` (the box root).
+- (b), (m), (n), (o), (p) and (q) not run.
+- The online install and the launcher's prefix were unchanged after the session: a whole-tree snapshot of size, mode, mtime, ctime and inode, plus sample hashes, showed no difference (V).
+- The session ran before M0 was green, under a spike harness whose canaries passed first. Further real-account sessions before M0 is green run only in spike mode, below.
+
+**Spike mode (experimental; real-account M1 sessions before M0 is green).** This is a named, weakened mode, not the gamebox of §3.2. It exists only for supervised M1 sessions.
+- **Prohibited:** peers of any kind (kick0 carries no Kickoff link; it only captures), custom maps, BakkesMod, and any build handed to anyone else.
+- **Stated limits:**
+  - No WlFilter: gamescope keeps host clipboard authority, so a compromised game can read and write the host clipboard through it.
+  - No audio, because restricted audio (M0 (j)) is unverified.
+  - No kickoffd, so no Landlock and no typed launch channel; the harness's own argument allowlist and redaction stand in for the broker (§6.4).
+  - No seccomp, as in the full design.
+- **Mandatory checks before each session**, in the same harness configuration, with the session refused if any fails:
+  - **Indirect display authority.** From inside the box: XTEST and virtual-keyboard injection, screen capture and host toplevel enumeration through gamescope have no host effect. A clipboard probe confirms the stated limit and nothing beyond it.
+  - **Direct display, bus and network.** The direct canaries of (e): host X11, Wayland and D-Bus sockets, home, loopback services, LAN, gateway, overlay-network addresses, link-local and multicast are unreachable, each paired with a positive control.
+  - **Descriptor inheritance.** A canary descriptor leaked by the launcher is closed before bwrap, and the in-box inventory is stdio only.
+  - **Teardown and resource limits.** The scope carries its memory and process limits. A stand-in run killed through the scope leaves no process, scope or tap within the deadline (§3.2.6).
+  - **Broker handling with fake credentials.** The launch-argument path refuses unapproved arguments with fake legendary output, and a canary exchange code is absent from every log the harness keeps.
+  - **Install integrity.** Snapshots of the online install and the launcher prefix are taken before and after the session, and must show no difference.
 
 **If the game cannot run fully contained:** each failing item is held, or replaced by a named degraded mode (audio off; DNS forwarded to one resolver address on port 53; a persistent prefix), decided per item with M0 and M1 data. Host display sockets are never an option. Ban safety does not depend on the gamebox, because the copy works with or without it; containment does.
 
 Requirements: `passt`, `umu-launcher` and `gamescope` (3.16.28 in Arch `extra`, V `pacman -Si`), bubblewrap, unprivileged user namespaces, Landlock ABI 6 or later, a cgroup v2 user delegation with the `cpu`, `memory` and `pids` controllers (V on the reference machine: `user@1000.service` has `Delegate=yes`, and its `cgroup.subtree_control` is `cpu memory pids`), and a Wayland session.
+
+#### 3.2.6 M0 spawn path: bubblewrap, pasta, setpriv, prlimit and systemd (recommended, pending review)
+
+The first M0 implementation spawned the gamebox through its own process-creation code: local patches to the pinned `libc` and `nix` crates exposing glibc's cgroup-at-birth spawn attribute and pidfd spawn (issue #4). That is a large vendored, unsafe surface to review and carry. The M1 harness instead built the same box mostly from existing tools (a systemd scope, bwrap and pasta, with small shims for the descriptor sweep and the tap), and its canaries passed (§3.2.5). **The recommended M0 approach is that composition**, with the requirements below:
+- a **systemd user scope** per game is the game cgroup (§3.2.2 teardown). kickoff-gamebox talks to the user's systemd manager to create it; the gamebox and the display sandbox still get no bus;
+- **bwrap** builds the namespaces, mounts and the game's view (§3.2 table), and gamescope's separate sandbox (§3.2.1);
+- **pasta** gives internet, with the explicit option set of §3.2.2 step 5;
+- **setpriv** sets no-new-privileges, drops capabilities and sets parent-death signals; **prlimit** sets the rlimits.
+
+bwrap does not bring a seccomp or Landlock policy of its own; it can only load a seccomp program it is handed. The policies specified for kickoffd (§2.1) and `kickoff-parse` (§5.6) are unchanged and stay Kickoff's own code. The game gets no seccomp filter in this design.
+
+**Teardown guarantee.** It rests on the cgroup and on an owner that outlives every failure, not on parent-death signals:
+- **The surviving owner is the user's systemd manager.** kickoff-gamebox runs as its own user service, bound to kickoffd's unit. The game scope is created with `BindsTo=` and `After=` on that service, so the manager stops the scope when the supervisor or kickoffd dies, however they die. A scope with a living member otherwise stays active indefinitely, so this binding is what ends it. Running the supervisor as a service replaces the inherited socketpair of §2.1 with the reciprocally authenticated supervisor channel of §2.7 item 3; that change is part of this proposal's review.
+- **Two teardown paths, each tested on its own (SI-38).**
+  - **Normal stop** (`Stop`, game exit, a failed barrier): kickoff-gamebox writes `cgroup.kill` on the scope and waits until its `cgroup.events` reports `populated 0`. Only then does it ask the manager to stop the now-empty scope. The direct kill does not wait for systemd.
+  - **Owner death** (the supervisor or kickoffd dies, however it dies): the manager stops the scope through `BindsTo=`. The scope has `KillMode=control-group` and `KillSignal=SIGKILL`, so this path never starts with `SIGTERM` either.
+- **Deadline.** On either path the cgroup must be empty within 2 s. Otherwise kickoffd reports a failed teardown and refuses new launches until the cgroup is empty. M0 measures the real figure.
+- **Startup death races.** Parent-death signals are a fast path only. They are cleared across `fork` and never fire for a parent that is already dead, so every trusted link that arms one checks right afterwards that its parent is still the expected process (through a pidfd taken before the fork) and exits if it is not. Third-party processes that arm nothing (pasta's own children, Wine and the game) are covered by the cgroup alone.
+- **Ordering.** The scope is registered with the trusted launcher already inside it (`systemd-run --scope` runs its command in the new scope), before any other process starts. If the supervisor dies before registration, nothing has started; if it dies after, the binding ends the scope.
+
+**Final launch barrier.** The last trusted link inside the box does not exec Wine until both it and kickoff-gamebox, which checks independently from outside through `/proc/<pid>`, have confirmed all of the following. The release is one byte on a pipe; any failure kills the cgroup:
+- the user, net, mount, pid and IPC namespaces differ from the host's;
+- the nft ruleset matches the expected one byte for byte;
+- `/proc/self/cgroup` names the game scope;
+- the rlimits are set (`RLIMIT_CORE` 0, `RLIMIT_FSIZE` 4 GiB, `RLIMIT_NOFILE` 8192);
+- the effective, permitted, inheritable, ambient and bounding capability sets are empty, and `NoNewPrivs` is 1;
+- the descriptor inventory is stdio on `/dev/null` and nothing else.
+
+Requirements (each is an M0 test):
+1. **Descriptor sweep before bwrap.** bwrap passes inherited descriptors on. A small trusted shim closes every descriptor except the allowlisted ones (`close_range`), reopens stdio on `/dev/null`, then execs the chain (SI-36).
+2. **SIGKILL at every startup phase.** Kill the supervisor, kickoffd and each trusted link at each of these points: before and after scope registration, after each helper fork, before and after each parent-death signal is armed, after pasta starts, after the tap is created, and at the barrier. Each time, within the deadline, no process from the launch survives, the scope is gone and no tap remains (SI-38).
+3. **rlimits through prlimit** (§3.2.2 step 8), proved at the barrier.
+4. **A trusted launcher joins the cgroup before untrusted code runs** (Ordering above), so no Wine, game or pasta process ever runs outside the cgroup, even briefly.
+5. **Tap hand-off is unsolved, and it blocks M3.** The kick0 tap is created inside the box's namespaces. How its descriptor reaches kickoffd (over `SCM_RIGHTS` from a trusted in-box helper, type-checked as in §2.1) without that helper holding more than the tap or outliving the box is not designed yet. The M1 harness kept the tap in an in-box helper and never handed it out.
+6. **Startup probes for undocumented behaviour.** Behaviour that bwrap and pasta do not document as stable is probed at start, and the launch refuses on a difference: every pasta mapping off (the `-T`/`-U` `auto` default, §3.2.2 step 5), no host loopback or gateway reachable, and a bwrap that is not setuid (the user-namespace build only). The barrier covers the rest.
+
+kickoff-gamebox keeps its narrow typed interface (§2.1); only the way it creates processes changes. The `kickoff-parse` spawn (§5.6) is reviewed separately. **If this is accepted, the vendored spawn path is superseded:** §3.2.2 step 1's `clone3` with `CLONE_INTO_CGROUP` becomes the scope above, and the local `libc` and `nix` patches are removed instead of being carried or upstreamed.
 
 ### 3.3 Windows: tap-windows6, WFP and game-instance binding, driven by kickoff-svc
 
@@ -447,6 +587,8 @@ If W1a shows that stock-mode binding cannot be made reliable, stock mode is remo
 | `ALE_AUTH_RECV_ACCEPT_V4`, `ALE_AUTH_CONNECT_V4`, `ALE_RESOURCE_ASSIGNMENT_V4` | UDP; remote 10.75.0.0/24, or broadcast to a discovery port; app ID = the game image; ALE user ID = the contained account (contained mode) or the lease's SID (stock mode) | the lease's dynamic session | hard permit, weight 15 |
 
 Arbitration: Kickoff's sublayer has the highest weight, and inside it the permit outranks the block. Because the permit is hard, a soft block in a lower sublayer (Windows Firewall's default block for the unidentified network) cannot override it. A hard block from another provider can still veto (L, Microsoft filter-arbitration documentation). The VM suite records the outcome with the firewall's public-profile default, an explicit user block rule for Rocket League, broad UDP allow rules and ICS on the physical adapter. On the Kickoff interface, Kickoff's policy decides. On every other interface, nothing changes.
+
+**Discovery reconstruction and the steering boundary (Windows).** A Windows guest's game sends its join traffic to whatever address a discovery reply names, over the physical interface if the address is not on the Kickoff subnet, and the policy above leaves physical interfaces alone. Every discovery reply a peer sends therefore is parsed and rebuilt by the guest-side reconstruction of §3.1.1 (SI-42) in kickoffd's `vlan` path, and only the rebuilt bytes are written to the tap. That holds in every game mode, stock mode included, and **Windows multiplayer is gated on it** (§10). The optional WFP restriction of §3.1.1 is defence in depth, applied only if W1a shows the game needs no internet UDP during LAN play. Replies arriving from the player's physical LAN are not Kickoff traffic: they are what plain LAN play already receives, and Kickoff does not filter them.
 
 If the service dies, its dynamic session closes and the permit disappears, leaving the persistent block (fail closed by lifetime). Whether closing the tap handle drops media is (L), checked in the VM.
 
@@ -503,7 +645,7 @@ Measured on the reference machine: direct datagram RTT p50 32-35 µs, p99 99-386
 
 ### 4.1 Roles
 
-The host runs the Rocket League listen server (Private Match, then Create LAN Match) and the Kickoff session. The roster holds at most 8, the LAN maximum (L). Virtual addresses: `10.75.0.1` for the host, `.2` to `.8` for guests in join order. The host refuses to start if that range overlaps a host network route.
+The host runs the Rocket League listen server (Create LAN Match, available with anti-cheat off while online Private Match is not, V §3.1) and the Kickoff session. The roster holds at most 8. The game's LAN host advertises a maximum of 10 players (V, §3.1), so the roster, not the game, is the limit. Virtual addresses: `10.75.0.1` for the host, `.2` to `.8` for guests in join order. The host refuses to start if that range overlaps a host network route.
 
 ### 4.2 Tickets and invite links
 
@@ -581,7 +723,7 @@ A **generation** is a complete copy of one game build. It is built, validated, t
   - Linux: each file is cloned with `FICLONE`.
   - Windows: each file is hardlinked when the user can create hardlinks to the online files (the same NTFS volume, with write-attribute access; Steam libraries usually grant it, and Program Files usually does not, L). Otherwise each file is copied, and hardlinks are reused from the previous generation for unchanged files.
 - **Validation.** Every file is hashed against the manifest's SHA-1; the size must match; and the file list must equal the manifest's minus the EAC exclusion list. A file that changed while it was being cloned fails here, so a copy can never mix two builds.
-- **EAC exclusion policy.** The copy omits `EasyAntiCheat/`, `Launcher.exe` and the EAC setup binaries; M1 shows `-noeac` boots without them. If a new build adds a file matching the bootstrap patterns (`*EasyAntiCheat*`, `*EAC*`, `start_protected_game*`) that is not on the compiled list, the build is refused and the UI says Kickoff needs an update. Fail closed.
+- **EAC exclusion policy.** The copy omits `EasyAntiCheat/`, `Launcher.exe` and the EAC setup binaries; `-noeac` boots without them (V, M1). If a new build adds a file matching the bootstrap patterns (`*EasyAntiCheat*`, `*EAC*`, `start_protected_game*`) that is not on the compiled list, the build is refused and the UI says Kickoff needs an update. Fail closed.
 - **Publication.** `.building` is renamed to `<build>-<n>`, and `current` is replaced by renaming a new symlink over it. Both renames are durable (see Durability below). Startup deletes any `.building` or `.deleting` directory.
 - **Leases.** A launch, `set_map` and `reset_map` hold a lease (a shared `flock` on the generation's lease file) for their whole duration. Garbage collection takes the lock exclusively, renames the generation to `.deleting` and deletes it. A leased generation is never refreshed or deleted (FILE-8).
 - **Maintenance exclusion.** A refresh runs only while no Kickoff game runs, no launcher process runs and the launcher's lock file is free. It re-reads the installed version at the end and discards the generation if it changed. The UI never offers to launch a generation that is not published.
@@ -596,7 +738,7 @@ A **generation** is a complete copy of one game build. It is built, validated, t
 NTFS on fixed local volumes is the only supported filesystem. ReFS, FAT, network and removable volumes are refused (FILE-10).
 
 **Setting the map.**
-- The slot is `TAGame/CookedPCConsole/Labs_Utopia_P.upk` ("Utopia Retro", not in online playlists; L).
+- The slot is `TAGame/CookedPCConsole/Labs_Utopia_P.upk` ("Utopia Retro", not in online playlists; L). LAN matches load their map by package name (V, §3.1), which is what a fixed slot relies on.
 - `set_map` holds the generation's lease and the per-generation writer lock. It clones or copies the verified object into an unnamed staging file in the copy's `CookedPCConsole`, verifying while copying. It then flushes (`fsync`, or `FlushFileBuffers`) and renames the file over the slot. On Linux the rename is `renameat2` followed by an `fsync` of the directory. On Windows it is `SetFileInformationByHandle(FileRenameInfoEx, POSIX_SEMANTICS | REPLACE_IF_EXISTS)`.
 - A rename over a hardlinked slot replaces the copy's directory entry only; the online file keeps its content.
 - After any failure, including a sharing violation, `store` re-reads the slot's file ID and hash to learn whether it holds the old or the new content, and never assumes which (FILE-10).
@@ -619,7 +761,7 @@ For map authors who build with UDK. Kickoff watches the chosen `.udk` or `.upk` 
 ### 5.6 kickoff-parse: the hostile-format sandbox
 
 Every format whose bytes come from a peer, a website, the game or a launcher is decoded here and nowhere else:
-- `ZstdMap` (stream to pipe), `BundleManifest`, `Ue3Header`, `ZipEntry` (streams one named entry from an archive to the output pipe; never materializes paths), `ImporterPage` (HTML to `{title, author, download_url}`), `Catalog` (signed JSON, §5.7), `Image` (PNG or JPEG to RGBA, at most 1024×1024), `RlReceipt`, `EpicManifest`, `SteamManifest`, `LaunchLog` (long-lived: log in, `GameState` events out) and `WlFilter` (long-lived, §3.2.1).
+- `ZstdMap` (stream to pipe), `BundleManifest`, `Ue3Header`, `ZipEntry` (streams one named entry from an archive to the output pipe; never materializes paths), `ImporterPage` (HTML to `{title, author, download_url}`), `Catalog` (signed JSON, §5.7), `Image` (PNG or JPEG to RGBA, at most 1024×1024), `RlReceipt`, `EpicManifest`, `SteamManifest`, `LaunchLog` (long-lived: log in, `GameState` events out), `DiscoveryReply` (long-lived: peer discovery replies in, bounded typed values or rejections out, §3.1.1) and `WlFilter` (long-lived, §3.2.1).
 
 **The helper holds pipes and nothing else (R2-5).** Input, output and errors are three pipes; `WlFilter` instead gets its two listening and connected sockets. kickoffd counts every byte in each direction against the job's caps, writes all output to `store` itself and kills the helper on any cap or deadline. A compromised helper therefore cannot seek, overwrite a reserved offset, create a sparse file, grow a file past its cap or keep writing after its result is read.
 
@@ -690,7 +832,7 @@ Every map, whatever its source, is hostile input to the game. The catalog gives 
 
 ### 6.2 Structural rules (one per class of finding)
 
-Each rule makes a class unreachable rather than detecting instances. Classes A to K came from round 1; L to Q came from round 2 (`r2-resolution.md` maps every finding to one).
+Each rule makes a class unreachable rather than detecting instances. Classes A to K came from round 1; L to Q came from round 2 (`r2-resolution.md` maps every finding to one); R and S came from the review of the M1 facts (`r3-resolution.md`).
 
 | Class | Rule |
 |---|---|
@@ -711,6 +853,8 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 | O. Authority not tied to the lifetime of the thing it authorizes | **Every grant is held through a handle to its subject and dies with it**: cgroup, pidfd, process handle, lease lock (§3.2.2, §3.3, §5.3) |
 | P. Destinations chosen inside a dependency | **The egress guard sits on the send path**, below any library logic (§3.4) |
 | Q. Agreement or freshness mistaken for trust | **Approval binds the inputs; freshness is persisted state**: provenance approval, root epochs and highest-seen records (§8.4) |
+| R. A peer-controlled field in game traffic choosing where the local game sends | **Guests rebuild address-bearing game messages in trusted code from bounded parsed data, and never forward the received bytes**; egress narrowing is defence in depth (§3.1.1) |
+| S. Kickoff acting on the player's account through the game | **Settings are copied unmodified and fresh; automation has exclusive input, confirms only on two matching observations, and stops on the first mismatched result** (§8.6) |
 
 ### 6.3 Budgets (charged before allocation)
 
@@ -746,10 +890,10 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
   | Any `fs.suid_dumpable` | an explicit `PR_SET_DUMPABLE 0` is reset only by an exec or a credential change; the worker makes neither after hardening and refuses clients if it finds itself dumpable | must be dumpable (1) | an installed set-ID, file-capability or unreadable executable refuses, since clients could not verify it either |
  The game and launcher helpers require a separately verified suppression policy across exec; M0 crashes a canary probe and checks both the kernel wait status and `coredumpctl`. No core-handler setting on the host is changed. See the [kernel suppression paths](https://code.googlesource.com/linux/torvalds/linux/+/18ded910b589839e38a51623a179837ab4cc3789/fs/coredump.c).
 - **Legendary authentication broker (Linux, R2-15).** It runs legendary's `launch Sugar --dry-run` with a fixed argv and a scrubbed environment, only while no launcher process runs and legendary's lock is free. It reads stdout through a pipe straight into a `Secret`, and sends stderr to `/dev/null`, never to a log. Legendary may refresh its stored session first (upstream calls login before the dry-run branch; L for the installed version). That write to legendary's `user.json` is the one launcher-state change Kickoff causes; SI-1 states it and its test bounds it. Kickoff's own Epic sign-in, the alternative to the broker, removes it at the cost of a second login and a second stored refresh token. M0 runs the broker against fake expired credentials before any real account is used.
-- The exchange code goes from the broker straight into the game's argv, never to a file. Each launch argument must match an allowlist (`-AUTH_LOGIN=`, `-AUTH_PASSWORD=`, `-AUTH_TYPE=exchangecode`, `-epicapp=Sugar`, `-epicenv=Prod`, `-EpicPortal`, `-epicusername=`, `-epicuserid=`, `-epiclocale=`, `-epicsandboxid=`); anything else refuses the launch. The code is one-time and consumed at login. It is still visible in the game's argv to processes of the same user, which is outside the boundary.
+- The exchange code goes from the broker straight into the game's argv, never to a file. Each launch argument must match an allowlist (`-AUTH_LOGIN=`, `-AUTH_PASSWORD=`, `-AUTH_TYPE=exchangecode`, `-epicapp=Sugar`, `-epicenv=Prod`, `-EpicPortal`, `-epicusername=`, `-epicuserid=`, `-epiclocale=`, `-epicsandboxid=`); anything else refuses the launch. The code is one-time and consumed at login. It is still visible in the game's argv to processes of the same user, which is outside the boundary. The game also writes its launch arguments, the exchange code included, to its own `Launch.log` (V, M1). That log lives in the ephemeral prefix and is discarded with it. The `LaunchLog` job turns it into `GameState` events only, and diagnostics never include it (below). Any copy of the log that does leave the gamebox, such as one kept from a supervised test session, passes redaction of every allowlisted argument's value first.
 - Diagnostics (`kickoff doctor --export`) are built from an allowlisted schema of counters, states, versions and path types. They never contain raw logs, argv, launcher output, tickets or memory dumps. The export is previewed before it is written. Pattern redaction remains only as a second layer.
 - Retention: Kickoff's own logs rotate after 7 days (tested with a controlled clock). Friend records can be listed and deleted in `doctor`.
-- Privacy: the door is relay-only. Direct sessions disclose your addresses to admitted peers and to whoever they tell; relay-only sessions disclose them to the relay only (§3.4). Relay-only mode survives reconnects and route changes because the endpoint has no IP transport (tested by packet capture).
+- Privacy: the door is relay-only. Direct sessions disclose your addresses to admitted peers and to whoever they tell; relay-only sessions disclose them to the relay only (§3.4). Relay-only mode survives reconnects and route changes because the endpoint has no IP transport (tested by packet capture). Inside a session, the game itself discloses the host's Epic account id and display name: its LAN discovery reply carries both and is broadcast to everyone on the virtual LAN (V, §3.1). Every admitted guest sees them, including anyone admitted from an "Anyone with the link" invite. Relays see only the QUIC ciphertext.
 
 ### 6.5 Residual risks (stated, not hidden)
 
@@ -759,6 +903,8 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 - **Transport probes.** An admitted peer can make your client send a bounded number of encrypted QUIC probes to UDP ports of its choice (§3.4).
 - **Floods.** A pre-handshake flood through a relay, or at a leaked session endpoint, can delay new joins and reconnects. Established links are unaffected.
 - **Relay revocation** takes effect by restarting the relay, which briefly drops every relayed connection (§8.5).
+- **The player's account.** The game syncs settings and save data with the player's Epic account even with anti-cheat off (§8.6). Kickoff's own behaviour (unmodified, fresh settings; guarded UI automation) is SI-43. What the game uploads, and how Epic merges it, happens inside the game and on Epic's servers, which no Kickoff test observes; it is checked in every live session. The game has no atomic confirm, so a game-initiated UI change between Kickoff's second observation and its confirm can make one confirm act on the wrong state. It is detected by the post-confirm check, which stops the script, and is not prevented.
+- **Display sandbox.** gamescope's sandbox holds the GPU's primary node as well as the render node (§3.2.1), so a compromised gamescope has that node's driver interface as further attack surface.
 - **Same-user malware** can do anything the user can.
 - **Lost recovery key**: no in-band recovery; a new root reaches players the way the first install did (§8.4).
 
@@ -781,6 +927,8 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 | Data or a dependency steers outbound traffic | I, P | SI-29 |
 | Secrets or addresses leak | J | SI-30, SI-31 |
 | The relay is abused, or becomes a door into other systems | K | SI-32 |
+| A malicious host steers a guest's game to another destination | R | SI-42 |
+| Kickoff changes the player's account-synced settings | S | SI-43 |
 
 ## 7. Performance budget
 
@@ -813,7 +961,7 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
   5. applies the argument allowlist and starts the gamebox (§3.2).
 - **The launcher's own Play path is untouched.** Kickoff installs no hook in any launcher.
 - **BakkesMod** is not started in the gamebox. That keeps its RCON port 9002 and its updater out of the namespace.
-- **State** comes from the gamebox's pidfd (exit) and from `Launch.log` in the gamebox prefix, read by the supervisor and decoded by a `LaunchLog` job. Markers: `DevNet: Browse:`, `LoadMap:`, `MENU_Main_p`, `Event State = …`, `appRequestExit` (V). The log flushes in 4 KB blocks, so it is good for map and mode but not for timing (V).
+- **State** comes from the gamebox's pidfd (exit) and from `Launch.log` in the gamebox prefix, read by the supervisor and decoded by a `LaunchLog` job. Markers: `DevNet: Browse:`, `LoadMap:`, `MENU_Main_p`, `Event State = …`, `appRequestExit` (V). The log flushes in 4 KB blocks, so it is good for map and mode but not for timing (V). It does not record `-noeac`; that proof comes from the game process (§3.2.2 step 9).
 - **Overlay**: a Tauri window. On Hyprland, a runtime rule (`float, pin, no_focus, no_initial_focus`) through `hyprctl` keeps it above a fullscreen game (V, app-shell); elsewhere it is an always-on-top window. Toggled by `kickoff --toggle-overlay`. The overlay is a host client, not part of the gamebox.
 - **Packaging**: an AUR package `kickoff-bin` (signed release binaries; §8.4) depending on `webkit2gtk-4.1 gtk3 libayatana-appindicator passt umu-launcher bubblewrap gamescope pipewire wireplumber`. It ships the PipeWire and WirePlumber drop-ins and a systemd **user** unit for kickoffd. It ships no setuid binary, file capability, polkit action or system unit. Non-Arch distributions are not decided yet; an AppImage that checks for gamescope, passt and umu and explains what is missing is under consideration (Flatpak cannot run the gamebox's nested namespaces as designed).
 
@@ -902,6 +1050,26 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 - **Deployment.** A dedicated small host that runs nothing else: not on any private network, no credentials for any other system, an egress firewall denying private, CGNAT and overlay ranges. Non-root, read-only filesystem, no mounts except its TLS key, dropped capabilities, only 443/tcp and the QAD port exposed, metrics off or on localhost (default port 9090, V `defaults.rs:16`). Logs are kept 7 days.
 - n0's public relays stay as a fallback ("development and hobby use", V).
 
+### 8.6 Effects on the player's game account
+
+**Facts (V, M1, Linux).** With anti-cheat off, in LAN and local play, the game still syncs with the player's Epic account:
+- At boot it uploaded its settings data once ("Online settings not synced, uploading data"). The file it uploaded was the prefix's local copy, unchanged from the player's own prefix, so whatever settings a Kickoff session boots with are what reach the account.
+- It uploads save data on save events.
+- Pending in-game notices, such as item-drop or reward notices, may have to be acknowledged before the menu is usable. Acknowledging one marks it seen on the account.
+Windows is expected to behave the same (L).
+
+**Rule: Kickoff never changes in-game settings (SI-43).** What Kickoff does is testable and is an invariant; what Epic's sync does with it is not, and remains a residual risk (§6.5).
+- **Copied unmodified.** The Kickoff prefix base carries the player's settings files as byte-identical copies of the online prefix's, made through `ReadOnlyRoot` and `store`. Kickoff has no operation that edits a settings file: no command, IPC variant or code path takes a settings value.
+- **Fresh at launch.** Before each launch, Kickoff compares the hash of each settings file in the prefix base with the online prefix's. On a difference, it re-copies the file and checks it again; if the online file changes during the copy, the launch is refused. That way the boot upload sends what the player last had, not an old snapshot. Whether the upload could overwrite newer account data anyway is (U) and part of the residual risk.
+- **UI automation: exclusive input, proven state, verified result.** Anything Kickoff automates in the game's UI (for example, opening Create LAN Match) is a fixed script of steps. Each step has an expected screen and an expected selection, drawn from an allowlist that contains no settings screen. The game offers no atomic "confirm only if the state is still X" input, so Kickoff cannot prevent every wrong confirm. It supplies exactly these four protections:
+  - **Single input source.** During a script, Kickoff's input adapter is the only source of input to the game: the gamescope window gets no player input until the script ends or the player cancels it.
+  - **Two matching observations after the last input.** Kickoff sends a confirm only when two consecutive observations, both taken after its last input was processed and a settle interval, match the step's expected screen and selection. An unknown screen, an unexpected dialog, a settings screen, disagreeing observations or a stale observation stop the script without a confirm.
+  - **Post-confirm check and stop on mismatch.** After each confirm, the next observation must show the step's expected result. Otherwise Kickoff sends no further input, ends the script, compares the settings files in the overlay with the prefix base, and reports what happened to the player.
+  - **Residual risk (stated, not prevented).** The game can change its UI on its own, for example by opening a dialog, after the second observation and before the confirm lands. That confirm then acts on the new state. The post-confirm check detects it and stops at once, and the settings comparison shows whether anything changed, but the one wrong confirm is not prevented (§6.5).
+- **Notices.** Acknowledging a pending notice is the only account-visible action automation may take, and Kickoff tells the player when it did.
+
+Epic's side, meaning what the game uploads and when, and how the account merges it, stays a residual risk (§6.5), checked by hand in every live session.
+
 ## 9. Test strategy
 
 `scripts/check.sh` runs every test that `docs/SECURITY-INVARIANTS.md` names, then runs each row's **mutants**. A mutant is a build or configuration with that row's mitigation removed, and the test must fail against it. A test that passes on a mutant does not count (SI-33).
@@ -927,21 +1095,21 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 
 | ID | Slice | Proves | Invariants green | Depends on |
 |---|---|---|---|---|
-| M0 | **Containment probes, no game and no account**: gamebox, display sandbox (gamescope, WlFilter, security context), restricted audio, descriptor inventory, cgroup and teardown, pasta and DNS, and the auth broker against fake credentials. Items (f) to (l) of §3.2.5 | The containment claims, before any real account or custom map | SI-14, SI-34 (Linux), SI-35, SI-36, SI-38 (manual) | `passt`, `umu-launcher` and `gamescope` installed |
-| M1 | **Gamebox game spike** (supervised, no peers): spike copy, native umu under gamescope, items (a) to (e), (m) and (n); LAN facts from tap frames; a locally built map in the copy; a same-process reswap | The gamebox and copy thesis, the display cost, every (U) in §3.1 | SI-2 (manual), SI-35 (beside the real game) | M0 |
+| M0 | **Containment probes, no game and no account**: gamebox, display sandbox (gamescope, WlFilter, security context), restricted audio, descriptor inventory, cgroup and teardown, pasta and DNS, and the auth broker against fake credentials. Items (f) to (l) of §3.2.5. Recommended spawn path: bubblewrap, pasta, setpriv, prlimit and a systemd scope, pending review (§3.2.6) | The containment claims, before any custom map or real peer session | SI-14, SI-34 (Linux), SI-35, SI-36, SI-38 (manual) | `passt`, `umu-launcher` and `gamescope` installed |
+| M1 | **Gamebox game spike** (supervised): spike copy, native umu under gamescope, items (a) to (e) and (m) to (q); LAN facts from tap frames; a locally built map in the copy; a same-process reswap. **Partly done (2026-10-13).** Proven: the copy boots `-noeac` read-only without the EAC bootstrap, logged in through pasta under gamescope; the online install and prefix were untouched; containment canaries pass in the same box; the host side of LAN discovery, the host's sockets and map loading are measured (§3.1). Remaining: a two-instance session for the join exchange and client game traffic (o), the game's internet traffic (p), guest `ServerID` handling and Wine address selection (q), the functional address fix (§3.1.1, decided in M3), (b), (e) beside the running game, (m), (n), WlFilter in the display path, the written-path list, a locally built map and a same-process reswap | The gamebox and copy thesis, the display cost, every (U) in §3.1 | SI-2 (manual), SI-35 (beside the real game) | spike mode (§3.2.5) until M0; M0 before any custom map |
 | W1 | **Windows spike**, beside M1. W1a (VMs): contained account with S4U and Low integrity, compromised-game probe, stock-mode instance binding, WFP arbitration, LPAC helper. W1b (a Windows PC with a GPU): Rocket League boots under the contained token with an Epic exchange code; a Steam copy; hardlink copy timings | Whether contained mode is feasible; whether stock mode can be bound | SI-34 (Windows, VM), SI-40 (VM) | test VMs; W1b needs a Windows tester |
 | M2 | Core loop in process: `wire`, `vlan::Mem`, door and session endpoints, admission and approvals, budgets, `ipc` (Linux), `secret` | Wire, admission, generations, budgets, latency | SI-3, SI-7 (Linux), SI-10, SI-18 to SI-23, SI-29 (tickets and guard unit), SI-30, SI-31, SI-33, SI-41 | none (parallel) |
-| M5a | **Minimum copy protections**: generations with manifest validation, the EAC exclusion policy, leases, a Kickoff-owned prefix base, fail-closed launch | No experimental copy builder becomes a live launch path | SI-2, SI-39 | M1 |
-| M3 | `NsTap` adapter and kickoff-gamebox in CI, Wine probes in two gameboxes, the send-guard packet recorder | Rootless Linux LAN end to end | SI-11 (Linux), SI-12 (Linux), SI-13, SI-14, SI-29 (transport), SI-34 to SI-36, SI-38 in CI | M0, M1, M2, M5a |
+| M5a | **Minimum copy protections**: generations with manifest validation, the EAC exclusion policy, leases, a Kickoff-owned prefix base, fail-closed launch | No experimental copy builder becomes a live launch path | SI-2, SI-39, SI-43 (settings) | M1 |
+| M3 | `NsTap` adapter and kickoff-gamebox in CI, Wine probes in two gameboxes, the send-guard packet recorder, guest discovery reconstruction (SI-42) and the functional address fix (§3.1.1), the tap hand-off (§3.2.6) | Rootless Linux LAN end to end | SI-11 (Linux), SI-12 (Linux), SI-13, SI-14, SI-29 (transport), SI-34 to SI-36, SI-38 in CI, SI-42 (Linux) | M0, M1, M2, M5a |
 | M4 | **Live stock-map LAN match between two Linux PCs** via the CLI | The thesis on Linux | — | M3, M5a, a second player |
 | M5 | Full `store`, Landlock, `set_map` and `reset_map`, solo custom map | Ban-safe custom maps (Linux) | SI-1, SI-4, SI-5 | M5a |
 | M6a | **Parser confinement on both platforms**, including the dishonest-helper and writable-handle cases and the LPAC policy | No peer-controlled format reaches an unconfined parser | SI-15, SI-37 | M2; W1a for Windows |
 | M14 | Map browser: catalog, importers, drop-a-file, textures, Steam Workshop index | Solo custom maps in 2 clicks | SI-29 (importers), SI-17 | M5, M6a |
 | M6 | Library, transfer, map pick with approval | Custom maps between peers | SI-16, SI-23 (transfer and disk) | M5, M6a |
-| M7 | Windows networking: kickoff-svc, staged driver, WFP, lease contract with instance binding, pipe authentication | Windows LAN without the game | SI-6, SI-7 (Windows), SI-8, SI-11 (Windows), SI-12 (Windows), SI-28, SI-40 | M2, W1a |
+| M7 | Windows networking: kickoff-svc, staged driver, WFP, lease contract with instance binding, pipe authentication | Windows LAN without the game | SI-6, SI-7 (Windows), SI-8, SI-11 (Windows), SI-12 (Windows), SI-28, SI-40, SI-42 (Windows) | M2, W1a |
 | M8 | Windows copy, Epic sign-in and launch in the chosen Windows game mode (§8.2) | Windows custom maps | SI-1, SI-2 (Windows), SI-34 (Windows, if option A) | M7, W1 |
 | M9 | Live Windows player with a Linux host: stock map, then custom map | Cross-platform play | — | M4, M7, M8; SI-34 status per the Windows game mode |
-| M10 | Tauri UI: capabilities, native approvals, overlay, invites, map browser UI, onboarding | The §1.1 targets | SI-9 | M6, M14 |
+| M10 | Tauri UI: capabilities, native approvals, overlay, invites, map browser UI, onboarding | The §1.1 targets | SI-9, SI-43 (automation) | M6, M14 |
 | M11a | **Release-trust spikes, early**: bootstrap verifier, both isolated builders reproducing a trivial artifact, provenance approval with `cargo vet`, root rotation and freshness state machine, signing route | That the distribution trust model works before UI completion | SI-24 to SI-27 (spike level) | can start beside M3 |
 | M11b | Distribution: landing page, GitHub Releases, AUR, NSIS, updater, `doctor` | Installable from one link | SI-24 to SI-27 | M10, M11a |
 | M12 | Relay: vouchers, issuer accounting, revocation, limits before admission, isolated deployment | The project relay | SI-32 | M2 |
@@ -949,23 +1117,28 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 | M15 | Optional: browser feed, host transfer, arm64 | Extras | per feature | M10 |
 
 Gates that override the table:
-- **Real peer sessions** (M4, M9, and any hand-delivered alpha) need the compromised-game suite green for that platform: SI-34 to SI-36 and SI-38 on Linux. On Windows, SI-34 in contained mode, or the residual-risk disclosure shipped if same-user or stock mode is chosen (§8.2).
-- **No real account and no custom map** before M0 is green.
+- **Windows multiplayer**, in any game mode including stock mode, needs guest discovery reconstruction (SI-42) green on Windows (M7).
+- **Real peer sessions** (M4, M9, and any hand-delivered alpha) need guest discovery reconstruction (SI-42) and the compromised-game suite green for that platform: SI-34 to SI-36 and SI-38 on Linux. On Windows, SI-34 in contained mode, or the residual-risk disclosure shipped if same-user or stock mode is chosen (§8.2).
+- **No custom map** before M0 is green. **Real-account sessions** before then run only in spike mode (§3.2.5): peers prohibited, every mandatory check passing before each session, and the mode's stated limits (no WlFilter, so gamescope keeps host clipboard authority) accepted for that session.
 - **No peer-controlled format** before M6a.
 - **No public link** before M11b and a signed Windows installer. A tester can receive an alpha the maintainer hands over directly, subject to the first gate.
 
 ## 11. Unverified facts that block milestones
 
+Settled by M1 (V, §3.2.5): native umu runs the copy under gamescope with legendary-minted arguments passed straight to `RocketLeague.exe`; the game boots with internet only through pasta and public DNS; the copy boots `-noeac` read-only without `EasyAntiCheat/` and `Launcher.exe`; the discovery port, broadcast form, message sizes and the address the host embeds (§3.1).
+
 | Fact | Blocks | Settled by |
 |---|---|---|
-| Native umu runs the copy under gamescope, with legendary-minted arguments passed directly to `RocketLeague.exe` | M1, M3 | M1 (a) |
 | gamescope's Wayland backend runs through WlFilter and a security-context socket on Hyprland and other compositors | M1 | M0 (k), M1 (a) |
 | The restricted PipeWire socket gives playback and denies capture | M0 | M0 (j) |
 | The ephemeral prefix and shader cache cost acceptable first-match stutter | the shader-cache choice (§3.2.5) | M1 (n) |
 | The game's network namespace is the gamebox's, not the host's | D on Linux | M1 (b) |
-| The game boots with internet only through pasta and public DNS | M3 | M1 (c) |
-| The copy boots `-noeac` without `EasyAntiCheat/` and `Launcher.exe`, read-only | the copy (A) | M1 (d) |
-| Discovery port, broadcast form, packet sizes, embedded IPs | filter, `GamePorts` | M1 |
+| The join exchange, the client's source port, and client game traffic (sizes, rates, embedded addresses) | filter, `GamePorts`, M3 | M1 (o), two instances |
+| How a guest game handles `ServerID`, and which address Wine reports under each gamebox layout | the functional fix (A or B), M3 | M1 (q), M3 (§3.1.1) |
+| The game's internet traffic in LAN play, as protocols and destinations | guest egress narrowing (§3.1.1) | M1 (p) |
+| Whether the game needs internet UDP during LAN play on Windows | the Windows WFP restriction (§3.1.1) | W1a |
+| The game's boot settings upload never overwrites newer account settings | the prefix base (§8.6) | M5a |
+| How the tap descriptor reaches kickoffd under the bubblewrap spawn path | M3 | M3 (§3.2.6) |
 | Same-name reswap inside one game process | Map Maker, mid-session map change | M1, the Map Maker live test |
 | pasta flags give no inbound forward and no host access | SI-14 | M0 (i), M3 |
 | systemd-coredump honours `RLIMIT_CORE 0` for the game | SI-30 | M0 |
