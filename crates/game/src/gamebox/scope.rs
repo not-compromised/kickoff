@@ -178,11 +178,14 @@ impl Scope {
             OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         );
-        match file {
-            Ok(file) => Ok(std::fs::File::from(file).write_all(b"1")?),
-            // A removed cgroup was empty: the kernel refuses rmdir otherwise.
-            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NODEV) => Ok(()),
-            Err(error) => Err(error.into()),
+        // A removed cgroup was empty: the kernel refuses rmdir otherwise.
+        // The manager may remove it between our open and our write.
+        match file.map(|f| std::fs::File::from(f).write_all(b"1")) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) if removed(e.raw_os_error()) => Ok(()),
+            Ok(Err(e)) => Err(e.into()),
+            Err(e) if removed(Some(e.raw_os_error())) => Ok(()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -199,9 +202,14 @@ impl Scope {
             Err(error) => return Err(error.into()),
         };
         let mut text = String::new();
-        std::fs::File::from(file)
+        match std::fs::File::from(file)
             .take(4096)
-            .read_to_string(&mut text)?;
+            .read_to_string(&mut text)
+        {
+            Ok(_) => {}
+            Err(e) if removed(e.raw_os_error()) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        }
         match text.lines().find_map(|l| l.strip_prefix("populated ")) {
             Some("0") => Ok(false),
             Some("1") => Ok(true),
@@ -240,6 +248,13 @@ impl Scope {
     pub(super) fn stop(&self) -> Result<(), Refused> {
         stop_named(&self.name)
     }
+}
+
+/// Whether an error says the cgroup is gone (removed while we held it).
+fn removed(errno: Option<i32>) -> bool {
+    errno.is_some_and(|e| {
+        e == rustix::io::Errno::NOENT.raw_os_error() || e == rustix::io::Errno::NODEV.raw_os_error()
+    })
 }
 
 /// The manager's stop of a scope by name, within the teardown deadline; for
