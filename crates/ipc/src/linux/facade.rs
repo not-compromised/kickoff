@@ -584,7 +584,9 @@ fn harden_facade() -> Result<(), IpcError> {
 /// the private scratch directory the probe crashes in, null stdio and no other
 /// descriptor, and checks kernel wait status. No secrets may exist yet.
 pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
-    if std::env::var_os(WORKER_ENV).as_deref() == Some(OsStr::new("1")) {
+    if std::env::var_os(WORKER_ENV).as_deref() == Some(OsStr::new("1"))
+        && !cfg!(feature = "mutant-si36-worker-inherits-fds")
+    {
         close_inherited()?;
     }
     if !cfg!(feature = "mutant-si30-late-facade-core") {
@@ -623,13 +625,25 @@ pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
     std::process::abort();
 }
 
+/// kickoffd's own sweep (SI-36): call right after
+/// [`run_core_probe_if_requested`], before anything opens a descriptor.
+/// Closes every descriptor above stdio its launcher leaked and refuses to
+/// start if one fails to close. Rust's runtime has already reopened closed
+/// stdio on `/dev/null` before `main`, so later opens cannot take 0 to 2.
+/// The probe never gets here: it refuses inherited descriptors instead,
+/// which is what proves the facade's spawn. Not for a process with threads or
+/// descriptors of its own, such as a test harness.
+pub fn close_inherited_descriptors() -> Result<(), IpcError> {
+    if cfg!(feature = "mutant-si36-no-fd-sweep") {
+        return Ok(());
+    }
+    close_inherited()
+}
+
 /// Closes every descriptor above stdio, before this process has created any
 /// of its own: at entry, everything there was inherited across exec. This
 /// runs in the child, so no other thread of the launcher can add one later.
 fn close_inherited() -> Result<(), IpcError> {
-    if cfg!(feature = "mutant-si36-worker-inherits-fds") {
-        return Ok(());
-    }
     close_above_stdio(&open_descriptors()?, |fd| {
         nix::unistd::close(fd).map_err(io::Error::from)
     })

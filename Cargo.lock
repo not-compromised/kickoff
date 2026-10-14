@@ -1739,6 +1739,8 @@ dependencies = [
  "kickoff-ipc",
  "kickoff-secret",
  "kickoff-wire",
+ "nix",
+ "rustix",
  "tokio",
 ]
 

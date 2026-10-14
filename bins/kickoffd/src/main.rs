@@ -21,6 +21,7 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 fn linux_main() -> Result<(), kickoff_ipc::IpcError> {
     kickoff_ipc::run_core_probe_if_requested()?;
+    kickoff_ipc::close_inherited_descriptors()?;
     use kickoff_ipc::{Facade, IpcError, Refusal, Reply, RuntimeDir, Trust, Worker, WorkerLaunch};
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let worker = match args.as_slice() {

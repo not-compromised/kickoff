@@ -290,6 +290,22 @@ test = "si_36_descriptor_listing_refuses_when_its_own_close_fails"
 note = "the listing descriptor's close result is ignored, so it can stay open while the listing succeeds"
 
 [[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+test_crate = "kickoffd"
+feature = "mutant-si36-no-fd-sweep"
+test = "si_36_kickoffd_closes_a_descriptor_its_launcher_leaked"
+note = "kickoffd keeps the descriptors its launcher leaked instead of closing them at entry"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+test_crate = "kickoffd"
+feature = "mutant-si36-no-fd-sweep"
+test = "si_36_kickoffd_descriptor_table_equals_its_allowlist"
+note = "kickoffd keeps the descriptors its launcher leaked instead of closing them at entry"
+
+[[mutant]]
 si = "SI-30"
 crate = "kickoff-ipc"
 feature = "mutant-si30-socket-handler-allowed"
