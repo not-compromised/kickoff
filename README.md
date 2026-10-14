@@ -16,6 +16,7 @@ Design phase; **not usable yet**. The design has been through two rounds of inde
 - [Design](docs/design.md): goals, architecture, networking, security model and milestones.
 - [Security invariants](docs/SECURITY-INVARIANTS.md): the standing security rules and the tests that enforce them. Each one is a release requirement.
 - [Security reviews](docs/reviews/): each review round and how every finding was resolved.
+- [Development](docs/development.md): workspace layout, the check script and coding conventions.
 
 ## Licence
 

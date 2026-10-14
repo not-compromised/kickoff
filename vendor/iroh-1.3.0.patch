@@ -1,0 +1,89 @@
+iroh 1.3.0: transport send-context and egress-guard patch.
+
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -276,0 +277,4 @@
++[dependencies.kickoff-send-guard]
++version = "=0.0.0"
++path = "../../crates/send-guard"
++
+--- a/src/endpoint/connection.rs
++++ b/src/endpoint/connection.rs
+@@ -1104,0 +1105,3 @@
++
++    /// Stable owner of transport sends, including NAT probes and rebinding.
++    pub fn send_context(&self) -> u64 { self.inner.send_context() }
+--- a/src/socket/transports/ip.rs
++++ b/src/socket/transports/ip.rs
+@@ -324,0 +325 @@
++        context: u64,
+@@ -326,0 +328,6 @@
++        // Kickoff patch (design 3.4, R2-10): the send guard sees every
++        // destination, including those iroh picks itself. Refused packets
++        // are dropped as if lost.
++        if !kickoff_send_guard::admit(self.config.into(), context, Self::canonical_addr(dst)) {
++            return Poll::Ready(Ok(()));
++        }
+--- a/src/socket/transports.rs
++++ b/src/socket/transports.rs
+@@ -473,0 +474 @@
++            context: 0,
+@@ -955,0 +957 @@
++    context: u64,
+@@ -970,0 +973 @@
++        let context = self.context;
+@@ -987 +990 @@
+-                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, transmit);
++                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, context, transmit);
+@@ -992 +995 @@
+-                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, transmit);
++                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, context, transmit);
+@@ -1001 +1004 @@
+-                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, transmit);
++                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, context, transmit);
+@@ -1006 +1009 @@
+-                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, transmit);
++                        return Pin::new(sender).poll_send(cx, *dst_addr, *src, context, transmit);
+@@ -1141 +1144 @@
+-#[pin_project::pin_project]
++#[pin_project::pin_project(PinnedDrop)]
+@@ -1165,0 +1169,9 @@
++#[pin_project::pinned_drop]
++impl PinnedDrop for Sender {
++    fn drop(self: Pin<&mut Self>) {
++        for bind in self.sock.ip_bind_addrs() {
++            kickoff_send_guard::forget(*bind, self.sender.context);
++        }
++    }
++}
++
+@@ -1166,0 +1179,21 @@
++    fn set_connection_context(mut self: Pin<&mut Self>, context: u64, initial_destination: SocketAddr, is_client: bool) {
++        self.sender.context = context;
++        if is_client {
++            match MultipathMappedAddr::from(initial_destination) {
++                MultipathMappedAddr::Mixed(mapped) => {
++                    if let Some(remote) = self.sock.mapped_addrs.endpoint_addrs.lookup(&mapped) {
++                        for bind in self.sock.ip_bind_addrs() {
++                            kickoff_send_guard::expect(*bind, context, *remote.as_bytes());
++                        }
++                    }
++                }
++                MultipathMappedAddr::Ip(dst) => {
++                    for bind in self.sock.ip_bind_addrs() {
++                        kickoff_send_guard::probe(*bind, context, SocketAddr::new(dst.ip().to_canonical(), dst.port()));
++                    }
++                }
++                _ => {}
++            }
++        }
++    }
++
+@@ -1328,0 +1362 @@
++                context: 0,
+--- a/src/socket.rs
++++ b/src/socket.rs
+@@ -1360,0 +1361,3 @@
++        for bind in self.sock.ip_bind_addrs() {
++            kickoff_send_guard::associate(*bind, conn.send_context(), *remote.as_bytes());
++        }

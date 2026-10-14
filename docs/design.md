@@ -12,7 +12,7 @@ Changes from draft 2:
 - **Authority is enumerated at startup:** descriptor sweep, Landlock ABI 6 or later with every right handled, typed checks on received descriptors (R2-4).
 - **Game copies are immutable, manifest-validated generations** with leases. Windows copies use hardlinks where the user may create them (R2-8, §5.3).
 - **Windows LAN permits are bound to one game process and one user**, held by a service handle; WFP layers and arbitration are specified (R2-3). A **contained-game mode** (a separate low-integrity account) is proposed for Windows custom maps. Until it is verified, ban safety against a compromised game is not claimed on Windows (R2-1, §8.2).
-- **Transport egress guard** at the socket send path, through a vendored one-hook iroh patch; budgets on the session endpoint; the address-disclosure claim is narrowed (R2-9, R2-10).
+- **Transport egress guard** at the socket send path, through audited iroh and noq transport patches; budgets on the session endpoint; the address-disclosure claim is narrowed (R2-9, R2-10).
 - **Approvals** are immutable, single-use objects (R2-14).
 - **Release:** provenance approval is separate from reproduction; root epochs and freshness state; anti-rollback for manual installers (R2-11, R2-12). Distribution moves to GitHub Releases and a static landing page; the self-hosted download server of draft 2 hosts nothing.
 - **Relay:** vouchers charged to their issuer, revocation by restart, limits before admission, the shared-server option removed (R2-13).
@@ -49,23 +49,26 @@ Measured on a fresh Windows 11 PC with Rocket League installed from Epic, and on
 
 ### 1.2 Claims, and the design choice behind each
 
-| # | Claim | Design choice that delivers it |
-|---|---|---|
-| 1 | Runs on Windows and on Linux (Heroic/umu); one link per platform | One L2 codec with two tap adapters (§3.2, §3.3); a landing page with one download button per platform (§8.4) |
-| 2 | Kickoff never puts a modified file where an anti-cheat session can load it | Kickoff writes only immutable copy generations that no launcher knows about and that lack the EAC bootstrap. The online install is read-only to Kickoff: a Landlock rule on Linux, read-only handles on Windows (§5.3). One stated exception on Linux: legendary refreshing its own login session, as it does on every normal Play (§6.4) |
-| 3 | A malicious map or peer cannot get you banned by modifying your game | **Linux:** the game runs in the gamebox, where the online install is not mounted and the copy is read-only (§3.2). **Windows:** only in contained mode (§8.2). Otherwise this is a residual risk, shown at install and when a session starts |
-| 4 | A malicious map cannot read your files or control your desktop | **Linux:** the gamebox shows the game only its copy, an ephemeral prefix, a render node, a restricted audio socket and gamescope's own display server (§3.2). **Windows:** contained mode only (§8.2) |
-| 5 | Peers can reach only the Rocket League process Kickoff started | Linux: peer traffic exists only inside the gamebox network namespace. Windows: a WFP permit bound to one game process, one user and one image, held by a service handle and removed when that process exits (§3.3). The wire carries UDP tuples, never Ethernet or IP (§3.1) |
-| 6 | A crash or game update never leaves anything to repair | Nothing is written to the online install. A new game build gets a new copy generation (§5.3) |
-| 7 | No accounts beyond your game account | Invites are https links that open Kickoff, or offer the download if it is missing (§4.2) |
-| 8 | Smallest privileged surface | Linux: no root at install or at run time. Windows: solo play needs no driver or service; multiplayer adds one SYSTEM service that holds the tap and WFP filters and never touches a file (§3.3) |
-| 9 | Lower relay dependence | Direct QUIC paths after admission, with an egress guard on every transport send (§3.4) |
-| 10 | Maps reach friends as the exact bytes the host has | Content addressing and whole-file BLAKE3, computed by kickoffd itself (§5.2) |
-| 11 | Game traffic never waits behind a map download | QUIC datagrams for LAN traffic; transfers yield to the host's own measured game state (§3.4) |
-| 12 | A compromised download host cannot fake the first install, push an update or silently freeze updates | Authenticode on Windows and independent package pins on Linux for the first install; an offline-signed release record with root epochs, sequence and expiry after that (§8.4) |
-| 13 | Open, reproducible and reviewed | Approved inputs, two isolated builders, signing bound to provenance and test evidence (§8.4) |
-| 14 | Diagnostics carry no secrets | Allowlisted schema; secrets are a type that cannot be printed; no core dumps (§6.4) |
-| 15 | A built-in map browser that credits authors | A signed catalog of map pages; downloads come from the author's own site, on your machine (§5.7) |
+The invariant columns are the authoritative SI-33 claim/platform mapping. `—` means the claim is not made in that mode. Windows same-user includes stock mode; contained mode is option A (§8.2). Scope checks run now; exact-artifact release evidence lands in M11.
+
+| # | Claim | Design choice that delivers it | Invariants Linux | Invariants Windows contained | Invariants Windows same-user |
+|---|---|---|---|---|---|
+| 1 | Runs on Windows and on Linux (Heroic/umu); one link per platform | One L2 codec with two tap adapters (§3.2, §3.3); a landing page with one download button per platform (§8.4) | SI-10 | SI-10 | SI-10 |
+| 2 | Kickoff never puts a modified file where an anti-cheat session can load it | Kickoff writes only immutable copy generations that no launcher knows about and that lack the EAC bootstrap. The online install is read-only to Kickoff: a Landlock rule on Linux, read-only handles on Windows (§5.3). One stated exception on Linux: legendary refreshing its own login session, as it does on every normal Play (§6.4) | SI-1, SI-2, SI-3, SI-39 | SI-1, SI-2, SI-3, SI-39 | SI-1, SI-2, SI-3, SI-39 |
+| 3 | A malicious map or peer cannot get you banned by modifying your game | **Linux:** the game runs in the gamebox, where the online install is not mounted and the copy is read-only (§3.2). **Windows:** only in contained mode (§8.2). Otherwise this is a residual risk, shown at install and when a session starts | SI-34 | SI-34 | — |
+| 4 | A malicious map cannot read your files or control your desktop | **Linux:** the gamebox shows the game only its copy, an ephemeral prefix, a render node, a restricted audio socket and gamescope's own display server (§3.2). **Windows:** contained mode only (§8.2) | SI-14, SI-34, SI-35, SI-36 | SI-34, SI-36 | — |
+| 5 | Peers can reach only the Rocket League process Kickoff started | Linux: peer traffic exists only inside the gamebox network namespace. Windows: a WFP permit bound to one game process, one user and one image, held by a service handle and removed when that process exits (§3.3). The wire carries UDP tuples, never Ethernet or IP (§3.1) | SI-11, SI-12 | SI-11, SI-12, SI-40 | SI-11, SI-12, SI-40 |
+| 6 | A crash or game update never leaves anything to repair | Nothing is written to the online install. A new game build gets a new copy generation (§5.3) | SI-4, SI-5 | SI-4, SI-5 | SI-4, SI-5 |
+| 7 | No accounts beyond your game account | Invites are https links that open Kickoff, or offer the download if it is missing (§4.2) | SI-20 | SI-20 | SI-20 |
+| 8 | Smallest privileged surface | Linux: no root at install or at run time. Windows: solo play needs no driver or service; multiplayer adds one SYSTEM service that holds the tap and WFP filters and never touches a file (§3.3) | SI-13 | SI-6, SI-8 | SI-6, SI-8 |
+| 9 | Lower relay dependence | Direct QUIC paths after admission, with an egress guard on every transport send (§3.4) | SI-29, SI-31 | SI-29, SI-31 | SI-29, SI-31 |
+| 10 | Maps reach friends as the exact bytes the host has | Content addressing and whole-file BLAKE3, computed by kickoffd itself (§5.2) | SI-5, SI-37 | SI-5, SI-37 | SI-5, SI-37 |
+| 11 | Game traffic never waits behind a map download | QUIC datagrams for LAN traffic; transfers yield to the host's own measured game state (§3.4) | SI-23 | SI-23 | SI-23 |
+| 12 | A compromised download host cannot fake the first install, push an update or silently freeze updates | Authenticode on Windows and independent package pins on Linux for the first install; an offline-signed release record with root epochs, sequence and expiry after that (§8.4) | SI-24, SI-25, SI-26 | SI-24, SI-25, SI-26 | SI-24, SI-25, SI-26 |
+| 13 | Open, reproducible and reviewed | Approved inputs, two isolated builders, signing bound to provenance and test evidence (§8.4) | SI-26, SI-27, SI-33 | SI-26, SI-27, SI-33 | SI-26, SI-27, SI-33 |
+| 14 | Diagnostics carry no secrets | Allowlisted schema; secrets are a type that cannot be printed; no core dumps (§6.4) | SI-30 | SI-30 | SI-30 |
+| 15 | A built-in map browser that credits authors | A signed catalog of map pages; downloads come from the author's own site, on your machine (§5.7) | SI-29 | SI-29 | SI-29 |
+
 
 ### 1.3 First-run journeys
 
@@ -116,7 +119,7 @@ Some earlier choices make steps harder, and each is still open:
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-- **kickoffd** owns sessions, networking, the library and the copies, and runs as the user. On Linux its startup order is fixed (SI-36):
+- **kickoffd** owns sessions, networking, the library and the copies, and runs as the user. Linux separates its local listener facade from its hardened worker. The facade authenticates callers without reading their payload and transfers their sockets through a private inherited control pair. Kernel peer credentials continue to identify the listener creator, so clients can verify the facade's executable while the worker remains nondumpable. Facade death closes transferred channels; worker death terminates the facade. Both suppress core dumps through the distinct policies in §6.4. The worker's startup order is fixed (SI-36):
   1. Close every descriptor except the supervisor socketpair, checked to be an `AF_UNIX` stream pair; reopen stdio on `/dev/null`.
   2. Start `kickoff-gamebox`, which needs mounts and namespaces that Landlock forbids.
   3. Apply Landlock, requiring ABI 6 or later (Linux 6.12 or later; ABI 10 on the reference machine, V `landlock_create_ruleset` version query). Every filesystem right of the running ABI is handled, including truncate and device ioctl. Writes are allowed only beneath `~/.local/share/kickoff` and `$XDG_RUNTIME_DIR/kickoff`. TCP connect is allowed to port 443 only, and abstract Unix sockets and signals are scoped. Below ABI 6, kickoffd refuses to start and `kickoff doctor` explains why.
@@ -134,8 +137,8 @@ Some earlier choices make steps harder, and each is still open:
 
 ```
 kickoff/crates/
-  wire/     postcard messages, LAN header, tickets, L2 frame codec   (pure, forbid(unsafe))
-  vlan/     game-facing LAN: filter + adapters NsTap, WinTap, Mem
+  wire/     postcard messages, LAN header, tickets, confined secret transmission (forbid(unsafe))
+  vlan/     game-facing L2 codec, filter + adapters NsTap, WinTap, Mem
   net/      iroh door and session endpoints, fragmentation, egress policy and send guard
   session/  admission (identity × generation), approvals, roster, pump, budgets
   store/    the only module that writes or opens game-reachable files
@@ -143,15 +146,26 @@ kickoff/crates/
   maps/     library, transfer, catalog, sources (decoding goes through parse)
   game/     install discovery (read-only), copy generations, gamebox + display sandbox launch, state
   ipc/      local channels: peer authentication, versioned role-scoped commands
+  local/    shared Linux kernel authentication and ancillary-refusing transport
   secret/   Secret<T>, process hardening, diagnostics schema
-vendor/iroh-1.3.0/   upstream source plus one reviewed patch: the send-guard hook (§3.4)
+vendor/iroh-1.3.0/   upstream plus one audited send-guard patch (§3.4)
+vendor/noq-1.3.0/    upstream plus one audited stable send-context patch (§3.4)
 bins/  kickoffd  kickoff  kickoff-parse  kickoff-gamebox  kickoff-svc
 ui/  site/ (landing page)  packaging/  tests/
 ```
 
+Wire keeps secret serialization and each borrowed transport write within its
+designated consumer (§6.4). Public byte encoders accept only nonsecret message
+types. Local transmission requires a fixed installed-peer capability; a Join
+transmission verifies its immutable issuing door before opening a QUIC stream.
+
 ### 2.3 Module interfaces
 
-Each module is deep: a small interface over the hard part. Each seam has at least two adapters. Draft 3 changes the `net`, `session`, `store`, `game` and `parse` interfaces only where a finding required it; `wire` and `vlan` are unchanged.
+Each module is deep: a small interface over the hard part. Adapter seams have
+at least two adapters. The sketches below describe module responsibilities;
+the crate READMEs record their implemented M2 interfaces. Wire's designated
+transmission owner keeps serialized secrets within the §6.4 consumer, while
+VLAN generation resets are coordinated by session's admission owner.
 
 **`vlan`** hides the frame codec (ARP answered locally, MAC synthesis, IPv4/UDP build and checksums), the filter and adapter I/O.
 ```rust
@@ -277,7 +291,7 @@ Every local channel works the same way:
 
 1. **Exclusive endpoint in a private place.** Linux: `$XDG_RUNTIME_DIR/kickoff/` is created with mode 0700 and refused if it already exists with another owner or mode; the socket is created with `bind` (no unlink-and-retry), mode 0600. Windows: the daemon pipe and the service pipe use `FILE_FLAG_FIRST_PIPE_INSTANCE` and `PIPE_REJECT_REMOTE_CLIENTS`. The DACL grants clients read and write but not `FILE_CREATE_PIPE_INSTANCE`. A name collision fails closed.
 2. **Kernel-authenticated caller.** Linux: `SO_PEERCRED` uid equals ours, and `SO_PEERPIDFD` gives a pidfd for the peer. The peer's `exe` is read through `/proc/<pid>` and must be an installed Kickoff binary; afterwards `pidfd_send_signal(pidfd, 0)` must still succeed, so a recycled PID cannot pass. Windows: `GetNamedPipeClientProcessId`, then the token must have the same user SID and logon session, medium integrity or higher, and no AppContainer; the image path must be under the protected install directory.
-3. **Authenticated server.** The client checks the server the same way: kickoffd's uid and exe, or kickoff-svc's SYSTEM token and image path.
+3. **Authenticated server.** The client checks the server the same way: the Linux kickoffd listener facade's uid, executable and live pidfd, or kickoff-svc's SYSTEM token and image path. The Linux facade hands an accepted socket, plus a bounded connection lease, to its own hardened child through an unnamed inherited stream pair. That private capability channel accepts only the exact descriptor count and types its protocol requires; it is never reachable through the public endpoint. The worker authenticates the facade and rechecks the client from the transferred socket's kernel credentials before processing its version handshake. The facade never reads client payload, and its lifetime stays pinned while any transferred channel exists.
 4. **Role-scoped, versioned commands.** Each role (CLI, UI main window, overlay, gamebox supervisor, service client) has a fixed postcard enum. No command carries a path, URL, shell string or launch command. A version handshake opens every channel; a mismatch closes it before any side effect. Client channels accept no ancillary data: a message carrying `SCM_RIGHTS` or credentials, or truncated control data (`MSG_CTRUNC`), closes the channel after any received descriptors are closed.
 5. **Leases are connections.** A Windows LAN lease lives exactly as long as its pipe connection and its bound game process (§3.3).
 
@@ -446,7 +460,7 @@ Rejected: Wintun (L3 only; its licence covers its API only, V), ovpn-dco-win (V)
 
 ### 3.4 Transport: iroh 1.3.0
 
-- Pinned `iroh = "=1.3.0"` and `iroh-relay = "=1.3.0"`, vendored with a committed `Cargo.lock` and built `--locked --offline` (PRIV-23). The vendored iroh carries exactly one patch, the send-guard hook below. A CI check compares the vendor tree to the upstream crate hash plus that patch.
+- Pinned `iroh = "=1.3.0"` and `iroh-relay = "=1.3.0"`, vendored with a committed `Cargo.lock` and built `--locked --offline` (PRIV-23). The vendored iroh carries one send-guard patch. Its noq 1.3.0 dependency carries one patch assigning a stable send context to each connection before its driver starts, preserving that context across socket rebinds. A CI check compares each vendor tree to its pinned upstream archive plus the audited patch. The dependency gate also checks these versions as registry packages because cargo deny omits path packages from RustSec and yanked checks.
 - **Door endpoint**: the persistent per-device identity. It is relay-only (`clear_ip_transports`, V iroh builder) and accepts only `kickoff/join/1`. It runs only while hosting, or while "friends may join" is on.
 - **Session endpoint**: a fresh key for each session.
   - `SessionBind::Direct(addr)` binds to the default-route interface address. With a specific bind, iroh reports only that address plus QAD's public address as candidates (V, `socket.rs:1922-1956`). The endpoint is recreated when the default route changes.
@@ -462,13 +476,13 @@ Rejected: Wintun (L3 only; its licence covers its API only, V), ovpn-dco-win (V)
   - Relays come only from the compiled `RelayMap`. A relay URL in a ticket is used only if it equals a map entry; otherwise it is ignored.
   - Direct addresses from tickets are used only if global, or inside a subnet directly connected to this host; loopback, link-local, 100.64/10, 10.75/16 and multicast are never used.
   - Importer and catalog HTTP follows §5.7. Relay credentials stay URL-scoped (V, iroh `actor.rs:1344`).
-- **Send guard (R2-10, PRIV-25, NET-15).** iroh chooses some destinations itself. QUIC NAT traversal sends probes to candidate addresses that the remote announces (V, `remote_state.rs:534, 947`), and no application `dial` sees them. iroh 1.3 has no send-path filter. Its custom-transport API is unstable and cannot wrap the IP transport (V, `endpoint.rs:814-827`). The vendored patch therefore calls `SendGuard::admit(dst)` in the IP transport's send path (`socket/transports/ip.rs`, `poll_send`) before the first packet to each destination.
+- **Send guard (R2-10, PRIV-25, NET-15).** iroh chooses some destinations itself. QUIC NAT traversal sends probes to candidate addresses that the remote announces (V, `remote_state.rs:534, 947`), and no application `dial` sees them. iroh 1.3 has no send-path filter. Its custom-transport API is unstable and cannot wrap the IP transport (V, `endpoint.rs:814-827`). The vendored patch therefore calls `SendGuard::admit(context, dst)` in the IP transport's send path (`socket/transports/ip.rs`, `poll_send`) before every packet. The context reaches this hook on ticket sends, NAT probes, path migration and QAD. Outbound peer contexts bind to their expected remote identity before the first send; inbound contexts bind to the verified identity before iroh registers candidate paths. QAD contexts may send only to their original relay-map destination. An unregistered transport refuses every send.
   - A new destination passes only if all of these hold:
     - it is global unicast or inside a directly connected subnet;
     - it is not this host's own address, the default gateway, a configured DNS resolver, loopback, link-local, 100.64/10, 10.75/16, multicast or broadcast;
     - its port is 1024 or higher and not on the §3.1 denylist;
     - the remote has fewer than 8 destinations that are not yet validated, and is under 4 new destinations per second.
-  - Approved destinations are cached per connection, so the hot path costs one hash lookup. Denied packets are dropped and counted. The policy is recomputed on route changes.
+  - Probe budgets belong to remote identities across concurrent connections and reconnects. Approved destinations are cached per connection context, so another connection cannot inherit the approval. A connection shutdown removes its approvals; its remote budget remains until expiry, preventing churn from resetting the rate. The hot path costs one cache lookup. Denied packets are dropped and counted. The policy is recomputed on route changes.
   - The guard runs where packets leave, so ticket addresses, NAT-traversal candidates, path migration and any future iroh path source all pass through it.
   - Residual risk: an admitted malicious peer can make your client send a bounded number of encrypted QUIC probes to UDP ports it chooses, on the internet or on your LAN. It cannot choose their content.
 - **Rebuttal conceded (NET-15).** Draft 2 said altered ticket addresses "can only break the dial". That was false. Dials have network effects before authentication. The send guard and the destination policy bound those effects, and §4.2 states what a ticket's authenticity rests on.
@@ -711,7 +725,7 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 | Control | 64 KiB per message, 32 messages/s, 256 KiB/s; streams 4 bidi, opened at most 4/s |
 | Map requests | 1 in flight per peer, 10 per minute |
 | Host fan-out | host egress at most 16 MB/s overall, charged per emitted copy; discovery broadcasts 10/s per sender, payload ≤ 1252 bytes |
-| Egress guard | at most 8 unvalidated destinations per remote, 4 new per second |
+| Egress guard | at most 8 unvalidated destinations per remote, 4 new per second; 256 unknown connection contexts, 16 reserved for expected or admitted peers, 16 separate QAD contexts |
 | Parse jobs | 2 concurrent, queue of 8; per job: memory cgroup or Job limit, CPU time, input and output byte caps counted by kickoffd, deadline |
 | Disk | before a transfer, reserve the size plus 64 MiB; before a refresh, reserve the files that cannot be shared plus 1 GiB; keep at least 5 GiB free; library quota 20 GiB with least-recently-used eviction of unpinned objects |
 | Game (Linux) | cgroup `memory.max` 12 GiB including the 4 GiB tmpfs prefix; `pids.max` 512; `RLIMIT_FSIZE` 4 GiB. Disk I/O bandwidth is not limited (the `io` controller is not delegated, V) |
@@ -720,7 +734,17 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 ### 6.4 Secrets and diagnostics
 
 - Keys, tickets, exchange codes, Epic refresh tokens and relay vouchers exist only as `secret::Secret<T>`. It implements neither `Debug`, `Display`, `Serialize` nor `Clone`, and it zeroizes on drop; a compile-fail test proves the missing traits. Only the single consumer of each secret can expose it, through a closure.
-- `secret::harden_process()` runs first in kickoffd and kickoff-svc: `PR_SET_DUMPABLE 0` and `RLIMIT_CORE 0` on Linux, and on Windows Windows Error Reporting is excluded for the process and the minidump callback is disabled. The game inherits `RLIMIT_CORE 0`; systemd-coredump honours the crashing process's limit (L; M0 crashes a probe holding a canary and checks `coredumpctl`).
+- `secret::harden_process()` runs before any secret exists in the Linux kickoffd worker: `PR_SET_DUMPABLE 0` and both `RLIMIT_CORE` limits set to 0. Windows excludes Windows Error Reporting for the process and disables the minidump callback. Linux's authentication facade remains inspectable so clients can verify its executable, holds no secret payload, and sets both core limits to 1, or to 0 when it inherits a hard limit of 0, which it cannot raise. Linux rejects 1 before invoking a piped core handler, and both values are below the minimum ELF core size for a file handler. A socket handler (`@`) ignores every core limit, and while it is down or its queue is full a crash is not dumped, so a passing probe would prove nothing and a later facade crash could dump: Kickoff refuses `@` patterns, and an unreadable `core_pattern`, before probing. The worker is launched with stdin on its control pair and stdout and stderr on `/dev/null`, and closes every other descriptor at its own entry, so none that another facade thread opens during the spawn survives (SI-36). It must never change credentials or exec after hardening, since either resets "dumpable" to `fs.suid_dumpable`. It re-checks that it is still not dumpable before reading each client's bytes and before each request, and refuses otherwise; a reset while a read is already pending is not caught, so that prohibition stays essential. A clean, disposable startup child must crash without a kernel-reported core dump, and without leaving a file in its private working directory, before the facade opens its endpoint. The facade spawns it with null stdio, only its marker in the environment, and every inherited descriptor closed, so descriptors a launcher leaks neither reach it nor block startup. Failed or unavailable verification refuses startup, and a dump refuses it by name (`CoreDumpsEnabled`). A limit of 0 alone does **not** suppress piped handlers. By host configuration:
+
+  | Host crash handling | Worker (holds secrets) | Facade | Kickoff |
+  |---|---|---|---|
+  | File pattern (`core`, an absolute path) | not dumpable: no dump | limit below the ELF minimum: no dump | starts |
+  | `\|` program (systemd-coredump, apport, abrt), whatever its storage settings | no dump | limit 1: the handler never runs | starts |
+  | `\|` program with an inherited hard core limit of 0 | no dump | limit 0 would be piped | refuses before the probe, so no handler sees a crash |
+  | `@` socket handler (any limit) | no dump | every limit is ignored, and an unavailable handler hides that | refuses before the probe |
+  | `core_pattern` unreadable | no dump | cannot be decided | refuses before the probe |
+  | Any `fs.suid_dumpable` | an explicit `PR_SET_DUMPABLE 0` is reset only by an exec or a credential change; the worker makes neither after hardening and refuses clients if it finds itself dumpable | must be dumpable (1) | an installed set-ID, file-capability or unreadable executable refuses, since clients could not verify it either |
+ The game and launcher helpers require a separately verified suppression policy across exec; M0 crashes a canary probe and checks both the kernel wait status and `coredumpctl`. No core-handler setting on the host is changed. See the [kernel suppression paths](https://code.googlesource.com/linux/torvalds/linux/+/18ded910b589839e38a51623a179837ab4cc3789/fs/coredump.c).
 - **Legendary authentication broker (Linux, R2-15).** It runs legendary's `launch Sugar --dry-run` with a fixed argv and a scrubbed environment, only while no launcher process runs and legendary's lock is free. It reads stdout through a pipe straight into a `Secret`, and sends stderr to `/dev/null`, never to a log. Legendary may refresh its stored session first (upstream calls login before the dry-run branch; L for the installed version). That write to legendary's `user.json` is the one launcher-state change Kickoff causes; SI-1 states it and its test bounds it. Kickoff's own Epic sign-in, the alternative to the broker, removes it at the cost of a second login and a second stored refresh token. M0 runs the broker against fake expired credentials before any real account is used.
 - The exchange code goes from the broker straight into the game's argv, never to a file. Each launch argument must match an allowlist (`-AUTH_LOGIN=`, `-AUTH_PASSWORD=`, `-AUTH_TYPE=exchangecode`, `-epicapp=Sugar`, `-epicenv=Prod`, `-EpicPortal`, `-epicusername=`, `-epicuserid=`, `-epiclocale=`, `-epicsandboxid=`); anything else refuses the launch. The code is one-time and consumed at login. It is still visible in the game's argv to processes of the same user, which is outside the boundary.
 - Diagnostics (`kickoff doctor --export`) are built from an allowlisted schema of counters, states, versions and path types. They never contain raw logs, argv, launcher output, tickets or memory dumps. The export is previewed before it is written. Pattern redaction remains only as a second layer.
@@ -762,7 +786,7 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 
 | Metric | Budget | Measured how |
 |---|---|---|
-| Added one-way latency, game socket to peer game socket, excluding the network path | p50 ≤ 100 µs, p99 ≤ 500 µs | CI: two in-process nodes over `Mem`, 10k datagrams. Baseline iroh datagram RTT p50 32-35 µs (V) |
+| Added one-way latency, game socket to peer game socket, excluding the network path | p50 ≤ 100 µs, p99 ≤ 500 µs | Two in-process nodes over `Mem`, 10k datagrams; asserted exactly by the gate on the reference machine before every merge and release, and at four times the budget on hosted CI runners (docs/development.md). Baseline iroh datagram RTT p50 32-35 µs (V) |
 | Tap adapter cost (Linux NsTap, Windows WinTap) | ≤ 20 µs per frame each way | netns bench; VM bench |
 | Added RTT on a real direct path | ≤ 1 ms p99 above raw UDP | netns with `tc netem delay 30ms` |
 | Hot path: codec, filter, generation check | ≤ 2 µs per datagram | criterion |
@@ -815,9 +839,10 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
   - the frontend lockfile through `osv-scanner`;
   - pinned NSIS and WebView2 bootstrapper versions with recorded hashes, and an Authenticode check of the bootstrapper;
   - a watch of tap-windows6 advisories;
-  - the vendored-iroh diff check (§3.4);
+  - the vendored iroh and noq diff checks and registry advisory checks (§3.4);
   - the Windows import audit (§3.3).
-- **Response deadlines**: critical advisories fixed or mitigated within 7 days, high within 30. Exceptions are entries in `deny.toml` with an expiry date that CI enforces; none lasts more than 90 days.
+- **Response deadlines**: critical advisories fixed or mitigated within 7 days, high within 30. Exceptions are dated entries in `advisory-exceptions.toml`, used to generate
+  `deny.toml` ignores after both advisory gates validate them; none lasts more than 90 days.
 - Third-party notices: MIT and Apache crates, iroh's `LICENSE-BSD3`, and tap-windows6 (GPLv2) shipped byte-identical with COPYING and its source tarball, as a separate program aggregated with Kickoff (GPL-3.0).
 
 ### 8.4 Release trust, distribution and updates

@@ -210,9 +210,10 @@ M2's scope is unchanged: `wire`, `vlan::Mem`, the `net` door and session endpoin
 2. **No ancillary data on client channels:** a message with `SCM_RIGHTS`, credentials or `MSG_CTRUNC` closes the channel after closing any received descriptors.
 3. **Role enums:** the UI main-window role gains `Decide { approval: ApprovalId, allow: bool }`, used only by the native dialog path. The overlay role does not get it.
 4. **Tests (SI-7):** PID-recycle and ancillary-data cases, plus `mutant-si7-pid-not-pidfd` and `mutant-si7-accept-ancillary`.
+5. **Hardening integration:** Linux denies executable inspection of a nondumpable peer. An inspectable, secret-free listener facade therefore authenticates callers and transfers untouched sockets over its private inherited control pair to the nondumpable worker. Clients verify the kernel's listener identity; the worker pins the facade's lifetime and rechecks callers. Private descriptor capabilities have exact counts and types, a live connection cap and no public ingress. The real installed daemon modes and a ticket round-trip test cover this composition, alongside control, descriptor, lifetime and budget mutants.
 
 **`secret`:**
-1. **Interface:** `Secret<T>` loses `Clone`, if it has it, and zeroizes on drop. A new function `secret::harden_process()` sets `PR_SET_DUMPABLE 0` and `RLIMIT_CORE 0`; kickoffd calls it first.
+1. **Interface:** `Secret<T>` loses `Clone`, if it has it, and zeroizes on drop. `secret::harden_process()` sets `PR_SET_DUMPABLE 0` and `RLIMIT_CORE 0` in the kickoffd worker before secrets exist. The inspectable facade uses both core limits set to 1 and a real startup crash probe, because 0 alone does not suppress a Linux piped core handler. No host core-handler configuration changes, and failed suppression verification refuses startup. Design §6.4 records the kernel mechanism.
 2. **Tests (SI-30):**
    - the compile-fail test adds `Clone`;
    - a crash test: a child holding a canary crashes, and no core file or coredumpctl entry exists;

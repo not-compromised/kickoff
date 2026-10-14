@@ -1,0 +1,55 @@
+name: M2 checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install namespace test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes uidmap
+          if ! awk -F: -v user="$(id -un)" '$1 == user { found=1 } END { exit !found }' /etc/subuid; then
+            sudo usermod --add-subuids 1000000-1065535 --add-subgids 1000000-1065535 "$(id -un)"
+          fi
+          # This disposable runner must exercise the real second-uid and PID-reuse tests.
+          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --map-root-user --pid --fork --mount-proc true
+          unshare --map-auto --setuid 0 --setgid 0 true
+      - name: Install pinned Rust and scanner
+        run: |
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Run the proving gate
+        env:
+          # Shared runners measure several times slower than the reference
+          # machine, so the release latency tests here assert 4x the §7
+          # budgets. The exact budgets are asserted by scripts/check.sh on the
+          # reference machine, the gate for every merge and release
+          # (docs/development.md); it refuses this variable outside Actions.
+          KICKOFF_LATENCY_RUNNER: hosted
+        run: scripts/check.sh

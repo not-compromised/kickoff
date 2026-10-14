@@ -1,0 +1,20 @@
+[package]
+name = "kickoffd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kickoff-secret.workspace = true
+kickoff-ipc.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "macros", "sync"] }
+
+
+[dev-dependencies]
+kickoff-wire.workspace = true
+iroh-base.workspace = true

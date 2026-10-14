@@ -1,0 +1,14 @@
+[package]
+name = "kickoff-budget"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
+
+[lints]
+workspace = true
+
+[features]
+mutant-si23-retain-full-credit = []

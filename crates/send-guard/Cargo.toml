@@ -1,0 +1,19 @@
+[package]
+name = "kickoff-send-guard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
+
+[lints]
+workspace = true
+
+# No dependencies: the vendored iroh depends on this crate, so anything here
+# would join iroh's tree too.
+[features]
+mutant-si29-unregistered-sends = []
+mutant-si29-send-context-lost = []
+
+[dependencies]

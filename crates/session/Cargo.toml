@@ -1,0 +1,72 @@
+[package]
+name = "kickoff-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
+
+[lints]
+workspace = true
+
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si18-no-gen-check = []
+mutant-si18-deliver-outside-lock = []
+mutant-si18-two-seats-per-identity = []
+mutant-si18-claimed-session-key = []
+mutant-si18-no-flow-reset = []
+mutant-si18-link-up-any = []
+mutant-si19-trust-overrides-kick = []
+mutant-si19-kick-does-not-revoke = []
+mutant-si21-link-to-link = []
+mutant-si23-over-budget-is-a-drop = []
+mutant-si23-no-hello-deadline = []
+mutant-si23-no-idle-close = []
+mutant-si41-approve-by-peer = []
+mutant-si31-bearer-direct = []
+mutant-si31-bearer-admit-direct = []
+mutant-si31-bearer-guest-direct = []
+mutant-si31-bearer-admitted-ip = []
+mutant-si41-two-bearer-approvals = []
+mutant-si41-survives-peer-change = []
+mutant-si41-no-approval-timeout = []
+mutant-si41-end-keeps-approvals = []
+mutant-si41-join-after-end = []
+mutant-si18-link-after-end = []
+mutant-si18-caller-owned-completion = []
+mutant-si23-no-priority-replies = []
+mutant-si23-pong-deadline-during-write = []
+# Both ingress budgets at once: the link's (net) and the LAN's (vlan) each
+# hold the flooded guest alone.
+mutant-si23-unbudgeted-ingress = [
+    "kickoff-net/mutant-si23-no-datagram-budget",
+    "kickoff-vlan/mutant-si23-no-peer-budget",
+]
+# A bound capability raced by its own invitee is held by spend-once (wire)
+# and by one seat per identity (here); this removes both.
+mutant-si20-reusable-cap-and-seat = [
+    "kickoff-wire/mutant-si20-nonatomic-nonce",
+    "mutant-si18-two-seats-per-identity",
+]
+
+[dependencies]
+kickoff-budget.workspace = true
+iroh-base.workspace = true
+kickoff-wire.workspace = true
+kickoff-vlan.workspace = true
+kickoff-net.workspace = true
+kickoff-secret.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+thiserror.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+iroh-relay = { workspace = true, features = ["test-utils"] }
+kickoff-send-guard.workspace = true
+iroh.workspace = true
+bytes.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }

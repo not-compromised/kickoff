@@ -1,0 +1,4 @@
+# Upstream archives retain their original whitespace. The exact vendor checker
+# verifies every byte against the pinned archives and narrowly reviewed patches.
+vendor/iroh-1.3.0/** -whitespace
+vendor/noq-1.3.0/** -whitespace

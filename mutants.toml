@@ -1,0 +1,611 @@
+# Build mutants (docs/SECURITY-INVARIANTS.md, SI-33). Each [[mutant]] names a
+# cargo feature `mutant-si<N>-<slug>` that compiles one protection out of the
+# package `crate`, and the test function that must FAIL with it enabled and
+# PASS without it. `test_crate` names the package holding that test when it is
+# not `crate`. `cargo run -p kickoff-xtask -- mutants` runs them all, and
+# scripts/check.sh runs that; xtask/tests/si_33_policy.rs checks this file
+# against the invariant table and the workspace.
+#
+# An entry may also be written on one line:
+#   [[mutant]] si = "SI-3", crate = "...", feature = "...", test = "...", note = "..."
+# Strings take \" and \\ escapes only.
+#
+# [[unmutated]]: an SI test that no feature flag can falsify, with the reason.
+# [[pending]]:   a gap in an M2 row that this branch does not close yet; `item`
+#                is a named mutant, `test` or `mutant`. The policy fails once
+#                the gap is gone, so the entry must then be removed.
+
+# SI-33
+
+[[mutant]]
+si = "SI-33"
+crate = "kickoff-xtask"
+feature = "mutant-si33-tests-only"
+test = "si_33_policy_reports_rows_without_tests_or_mutants"
+note = "the policy stops checking that rows have registered mutants"
+[[mutant]] si = "SI-33", crate = "kickoff-xtask", feature = "mutant-si33-no-release-guard-check", test = "si_33_registered_mutants_must_point_at_declared_features_and_real_tests", note = "the policy stops checking that mutant crates use the release guard build script"
+[[unmutated]] test = "si_33_every_m2_row_has_existing_tests_and_registered_mutants", reason = "runs the policy on the real files; the policy's own mutants are proven on fixtures by the other si_33 tests"
+
+# kickoff-wire
+
+[[mutant]] si = "SI-3", crate = "kickoff-wire", feature = "mutant-si3-path-field", test = "si_3_peer_messages_cannot_express_eac_paths_or_launch_options", note = "a HostMsg variant carrying a PathBuf"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-nonatomic-nonce", test = "si_20_capability_admits_at_most_once", note = "redeem leaves the nonce outstanding, so a capability admits again"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-nonatomic-nonce", test = "si_20_replayed_capability_refused", note = "redeem leaves the nonce outstanding, so a capability admits again"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-nonatomic-nonce", test = "si_20_bearer_ticket_admits_once", test_crate = "kickoff-session", note = "redeem leaves the nonce outstanding, so a capability admits again"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-nonatomic-nonce", test = "si_20_one_capability_on_many_connections_admits_once", test_crate = "kickoff-session", note = "redeem leaves the nonce outstanding, so a capability admits again"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-nonatomic-nonce", test = "si_20_replayed_ticket_refused", test_crate = "kickoff-session", note = "redeem leaves the nonce outstanding, so a capability admits again"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-nonatomic-nonce", test = "si_20_declined_prompt_spends_the_ticket", test_crate = "kickoff-session", note = "redeem leaves the nonce outstanding, so a capability admits again"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-bearer-never-expires", test = "si_20_bearer_validity_uses_host_monotonic_clock", note = "bearer invites never expire"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-bearer-never-expires", test = "si_20_expired_bearer_ticket_refused", test_crate = "kickoff-session", note = "bearer invites never expire"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-any-session", test = "si_20_ticket_from_another_session_or_host_process_refused", note = "redeem skips the session id check"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-any-session", test = "si_20_ticket_from_a_previous_host_session_refused", test_crate = "kickoff-session", note = "redeem skips the session id check"
+[[mutant]] si = "SI-20", crate = "kickoff-wire", feature = "mutant-si20-bound-any-requester", test = "si_20_wrong_invitee_refused_and_the_ticket_survives", test_crate = "kickoff-session", note = "a bound capability redeems for any requester"
+[[mutant]] si = "SI-23", crate = "kickoff-wire", feature = "mutant-si23-trust-declared-length", test = "si_23_bounded_vec_refuses_a_declared_length_before_reserving_for_it", note = "BoundedVec reserves the declared length before checking it"
+[[mutant]] si = "SI-23", crate = "kickoff-wire", feature = "mutant-si23-unbounded-lists", test = "si_23_declared_length_beyond_bound_refused_before_allocating", note = "BoundedVec ignores its bound when decoding"
+[[mutant]] si = "SI-23", crate = "kickoff-wire", feature = "mutant-si23-no-message-cap", test = "si_23_oversize_messages_refused_both_ways", note = "encode and decode skip the per-type MAX_LEN"
+[[mutant]] si = "SI-23", crate = "kickoff-wire", feature = "mutant-si23-no-frame-cap", test = "si_23_frame_prefix_checked_before_the_body_is_read", note = "frame_len accepts any announced length"
+[[mutant]] si = "SI-29", crate = "kickoff-wire", feature = "mutant-si29-door-with-ip", test = "si_29_ticket_cannot_carry_direct_address", note = "a door address with direct IPs is encoded (IPs dropped) instead of refused"
+[[mutant]] si = "SI-30", crate = "kickoff-wire", feature = "mutant-si30-cap-debug", test = "si_30_caps_tickets_and_join_requests_cannot_be_printed_cloned_or_serialized", note = "Cap implements Debug"
+[[unmutated]] test = "si_30_ticket_errors_carry_no_input", reason = "WireError variants hold only constants; making one carry input is a type change, not a flag"
+
+# kickoff-vlan
+
+[[mutant]] si = "SI-18", crate = "kickoff-vlan", feature = "mutant-si18-flows-survive-reset", test = "si_18_flows_do_not_survive_a_generation_change", note = "Lan::reset_peer forgets no flows"
+[[mutant]] si = "SI-21", crate = "kickoff-vlan", feature = "mutant-si21-star-open", test = "si_21_a_guest_lan_reaches_only_the_host", note = "a guest's LAN accepts every slot, not only the host's"
+[[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-no-peer-budget", test = "si_23_a_flooding_peer_is_capped_and_the_others_get_through", note = "no per-peer packet or byte budget on delivery"
+[[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-no-byte-budget", test = "si_23_a_peer_is_capped_in_bytes", note = "the per-peer byte bucket is never charged"
+[[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-filter-before-charge", test = "si_23_forbidden_attempts_pay_the_budget", note = "port and flow checks run before the budget is charged"
+[[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-unbounded-game-queue", test = "si_23_the_game_queue_is_bounded", note = "the game queue holds 2^20 frames instead of 256"
+[[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-no-broadcast-budget", test = "si_23_broadcasts_are_rate_limited_per_sender", note = "broadcasts skip their 10/s bucket"
+[[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-flow-table-grows", test = "si_23_the_flow_table_holds_64_per_peer", note = "the flow table holds 128 per peer instead of 64"
+[[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-reset-refills-budget", test = "si_23_a_new_generation_does_not_refill_the_budget", note = "reset_peer also refills the peer's inbound budget"
+
+# kickoff-secret
+
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-no-wipe", test = "si_30_secret_wiped_on_drop", note = "dropping a Secret does not wipe it"
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-secret-debug", test = "si_30_secret_has_no_debug_display_serialize", note = "Secret gets a redacting Debug"
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-secret-clone", test = "si_30_secret_has_no_debug_display_serialize", note = "Secret implements Clone"
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-dumpable", test = "si_30_hardened_process_leaks_no_secret_to_a_core_dump_or_proc_mem", note = "harden_process leaves the process dumpable (RLIMIT_CORE is still 0)"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-world-readable", test = "si_22_identity_key_created_0600_in_a_0700_dir", note = "the state directory is created 0755 and the key file 0644"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-world-readable", test = "si_22_another_user_cannot_read_the_identity_key", note = "the state directory is created 0755 and the key file 0644"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-dir-unchecked", test = "si_22_state_dir_with_wrong_mode_type_or_link_refused", note = "an existing state directory is followed and accepted whatever its type, owner or mode"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-file-unchecked", test = "si_22_identity_key_with_wrong_mode_type_or_link_refused", note = "the key file is followed and read whatever its type, owner or mode"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-replace-damaged", test = "si_22_damaged_identity_file_is_refused_not_replaced", note = "a damaged key file is replaced by a new identity"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-reset-keeps-trust", test = "si_22_reset_revokes_every_trust_entry_for_the_old_key", note = "reset replaces the key without revoking the old key's trust entries"
+[[unmutated]] test = "si_30_diagnostics_render_only_schema_keys_and_typed_values", reason = "every diag field is a closed enum or a number; letting one carry text is a type change, not a flag"
+
+# kickoff-ipc
+
+[[mutant]] si = "SI-3", crate = "kickoff-ipc", feature = "mutant-si3-ticket-text-any", test = "si_3_ticket_text_cannot_hold_path_url_or_option", note = "TicketText accepts any bytes, not only letters and digits"
+[[mutant]] si = "SI-3", crate = "kickoff-ipc", feature = "mutant-si3-ticket-text-any", test = "si_3_path_shaped_join_on_the_wire_never_reaches_the_daemon", note = "TicketText accepts any bytes, not only letters and digits"
+[[unmutated]] test = "si_3_no_command_carries_a_path_url_eac_mode_or_launch_args", reason = "an exhaustive match classifies every command field; a variant added behind a flag stops the test compiling, which is its proof"
+[[mutant]] si = "SI-7", crate = "kickoff-local", test_crate = "kickoff-ipc", feature = "mutant-si7-no-uid-check", test = "si_7_caller_with_another_uid_refused", note = "Trust::check skips the SO_PEERCRED uid comparison"
+[[mutant]] si = "SI-7", crate = "kickoff-local", test_crate = "kickoff-ipc", feature = "mutant-si7-no-uid-check", test = "si_7_second_uid_refused", note = "Trust::check skips the SO_PEERCRED uid comparison"
+[[mutant]] si = "SI-7", crate = "kickoff-local", test_crate = "kickoff-ipc", feature = "mutant-si7-no-exe-check", test = "si_7_caller_running_another_executable_refused", note = "Trust::check skips the executable comparison"
+[[mutant]] si = "SI-7", crate = "kickoff-local", test_crate = "kickoff-ipc", feature = "mutant-si7-no-exe-check", test = "si_7_client_refuses_fake_server_before_sending", note = "Trust::check skips the executable comparison"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-base-unchecked", test = "si_7_runtime_base_must_be_private_absolute_and_real", note = "a runtime base with group or other access is accepted"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-dir-mode-unchecked", test = "si_7_runtime_dir_with_wrong_mode_type_or_link_refused", note = "an existing kickoff directory is accepted whatever its mode"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-socket-mode", test = "si_7_socket_created_0600_and_removed_on_drop", note = "the socket keeps the umask's mode instead of 0600"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-reclaim-any", test = "si_7_squatted_socket_name_refused_without_touching_it", note = "bind removes whatever holds the socket name"
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-client-any-socket", test = "si_7_client_refuses_a_socket_name_that_is_not_a_socket", note = "connect skips the socket type and owner check"
+[[mutant]] si = "SI-7", crate = "kickoff-local", test_crate = "kickoff-ipc", feature = "mutant-si7-pid-not-pidfd", test = "si_7_recycled_pid_refused", note = "the caller check reads /proc/<pid>/exe without pinning the process through SO_PEERPIDFD, so a recycled pid passes"
+[[mutant]] si = "SI-7", crate = "kickoff-local", test_crate = "kickoff-ipc", feature = "mutant-si7-accept-ancillary", test = "si_7_descriptors_from_a_caller_close_the_channel_and_are_closed", note = "a read that came with control data (MSG_CTRUNC) is accepted"
+[[mutant]] si = "SI-7", crate = "kickoff-local", feature = "mutant-si7-accept-ancillary", test = "si_7_descriptors_close_the_channel_and_are_closed", note = "a read that came with control data (MSG_CTRUNC) is accepted"
+[[mutant]] si = "SI-7", crate = "kickoff-local", feature = "mutant-si7-accept-ancillary", test = "si_7_credentials_close_the_channel", note = "a read that came with control data (MSG_CTRUNC) is accepted"
+[[unmutated]] test = "si_7_runtime_dir_created_private_and_reused", reason = "the directory is created 0700 and re-checked on open; with the usual umask no single flag changes the observed mode"
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-skip-version", test = "si_10_version_mismatch_refused_before_any_command", note = "the server's hello check ignores the version"
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-client-skips-version", test = "si_10_client_refuses_server_of_other_version", note = "the client's welcome check ignores the version"
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-any-role", test = "si_10_roles_not_served_here_refused", note = "the server accepts every known role, including gamebox and service"
+[[mutant]] si = "SI-23", crate = "kickoff-ipc", feature = "mutant-si23-ipc-frame-unbounded", test = "si_23_oversize_header_refused_before_body", note = "a frame header is not checked against the channel maximum"
+[[mutant]] si = "SI-23", crate = "kickoff-ipc", feature = "mutant-si23-ipc-frame-unbounded", test = "si_23_oversize_frame_closes_channel_before_body", note = "a frame header is not checked against the channel maximum"
+[[mutant]] si = "SI-23", crate = "kickoff-ipc", feature = "mutant-si23-ipc-no-frame-deadline", test = "si_23_stalled_frame_closes_channel", note = "a started frame may take a day instead of 1 s"
+[[mutant]] si = "SI-23", crate = "kickoff-ipc", feature = "mutant-si23-ipc-no-rate-limit", test = "si_23_request_rate_budget_closes_channel", note = "no per-channel request rate"
+[[mutant]] si = "SI-23", crate = "kickoff-ipc", feature = "mutant-si23-ipc-unbounded-channels", test = "si_23_channel_slots_are_bounded", note = "channel slots are unlimited instead of 16"
+[[mutant]] si = "SI-30", crate = "kickoff-ipc", feature = "mutant-si30-ticket-text-debug", test = "si_30_every_ipc_type_holding_a_ticket_redacts_it", note = "TicketText's Debug prints the ticket"
+[[mutant]] si = "SI-30", crate = "kickoff-ipc", feature = "mutant-si30-ticket-text-debug", test = "si_30_ticket_crosses_the_socket_without_being_printed", note = "TicketText's Debug prints the ticket"
+[[mutant]] si = "SI-30", crate = "kickoff-ipc", feature = "mutant-si30-ticket-text-debug", test = "si_30_invite_reply_is_redacted_on_the_client", note = "TicketText's Debug prints the ticket"
+[[unmutated]] test = "si_30_leak_check_sees_a_leak", reason = "a self-test of the canary scanner the other SI-30 tests use; it guards the tests, not a protection"
+[[unmutated]] test = "si_30_rejected_ticket_error_is_silent", reason = "IpcError variants hold only constants; making one carry input is a type change, not a flag"
+
+# kickoff-net
+
+# SI-18: an unknown or stale session key is held back in layers; each
+# layer has its own mutant and a test that drives that layer alone.
+[[mutant]] si = "SI-18", crate = "kickoff-net", feature = "mutant-si18-hook-admits-unknown", test = "si_18_handshake_hook_rejects_an_unadmitted_key", note = "layer 1: the handshake hook accepts keys outside the admitted set"
+[[mutant]] si = "SI-18", crate = "kickoff-net", feature = "mutant-si18-no-establish-recheck", test = "si_18_admission_is_rechecked_after_the_handshake", note = "layer 2: establish trusts the hook's record instead of re-reading the admitted set"
+[[mutant]] si = "SI-18", crate = "kickoff-net", feature = "mutant-si18-link-accept-unchecked", test = "si_18_link_refused_when_its_generation_moved_before_the_stream", note = "layer 3: Link::accept skips the generation check"
+[[mutant]] si = "SI-18", crate = "kickoff-net", feature = "mutant-si18-no-datagram-gen-check", test = "si_18_each_datagram_rechecks_the_generation", note = "layer 4: datagrams, sends and blob streams skip the generation check"
+[[mutant]] si = "SI-18", crate = "kickoff-net", feature = "mutant-si18-set-admitted-keeps-stale", test = "si_18_republished_generation_closes_an_idle_link", note = "layer 5: set_admitted closes no connection whose entry left or changed"
+[[mutant]] si = "SI-18", crate = "kickoff-net", feature = "mutant-si18-set-admitted-keeps-stale", test = "si_19_removed_key_cannot_reconnect", note = "layer 5: set_admitted closes no connection whose entry left or changed"
+[[mutant]] si = "SI-18", crate = "kickoff-net", feature = "mutant-si18-duplicate-connections", test = "si_18_one_live_connection_per_session_key", note = "the hook accepts a second live connection from one session key"
+[[unmutated]] test = "si_18_unknown_session_key_rejected_on_session_alpn", reason = "layered: the hook, the post-handshake re-check and the link check each refuse the key alone; their own tests and mutants are si_18_handshake_hook_rejects_an_unadmitted_key, si_18_admission_is_rechecked_after_the_handshake, si_18_link_refused_when_its_generation_moved_before_the_stream"
+[[unmutated]] test = "si_18_republished_generation_closes_the_old_link", reason = "layered: set_admitted's close and the per-datagram check each stop the stale link alone; see si_18_republished_generation_closes_an_idle_link and si_18_each_datagram_rechecks_the_generation"
+[[mutant]] si = "SI-21", crate = "kickoff-net", feature = "mutant-si21-guest-serves", test = "si_21_guest_refuses_even_a_key_it_was_told_to_admit", note = "a guest's session endpoint serves the session ALPN like a host's"
+[[unmutated]] test = "si_21_guest_session_endpoint_accepts_nothing", reason = "layered: with the guest's own refusal removed, admission still refuses these unadmitted dialers; the refusal alone is pinned by si_21_guest_refuses_even_a_key_it_was_told_to_admit"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-handshake-deadline", test = "si_23_silent_connection_closed_at_the_handshake_deadline", note = "an accepted connection may wait a day for its control stream instead of 5 s"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-datagram-budget", test = "si_23_datagram_budget_drops_then_disconnects_a_flooding_peer", note = "the link's datagram budget always passes"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-ctl-length-unchecked", test = "si_23_control_length_refused_before_allocation", note = "the control stream allocates whatever length the prefix announces"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-ctl-rate", test = "si_23_control_messages_are_rate_limited", note = "control messages skip their rate and byte budget"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-per-link-reassembly-cap", test = "si_23_one_link_holds_eight_assemblies_and_refuses_the_ninth", note = "one link may hold all 32 assemblies instead of 8"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-global-reassembly-cap", test = "si_23_reassembly_memory_cap_holds_under_a_hostile_fragment_flood", note = "no endpoint-wide cap on assemblies in flight"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-door-no-invalid-limit", test = "si_23_invalid_join_requests_exhaust_only_their_own_identity", note = "the door never stops reading an identity's invalid requests"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-handshake-rate", test = "si_23_handshakes_are_rate_limited_per_source_and_overall", note = "no per-source (8/s) or overall (64/s) handshake rate before TLS"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-handshake-rate", test = "si_23_leaked_endpoint_flood_with_fresh_identities", note = "no per-source (8/s) or overall (64/s) handshake rate before TLS"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-door-no-identity-cap", test = "si_23_door_holds_two_silent_connections_per_identity", note = "one identity may hold any number of connections awaiting a JoinRequest"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-door-no-awaiting-cap", test = "si_23_door_caps_connections_awaiting_a_join_request", note = "no overall cap (16) on connections awaiting a JoinRequest"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-door-no-join-deadline", test = "si_23_door_closes_silent_connections_at_the_join_deadline", note = "the door waits a day for a JoinRequest instead of 5 s"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-scope-any", test = "si_29_egress_keeps_only_compiled_relays_and_scoped_ips", note = "Egress::scope returns peer-supplied addresses unfiltered"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-scope-any", test = "si_29_ticket_destinations_outside_the_policy_are_never_dialed", note = "Egress::scope returns peer-supplied addresses unfiltered"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-no-connect-guard", test = "si_29_connect_guard_refuses_what_scope_would_drop", note = "the before_connect hook accepts every destination"
+# SI-29's send guard: the vendored hook's registration, then each rule of the
+# policy behind it, each with a test that drives that rule alone.
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-no-send-guard", test = "si_29_send_guard_drops_what_iroh_sends_to_a_refused_destination", note = "no guard is registered for the endpoint, so the vendored hook lets every packet out"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-guard-any-range", test = "si_29_send_guard_refuses_forbidden_ranges", note = "the guard skips the address-range check (loopback, link-local, CGNAT, 10.75/16, multicast, broadcast, off-subnet private)"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-guard-ignores-host-view", test = "si_29_send_guard_refuses_own_gateway_and_resolver_addresses", note = "the guard ignores the host's own addresses, gateway and resolvers"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-guard-any-port", test = "si_29_send_guard_refuses_low_and_denylisted_ports", note = "the guard allows ports below 1024 and the denylist"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-guard-no-destination-cap", test = "si_29_send_guard_caps_unvalidated_destinations", note = "no cap on unvalidated destinations (8) or new ones per second (4)"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-guard-keeps-cache", test = "si_29_send_guard_recomputes_on_interface_change", note = "a new view of the host leaves approved destinations approved"
+[[mutant]] si = "SI-31", crate = "kickoff-net", feature = "mutant-si31-publish-all", test = "si_31_published_addresses_never_contain_stripped_ranges", note = "publishable returns every local address"
+[[mutant]] si = "SI-31", crate = "kickoff-net", feature = "mutant-si31-unbound", test = "si_31_leaked_endpoint_shows_only_the_bound_address", note = "the session endpoint binds 0.0.0.0 instead of the interface address"
+[[mutant]] si = "SI-31", crate = "kickoff-net", feature = "mutant-si31-relay-only-binds", test = "si_31_relay_only_endpoint_owns_no_socket_and_publishes_no_address", note = "a relay-only session endpoint keeps an IP transport on 0.0.0.0"
+
+# kickoff-session
+
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-no-gen-check", test = "si_18_removal_waits_for_in_flight_delivery_then_drops_the_rest", note = "the pump delivers without checking the slot's routed generation"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-deliver-outside-lock", test = "si_18_removal_waits_for_in_flight_delivery_then_drops_the_rest", note = "delivery runs after the routing table's read lock is released"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-two-seats-per-identity", test = "si_18_one_seat_per_identity_under_concurrent_joins", note = "a seated identity may join again and take a second seat"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-two-seats-per-identity", test = "si_18_admission_table_invariants_hold_for_any_sequence", note = "a seated identity may join again and take a second seat"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-claimed-session-key", test = "si_18_claimed_session_key_refused_and_its_owner_unharmed", note = "a join may name the host's or another seat's session key"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-no-flow-reset", test = "si_18_reconnect_forgets_the_old_generations_flows", note = "the host never resets the LAN's flows when a slot's generation changes"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-link-up-any", test = "si_18_link_up_needs_the_seat_generation_and_pass", note = "layer 6: link_up makes any occupied slot live, whatever generation, pass or state"
+[[unmutated]] test = "si_18_unknown_session_key_rejected", reason = "layered: net's hook, re-check and link check and the session's link_up each refuse the key alone; each has its own test and mutant"
+[[mutant]] si = "SI-19", crate = "kickoff-session", feature = "mutant-si19-trust-overrides-kick", test = "si_19_kick_overrides_trust_and_every_ticket", note = "a trusted identity's join skips the revocation check"
+[[mutant]] si = "SI-19", crate = "kickoff-session", feature = "mutant-si19-kick-does-not-revoke", test = "si_19_kicked_peer_datagrams_dropped", note = "a kick frees the seat but revokes nothing"
+[[mutant]] si = "SI-21", crate = "kickoff-session", feature = "mutant-si21-link-to-link", test = "si_21_guest_cannot_reach_another_guest", note = "the host forwards a guest's broadcasts to the other guests' links"
+[[mutant]] si = "SI-23", crate = "kickoff-session", feature = "mutant-si23-over-budget-is-a-drop", test = "si_23_peer_far_over_budget_is_disconnected", note = "a link closed as over budget is treated as a drop and keeps its seat"
+[[mutant]] si = "SI-23", crate = "kickoff-session", feature = "mutant-si23-no-hello-deadline", test = "si_23_link_without_hello_closed_at_the_deadline", note = "a link may wait a day for its Hello instead of 2 s"
+[[mutant]] si = "SI-23", crate = "kickoff-session", feature = "mutant-si23-unbudgeted-ingress", test = "si_23_peer_over_budget_is_limited_and_another_keeps_its_latency", note = "both ingress budgets removed: net's link budget and vlan's per-peer budget, each of which holds the flood alone"
+[[mutant]] si = "SI-20", crate = "kickoff-session", feature = "mutant-si20-reusable-cap-and-seat", test = "si_20_bound_capability_raced_by_its_invitee_admits_once", note = "both layers removed: the capability is not spent and a seated identity may take a second seat"
+[[mutant]] si = "SI-23", crate = "kickoff-session", feature = "mutant-si23-no-idle-close", test = "si_23_link_silent_for_15_s_closed", note = "a link that answers no Ping stays open however long it is silent"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-approve-by-peer", test = "si_41_kick_retires_the_approval_and_its_id", note = "draft 2's Approve(id): an approval id is derived from the peer, so an old dialog's answer decides that peer's newest request"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-approve-by-peer", test = "si_41_an_approval_dies_with_its_moment", note = "draft 2's Approve(id): an approval id is derived from the peer, so an old dialog's answer decides that peer's newest request"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-two-bearer-approvals", test = "si_41_second_bearer_join_refused_while_one_is_pending", note = "a second bearer join is not refused while one approval is pending; its approval replaces the first"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-two-bearer-approvals", test = "si_41_one_pending_approval_per_kind", note = "a second bearer join is not refused while one approval is pending; its approval replaces the first"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-survives-peer-change", test = "si_41_kick_retires_the_approval_and_its_id", note = "a kick, eviction or generation bump leaves the peer's approval pending"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-survives-peer-change", test = "si_41_an_approval_dies_with_its_moment", note = "a kick, eviction or generation bump leaves the peer's approval pending"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-no-approval-timeout", test = "si_41_timed_out_approval_authorizes_nothing", note = "approvals never time out"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-no-approval-timeout", test = "si_41_an_approval_dies_with_its_moment", note = "approvals never time out"
+[[mutant]] si = "SI-41", crate = "kickoff-session", feature = "mutant-si41-end-keeps-approvals", test = "si_41_session_end_retires_every_approval", note = "the end of the session leaves pending approvals in place"
+
+
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-no-state-lock", test = "si_22_concurrent_creators_return_the_published_identity", note = "identity transactions do not hold the kernel state lock"
+[[mutant]] si = "SI-22", crate = "kickoff-secret", feature = "mutant-si22-stale-trust-save", test = "si_22_stale_trust_save_cannot_restore_a_reset_identity", note = "a stale trust snapshot overwrites a reset revocation"
+[[mutant]] si = "SI-33", crate = "kickoff-xtask", feature = "mutant-si33-no-scope-check", test = "si_33_linux_m2_refuses_an_invariant_scoped_only_to_windows", note = "platform scope no longer constrains Linux M2 or numbered claims"
+
+[[mutant]] si = "SI-33", crate = "kickoff-xtask", feature = "mutant-si33-no-scope-check", test = "si_33_claim_scope_rejects_windows_same_user_containment_and_missing_mapping", note = "scope and claim mapping validation removed"
+
+[[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-direct", test = "si_31_direct_sessions_refuse_bearer_invites", note = "bearer session privacy no longer requires relay-only endpoints"
+[[unmutated]] test = "si_31_bearer_sessions_carry_game_frames_through_a_real_relay", reason = "positive relay transport and no-IP proof; the mode-removal mutant is pinned by the direct-session rejection test"
+
+[[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-admit-direct", test = "si_31_direct_host_refuses_a_bearer_capability_at_admission", note = "the host admission boundary accepts an untrusted bearer in direct mode"
+[[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-guest-direct", test = "si_31_direct_guests_refuse_bearer_before_requesting_admission", note = "the guest requests bearer admission with an IP transport"
+[[mutant]] si = "SI-31", crate = "kickoff-session", feature = "mutant-si31-bearer-admitted-ip", test = "si_31_bearer_guest_refuses_a_host_advertising_ip_addresses", note = "a bearer guest accepts a direct address from the host"
+[[mutant]] si = "SI-29", crate = "kickoff-send-guard", feature = "mutant-si29-unregistered-sends", test = "si_29_a_registered_bind_answers_through_its_guard_until_dropped", note = "unregistered bind addresses bypass the send guard"
+
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-shared-remote-budget", test = "si_29_each_remote_keeps_its_probe_budget_and_cache", note = "all identities share one probe bucket and destination cache"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-no-pending-cap", test = "si_23_only_sixteen_incoming_handshakes_hold_slots", note = "prehandshake gate allows more than sixteen simultaneous incoming handshakes"
+
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-probe-any-destination", test = "si_29_qad_cannot_choose_another_destination", note = "QAD context may send to destinations other than its relay-map target"
+
+[[mutant]] si = "SI-29", crate = "kickoff-send-guard", feature = "mutant-si29-send-context-lost", test = "si_29_a_registered_bind_answers_through_its_guard_until_dropped", note = "send hook loses the stable connection context"
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-send-context-lost", test = "si_29_transport_carries_distinct_connection_contexts", note = "IP hook loses the real connection token on initial and established sends"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-no-trusted-slots", test = "si_23_guard_preserves_slots_for_expected_or_admitted_peers", note = "unknown identities can consume every guard context and remote budget slot"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-guard-locks-before-connection", test = "si_23_guard_connection_snapshots_do_not_block_packets", note = "forced overlap of real transport packet admission and state-held tracking exposes the inverted send-driver lock order; also retains six-peer packet progress"
+
+[[mutant]]
+si = "SI-10"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si10-control-skips-version"
+test = "si_10_control_ready_version_refused_before_serving"
+note = "private control accepts another protocol version before using descriptors"
+
+[[mutant]]
+si = "SI-10"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si10-control-skips-version"
+test = "si_10_control_version_refused_before_descriptor_use"
+note = "private control accepts another protocol version before using descriptors"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-probe-fd-unchecked"
+test = "si_30_facade_crash_probe_refuses_inherited_capabilities"
+note = "the startup crash probe accepts extra inherited descriptors"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-probe-inherits-fds"
+test = "si_30_facade_probe_closes_descriptors_inherited_from_its_launcher"
+note = "the facade spawns its crash probe without closing descriptors its launcher leaked"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-probe-scratch-unchecked"
+test = "si_30_facade_refuses_by_name_when_the_probe_leaves_a_core"
+note = "a core file left in the probe's scratch directory does not refuse startup"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si36-worker-inherits-fds"
+test = "si_36_worker_never_holds_a_descriptor_leaked_to_its_launcher"
+note = "the worker keeps the descriptors it inherited instead of closing them at entry"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si36-worker-inherits-fds"
+test = "si_36_worker_never_holds_a_descriptor_opened_while_it_is_spawned"
+note = "the worker keeps descriptors another facade thread opened while it was spawned"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+feature = "mutant-si36-fd-errors-skipped"
+test = "si_36_worker_entry_close_fails_closed_on_any_error"
+note = "a listed descriptor that fails to close is skipped and stays open"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+feature = "mutant-si36-listed-fds-looked-up"
+test = "si_36_descriptor_listing_keeps_every_enumerated_descriptor"
+note = "the listing keeps only numbers whose /proc/self/fd entry lstat finds, the reviewed lookup filter"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+feature = "mutant-si36-listing-error-ends"
+test = "si_36_descriptor_listing_refuses_an_enumeration_error"
+note = "a getdents64 error ends the listing as rustix's Dir does for ENOENT, so a short list passes"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+feature = "mutant-si36-listing-close-unchecked"
+test = "si_36_descriptor_listing_refuses_when_its_own_close_fails"
+note = "the listing descriptor's close result is ignored, so it can stay open while the listing succeeds"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+feature = "mutant-si30-socket-handler-allowed"
+test = "si_30_core_pattern_policy_follows_the_host_table"
+note = "an `@` socket core handler, which ignores every core limit, is accepted"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-worker-dumpable-unchecked"
+test = "si_30_worker_refuses_clients_once_dumpable_again"
+note = "the worker accepts a client after becoming dumpable again"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-worker-dumpable-unchecked"
+test = "si_30_worker_channel_refuses_requests_once_dumpable_again"
+note = "a worker channel reads a request after the worker became dumpable again"
+
+[[unmutated]]
+test = "si_30_facade_follows_a_zero_hard_core_limit"
+reason = "availability under an inherited zero hard core limit; its expected outcome follows the host's core_pattern, so a mutant would die on piped hosts and survive on file hosts. The refusal it relies on is held host-independently by mutant-si30-probe-scratch-unchecked"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-facade-no-probe"
+test = "si_30_facade_core_probe_timeout_reaps_child_and_scratch"
+note = "the facade starts without observing kernel crash suppression"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-facade-core-zero"
+test = "si_30_facade_crash_suppression_is_verified_before_listening"
+note = "the facade uses zero core limits, which Linux ignores for piped handlers"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-facade-no-probe"
+test = "si_30_facade_requires_kernel_crash_probe"
+note = "the facade starts without observing kernel crash suppression"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-unchecked"
+test = "si_7_worker_refuses_rogue_facade_executable"
+note = "the worker skips authentication of the private control creator"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-unchecked"
+test = "si_7_worker_refuses_control_not_created_by_parent"
+note = "the worker skips authentication of the private control creator"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-fd-unchecked"
+test = "si_7_worker_refuses_datagram_control_capability"
+note = "the worker accepts a named or non-stream private control capability"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-fd-unchecked"
+test = "si_7_worker_refuses_named_control_capability"
+note = "the worker accepts a named or non-stream private control capability"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-control-count-unchecked"
+test = "si_7_worker_refuses_extra_control_descriptor"
+note = "the worker accepts extra descriptors in a control message"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-worker-exe-unchecked"
+test = "si_7_facade_refuses_substituted_worker_executable"
+note = "the facade spawns a substituted worker executable"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-facade-lifetime-unchecked"
+test = "si_7_facade_death_closes_transferred_channels"
+note = "transferred channels survive the facade that authenticated them"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si23-facade-unbounded"
+test = "si_23_facade_bounds_outstanding_channels"
+note = "the facade bypasses its outstanding-channel cap"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-local"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-no-exe-check"
+test = "si_7_facade_refuses_rogue_clients_before_worker_payload"
+note = "the facade skips the caller executable check before handing off its socket"
+
+[[mutant]]
+si = "SI-7"
+crate = "kickoff-local"
+test_crate = "kickoff-ipc"
+feature = "mutant-si7-accept-ancillary"
+test = "si_7_transferred_client_still_refuses_ancillary"
+note = "the transferred client channel accepts ancillary descriptors"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-secret"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-dumpable"
+test = "si_30_facade_and_worker_keep_core_hard_limits"
+note = "the secret worker remains dumpable"
+
+[[unmutated]]
+test = "si_7_hardened_server_remains_authenticatable"
+reason = "positive hardened composition regression; hardening removal is checked separately by the SI-30 worker mutant"
+
+[[unmutated]]
+test = "si_7_transferred_socket_keeps_listener_creator_identity"
+reason = "positive kernel transfer and ticket round trip; validates composition rather than removing a mitigation"
+
+[[unmutated]]
+test = "si_7_worker_closes_wrong_descriptor_count_and_type"
+reason = "layered count, type and lease checks; independent count and descriptor mutants use dedicated tests"
+
+[[unmutated]]
+test = "si_7_installed_daemon_modes_authenticate_with_hardening"
+reason = "installed executable startup composition; negative protections have independent IPC mutants"
+
+[[mutant]]
+si = "SI-41"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si41-join-after-end"
+test = "si_41_end_refuses_bearer_join_after_final_clear"
+note = "the admission owner allows a bearer join to create a prompt after ending"
+
+[[mutant]]
+si = "SI-18"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si18-link-after-end"
+test = "si_18_end_refuses_delayed_hello_after_route_drain"
+note = "the admission owner lets delayed Hello activate a route after ending"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-net"
+feature = "mutant-si23-door-unbounded-reply"
+test = "si_23_door_reply_write_and_linger_share_one_deadline"
+note = "zero reply credit blocks writes before the reply lifetime is bounded"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-net"
+feature = "mutant-si23-door-unbounded-overflow"
+test = "si_23_door_overflow_closes_without_retaining_reply_tasks"
+note = "queue overflow spawns a task that retains a blocked reply"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si23-no-priority-replies"
+test = "si_23_zero_credit_replies_preserve_priority_capacity"
+note = "priority joins compete with blocked general replies for the same permits"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si23-pong-deadline-during-write"
+test = "si_23_blocked_control_write_cannot_suspend_pong_expiry"
+note = "a blocked roster or Ping write stops polling the absolute Pong deadline"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-net"
+feature = "mutant-si23-fresh-hello-deadline"
+test = "si_23_no_control_stream_closed_two_seconds_after_tls"
+note = "stream arrival retains five seconds after TLS"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-session"
+feature = "mutant-si23-fresh-hello-deadline"
+test = "si_23_complete_hello_after_tls_deadline_is_refused"
+note = "late stream arrival starts a fresh Hello decoding window"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-net"
+test_crate = "kickoff-session"
+feature = "mutant-si23-fresh-hello-deadline"
+test = "si_23_partial_hello_does_not_restart_tls_deadline"
+note = "a first byte near the deadline restarts Hello decoding"
+
+# All three budget callers use the same saturation arithmetic. Existing flags
+# still remove only their own layer's charge or charging order.
+[[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test = "si_23_full_bucket_never_banks_idle_credit", note = "fractional tokens earned while full survive saturation"
+[[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-session", test = "si_23_full_fanout_bucket_discards_idle_fractional_credit", note = "fanout's shared bucket retains idle credit"
+[[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-net", test = "si_23_full_ingress_bucket_discards_idle_fractional_credit", note = "ingress's shared bucket retains idle credit"
+[[mutant]] si = "SI-23", crate = "kickoff-budget", feature = "mutant-si23-retain-full-credit", test_crate = "kickoff-vlan", test = "si_23_full_lan_bucket_discards_idle_fractional_credit", note = "LAN's shared bucket retains idle credit"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-secret"
+feature = "mutant-si30-buffer-no-wipe"
+test = "si_30_transport_buffers_wipe_on_success_error_and_cancel"
+note = "owned transport allocations are released without wiping"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-wire"
+feature = "mutant-si30-cap-repr-no-wipe"
+test = "si_30_ticket_and_join_values_wipe_on_success_and_decode_errors"
+note = "temporary capability representations retain secret fields at drop"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-wire"
+feature = "mutant-si30-open-owner"
+test = "si_30_unrelated_consumers_cannot_expose_or_replace_secret_owners"
+note = "a publicly constructible substitute owner exposes stored tickets"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-secret"
+feature = "mutant-si30-key-lookup"
+test = "si_30_identity_adapter_refuses_key_observing_callbacks"
+note = "a caller address lookup obtains the transport-owned identity key"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+feature = "mutant-si30-late-facade-core"
+test = "si_30_facade_policy_precedes_arguments_runtime_and_trust"
+note = "normal startup defers the facade core policy until listener construction"
+
+[[mutant]] si = "SI-7", crate = "kickoff-ipc", feature = "mutant-si7-reclaim-any", test = "si_7_dead_socket_collision_is_refused_without_touching_it", note = "bind replaces an existing dead socket instead of failing closed"
+[[unmutated]] test = "si_10_role_commands_use_postcard", reason = "independent postcard command/reply fixtures prove positive role-format composition; authentication and version protections have separate mutants"
+
+[[mutant]]
+si = "SI-18"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si18-caller-owned-completion"
+test = "si_18_cancelled_host_leave_finishes_cleanup"
+note = "the public Leave future owns cleanup after the lifecycle transition commits"
+
+[[mutant]]
+si = "SI-18"
+crate = "kickoff-session"
+test_crate = "kickoff-session"
+feature = "mutant-si18-caller-owned-completion"
+test = "si_18_cancelled_host_kick_publishes_removed_peer"
+note = "the public Kick future owns publication after removing the peer"
+
+[[mutant]] si = "SI-7", crate = "kickoff-local", feature = "mutant-si7-no-exe-check", test = "si_30_custom_trust_cannot_authorize_a_secret_recipient", note = "the canonical installed executable check accepts an unrelated socket-pair recipient"
+[[mutant]] si = "SI-30", crate = "kickoff-wire", feature = "mutant-si30-readable-transmission", test = "si_30_unrelated_holders_cannot_copy_serialized_secrets", note = "a protected serialized transmission exposes its bytes to unrelated holders"
+[[mutant]] si = "SI-30", crate = "kickoff-wire", feature = "mutant-si30-public-join-encoder", test = "si_30_unrelated_holders_cannot_copy_serialized_secrets", note = "the public readable encoder accepts secret-bearing JoinRequest"
+[[mutant]] si = "SI-30", crate = "kickoff-wire", feature = "mutant-si30-ticket-transport", test = "si_30_unrelated_holders_cannot_copy_serialized_secrets", note = "protected ticket text has a public readable transit accessor"
+[[mutant]] si = "SI-30", crate = "kickoff-wire", feature = "mutant-si30-ticket-issuer-unchecked", test = "si_30_ticket_cannot_reassign_an_existing_capability_to_another_door", note = "a holder reassigns an existing opaque capability to another ticket door"
+[[mutant]] si = "SI-30", crate = "kickoff-wire", test_crate = "kickoff-net", feature = "mutant-si30-recipient-unbound", test = "si_30_join_transmission_requires_its_issuing_door_before_opening_a_stream", note = "a Join transmission opens and writes to a connection whose identity is not its issuing door"
+[[mutant]] si = "SI-30", crate = "kickoff-secret", test_crate = "kickoff-wire", feature = "mutant-si30-no-wipe", test = "si_30_designated_transmission_wipes_owned_bytes_on_success_error_and_cancel", note = "dropping the designated transmission skips the owned frame allocation's wipe on success, write error or cancellation"
+[[mutant]] si = "SI-30", crate = "kickoff-local", feature = "mutant-si30-local-self-recipient", test = "si_30_installed_self_recipient_is_refused_before_sending_bytes", note = "canonical installed executable authentication grants secret transmission to a same-process socket pair"
+[[mutant]] si = "SI-30", crate = "kickoff-wire", test_crate = "kickoff-net", feature = "mutant-si30-ticket-issuer-unchecked", test = "si_30_join_transmission_requires_its_issuing_door_before_opening_a_stream", note = "a received capability regains export authority through an encoded and reparsed Ticket wrapper"
+
+[[mutant]] si = "SI-18", crate = "kickoff-vlan", feature = "mutant-si18-flows-survive-reset", test = "si_18_broadcast_reply_flows_follow_each_peers_generation", note = "a reset leaves the previous generation's broadcast return permission"
+[[mutant]] si = "SI-23", crate = "kickoff-vlan", feature = "mutant-si23-flow-table-grows", test = "si_23_broadcast_and_unicast_share_the_per_peer_flow_limit", note = "mixed broadcast and unicast permissions exceed the peer's combined 64-flow limit"
+[[mutant]] si = "SI-18", crate = "kickoff-vlan", test_crate = "kickoff-session", feature = "mutant-si18-flows-survive-reset", test = "si_18_reconnect_forgets_broadcast_return_flows", note = "the replacement link answers a broadcast flow retained by the VLAN generation reset"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-no-flow-reset", test = "si_18_reconnect_forgets_broadcast_return_flows", note = "route replacement skips clearing the previous generation's broadcast flow"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-no-flow-reset", test = "si_18_guest_reconnect_forgets_unicast_return_flows", note = "the actual guest replacement link can answer a previous connection's unicast flow"
+[[mutant]] si = "SI-18", crate = "kickoff-session", feature = "mutant-si18-no-flow-reset", test = "si_18_guest_reconnect_forgets_broadcast_return_flows", note = "the actual guest replacement link can answer a previous connection's broadcast return flow"
+
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-ipc-client-cancel-reuse", test = "cancelled_client_call_cannot_shift_replies", note = "a cancelled client exchange leaves an old reply available to answer another command"
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-ipc-recv-cancel-reuse", test = "cancelled_partial_server_receive_closes_channel", note = "a cancelled receive permits reuse after consuming a partial frame"
+[[mutant]] si = "SI-10", crate = "kickoff-ipc", feature = "mutant-si10-ipc-reply-cancel-reuse", test = "cancelled_blocked_server_reply_closes_channel", note = "a cancelled blocked reply leaves the channel available for another request"
+
+[[mutant]] si = "SI-30", crate = "kickoff-secret", feature = "mutant-si30-identity-read-growth", test = "si_30_overlong_persisted_identity_never_releases_an_unwiped_allocation", note = "the ordinary growing identity reader can release a key-bearing allocation without wiping it"
+[[unmutated]] test = "si_30_identity_read_wipes_after_partial_io_failure", reason = "positive error-path ownership composition; the dedicated identity-read-growth mutant tests early allocation release, while Secret's wipe and nested Zeroizing independently protect the final allocation"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-door-no-priority-awaiting", test = "si_23_silent_outsiders_cannot_fill_priority_awaiting_capacity", note = "silent outsiders can occupy every post-TLS awaiting place before a bound join"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-door-no-priority-awaiting", test = "si_23_partial_outsiders_cannot_fill_priority_awaiting_capacity", note = "partial JoinRequest outsiders can occupy every post-TLS awaiting place before a bound join"
+
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-reassembly-no-peer-reserve", test = "si_23_denied_port_colluding_fragments_leave_peer_capacity", note = "incomplete denied-port fragments can borrow other peers' reserved assembly places"
+[[mutant]] si = "SI-23", crate = "kickoff-net", feature = "mutant-si23-reassembly-no-peer-reserve", test = "si_23_allowed_port_colluding_fragments_leave_peer_capacity", note = "incomplete allowed-port fragments can borrow other peers' reserved assembly places"
+[[unmutated]] test = "si_23_fragment_flood_does_not_starve_a_legitimate_peer", reason = "positive single-peer composition; removing either local capacity or peer reservation alone leaves the other protection, each independently mutated by the eight-versus-nine and colluding-peer tests"
+
+[[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-bind-any-port", test = "si_29_binding_skips_unusable_ports_before_publishing_a_reachable_endpoint", note = "binding publishes a local port the peer send guard refuses; the recipient denylist remains enforced"

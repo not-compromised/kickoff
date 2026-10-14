@@ -1,0 +1,53 @@
+[package]
+name = "kickoff-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
+
+[lints]
+workspace = true
+
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si3-path-field = []
+mutant-si20-nonatomic-nonce = []
+mutant-si20-bearer-never-expires = []
+mutant-si20-any-session = []
+mutant-si20-bound-any-requester = []
+mutant-si23-trust-declared-length = []
+mutant-si23-unbounded-lists = []
+mutant-si23-no-message-cap = []
+mutant-si23-no-frame-cap = []
+mutant-si29-door-with-ip = []
+mutant-si30-cap-debug = []
+mutant-si30-open-owner = []
+mutant-si30-cap-repr-no-wipe = []
+mutant-si30-readable-transmission = []
+mutant-si30-public-join-encoder = []
+mutant-si30-ticket-transport = []
+mutant-si30-recipient-unbound = []
+mutant-si30-ticket-issuer-unchecked = []
+
+[dependencies]
+kickoff-local.workspace = true
+iroh.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }
+iroh-base.workspace = true
+kickoff-secret.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+postcard.workspace = true
+data-encoding.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+kickoff-send-guard.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+proptest.workspace = true
+serde-reflection.workspace = true

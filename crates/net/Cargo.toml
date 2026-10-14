@@ -1,0 +1,72 @@
+[package]
+name = "kickoff-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
+
+[lints]
+workspace = true
+
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si18-hook-admits-unknown = []
+mutant-si18-no-establish-recheck = []
+mutant-si18-link-accept-unchecked = []
+mutant-si18-no-datagram-gen-check = []
+mutant-si18-set-admitted-keeps-stale = []
+mutant-si18-duplicate-connections = []
+mutant-si21-guest-serves = []
+mutant-si23-no-datagram-budget = []
+mutant-si23-ctl-length-unchecked = []
+mutant-si23-no-ctl-rate = []
+mutant-si23-no-per-link-reassembly-cap = []
+mutant-si23-no-global-reassembly-cap = []
+mutant-si23-reassembly-no-peer-reserve = []
+mutant-si23-door-no-invalid-limit = []
+mutant-si23-no-handshake-deadline = []
+mutant-si23-no-handshake-rate = []
+mutant-si23-no-pending-cap = []
+mutant-si23-guard-no-trusted-slots = []
+mutant-si23-guard-locks-before-connection = []
+mutant-si23-door-no-awaiting-cap = []
+mutant-si23-door-no-priority-awaiting = []
+mutant-si23-door-no-identity-cap = []
+mutant-si23-door-no-join-deadline = []
+mutant-si23-door-unbounded-reply = []
+mutant-si23-door-unbounded-overflow = []
+mutant-si23-fresh-hello-deadline = []
+mutant-si29-scope-any = []
+mutant-si29-no-connect-guard = []
+mutant-si29-no-send-guard = []
+mutant-si29-guard-any-range = []
+mutant-si29-guard-ignores-host-view = []
+mutant-si29-guard-any-port = []
+mutant-si29-bind-any-port = []
+mutant-si29-guard-no-destination-cap = []
+mutant-si29-shared-remote-budget = []
+mutant-si29-probe-any-destination = []
+mutant-si29-send-context-lost = ["kickoff-send-guard/mutant-si29-send-context-lost"]
+mutant-si29-guard-keeps-cache = []
+mutant-si31-publish-all = []
+mutant-si31-unbound = []
+mutant-si31-relay-only-binds = []
+
+[dependencies]
+kickoff-budget.workspace = true
+kickoff-wire.workspace = true
+kickoff-secret.workspace = true
+kickoff-send-guard.workspace = true
+iroh.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+netwatch.workspace = true
+arc-swap.workspace = true
+
+[dev-dependencies]
+kickoff-vlan.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

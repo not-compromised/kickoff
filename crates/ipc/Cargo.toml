@@ -1,0 +1,71 @@
+[package]
+name = "kickoff-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
+
+[lints]
+workspace = true
+
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si3-ticket-text-any = []
+mutant-si7-base-unchecked = []
+mutant-si7-dir-mode-unchecked = []
+mutant-si7-socket-mode = []
+mutant-si7-reclaim-any = []
+mutant-si7-client-any-socket = []
+mutant-si7-control-unchecked = []
+mutant-si7-control-fd-unchecked = []
+mutant-si7-facade-lifetime-unchecked = []
+mutant-si7-control-count-unchecked = []
+mutant-si7-worker-exe-unchecked = []
+mutant-si23-facade-unbounded = []
+mutant-si10-skip-version = []
+mutant-si10-client-skips-version = []
+mutant-si10-any-role = []
+mutant-si10-control-skips-version = []
+mutant-si10-ipc-client-cancel-reuse = []
+mutant-si10-ipc-recv-cancel-reuse = []
+mutant-si10-ipc-reply-cancel-reuse = []
+mutant-si23-ipc-frame-unbounded = []
+mutant-si23-ipc-no-frame-deadline = []
+mutant-si23-ipc-no-rate-limit = []
+mutant-si23-ipc-unbounded-channels = []
+mutant-si30-ticket-text-debug = ["kickoff-wire/mutant-si30-ticket-transport"]
+mutant-si30-facade-core-zero = []
+mutant-si30-late-facade-core = []
+mutant-si30-facade-no-probe = []
+mutant-si30-probe-fd-unchecked = []
+mutant-si30-probe-inherits-fds = []
+mutant-si30-probe-scratch-unchecked = []
+mutant-si30-worker-dumpable-unchecked = []
+mutant-si30-socket-handler-allowed = []
+mutant-si36-worker-inherits-fds = []
+mutant-si36-fd-errors-skipped = []
+mutant-si36-listing-error-ends = []
+mutant-si36-listing-close-unchecked = []
+mutant-si36-listed-fds-looked-up = []
+
+[dependencies]
+postcard.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+kickoff-local.workspace = true
+iroh-base.workspace = true
+kickoff-secret.workspace = true
+kickoff-wire.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+zeroize.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
+rustix = { workspace = true, features = ["event", "net", "stdio"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+rustix = { workspace = true, features = ["net", "pipe"] }

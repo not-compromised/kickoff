@@ -6,3 +6,5 @@ target/
 /AGENTS.md
 /CLAUDE.md
 /context
+
+__pycache__/
