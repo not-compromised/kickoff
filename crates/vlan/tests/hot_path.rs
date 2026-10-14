@@ -75,15 +75,19 @@ async fn hot_path_codec_and_filter_within_2us_per_datagram() {
     per_datagram.sort();
     let median = per_datagram[ROUNDS / 2];
     let worst = per_datagram[ROUNDS - 1];
-    eprintln!("codec plus filter per datagram: median {median:?}, worst round {worst:?}");
-    let budget = if cfg!(debug_assertions) {
-        Duration::from_micros(200)
+    let (budget, asserted) = if cfg!(debug_assertions) {
+        (Duration::from_micros(200), "debug ceiling".to_owned())
     } else {
-        latency::budget(Duration::from_micros(2))
+        (
+            latency::budget(Duration::from_micros(2)),
+            latency::runner_label(),
+        )
     };
+    eprintln!(
+        "codec plus filter per datagram: median {median:?}, worst round {worst:?}; asserting median <= {budget:?}, {asserted}"
+    );
     assert!(
         median <= budget,
-        "codec plus filter takes {median:?} per datagram, over {budget:?} ({})",
-        latency::runner_label()
+        "codec plus filter takes {median:?} per datagram, over {budget:?} ({asserted})"
     );
 }

@@ -61,6 +61,18 @@ step "release latency (design §7)"
 # other work. Both commands select the same packages: different selections
 # resolve different features, and each would rebuild iroh and every kickoff
 # crate with fat LTO.
+# Only hosted CI may assert the looser hosted ceilings (docs/development.md).
+# Anywhere else a set KICKOFF_LATENCY_RUNNER refuses, so an inherited value
+# cannot let the reference gate pass on loose ceilings.
+if [[ -n "${KICKOFF_LATENCY_RUNNER+set}" ]]; then
+    if [[ "$KICKOFF_LATENCY_RUNNER" != hosted || "${GITHUB_ACTIONS:-}" != true ]]; then
+        echo "release latency: KICKOFF_LATENCY_RUNNER is set; only hosted CI may set it (to 'hosted'). Unset it to run the reference gate." >&2
+        exit 1
+    fi
+    echo "asserting the hosted ceilings, 4x the §7 budgets: this run is not the reference gate"
+else
+    echo "asserting the §7 budgets exactly: the reference gate"
+fi
 latency=(--release --locked -p kickoff-session -p kickoff-net -p kickoff-vlan)
 cargo test "${latency[@]}" --test budget --test latency --test hot_path -- --test-threads=1 --nocapture
 cargo test "${latency[@]}" --lib send_guard_on_an_approved_destination_within_budget -- --nocapture

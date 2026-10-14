@@ -937,13 +937,19 @@ mod hot_path {
             }
             best = best.min(start.elapsed() / SENDS);
         }
-        eprintln!("send guard, approved destination: {best:?} per send");
-        if !cfg!(debug_assertions) {
+        if cfg!(debug_assertions) {
+            eprintln!(
+                "send guard, approved destination: {best:?} per send; debug builds only report"
+            );
+        } else {
             let ceiling = crate::test_latency::budget(Duration::from_nanos(50));
+            let asserted = crate::test_latency::runner_label();
+            eprintln!(
+                "send guard, approved destination: {best:?} per send; asserting <= {ceiling:?}, {asserted}"
+            );
             assert!(
                 best <= ceiling,
-                "{best:?} per send, over {ceiling:?} ({})",
-                crate::test_latency::runner_label()
+                "{best:?} per send, over {ceiling:?} ({asserted})"
             );
         }
     }

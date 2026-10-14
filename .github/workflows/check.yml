@@ -21,11 +21,6 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      # Shared runners measure several times slower than the reference
-      # machine; the release latency tests here assert 4x the §7 budgets.
-      # The exact budgets are asserted by scripts/check.sh on the reference
-      # machine, the gate for every merge and release (docs/development.md).
-      KICKOFF_LATENCY_RUNNER: hosted
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -50,4 +45,11 @@ jobs:
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
           cargo install cargo-deny --version 0.20.2 --locked
       - name: Run the proving gate
+        env:
+          # Shared runners measure several times slower than the reference
+          # machine, so the release latency tests here assert 4x the §7
+          # budgets. The exact budgets are asserted by scripts/check.sh on the
+          # reference machine, the gate for every merge and release
+          # (docs/development.md); it refuses this variable outside Actions.
+          KICKOFF_LATENCY_RUNNER: hosted
         run: scripts/check.sh

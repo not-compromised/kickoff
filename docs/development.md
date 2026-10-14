@@ -60,7 +60,9 @@ every merge and every release. Hosted CI sets `KICKOFF_LATENCY_RUNNER=hosted`:
 its shared runners measure about five times slower than the reference
 machine, so there the tests assert four times each budget, still failing on a
 large regression, and print the measured figures. Any other value makes the
-tests refuse.
+tests refuse, and `scripts/check.sh` refuses the variable entirely outside
+GitHub Actions, so an inherited value cannot loosen the reference gate. Every
+latency report names the ceiling it asserted.
 
 ### Mutants (SI-33)
 

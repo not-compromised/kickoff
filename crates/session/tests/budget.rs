@@ -273,8 +273,18 @@ async fn latency_p50_p99_over_10k_datagrams() {
     let contention = contention(waited);
     samples.sort();
     let (p50, p99) = (percentile(&samples, 50), percentile(&samples, 99));
+    let asserted = if cfg!(debug_assertions) {
+        "debug ceiling p99 < 20ms".to_owned()
+    } else {
+        format!(
+            "asserting p50 <= {:?}, p99 <= {:?}, {}",
+            budget(Duration::from_micros(100)),
+            budget(Duration::from_micros(500)),
+            runner_label()
+        )
+    };
     eprintln!(
-        "game to game, one way, {COUNT} datagrams: p50 {p50:?}, p99 {p99:?}, max {:?}; {contention}",
+        "game to game, one way, {COUNT} datagrams: p50 {p50:?}, p99 {p99:?}, max {:?}; {contention}; {asserted}",
         samples[COUNT - 1]
     );
     if cfg!(debug_assertions) {
