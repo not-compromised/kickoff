@@ -1085,7 +1085,7 @@ mod tests {
         std::fs::create_dir(&dir.0).unwrap();
         std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
         let exe = dir.0.join("tests");
-        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        crate::test_exec::copy_executable(std::env::current_exe().unwrap(), &exe);
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         let output = std::process::Command::new(&exe)
             .args(["--exact", name, "--test-threads=1"])

@@ -13,6 +13,10 @@
 //!         ◄── reply ──                     reply ── allowed for role?
 //! ```
 
+#[cfg(test)]
+#[path = "../../../tests/support/exec.rs"]
+mod test_exec;
+
 mod codec;
 mod command;
 mod frame;
