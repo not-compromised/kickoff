@@ -28,8 +28,9 @@ diagnostics schema (design §3.4, §6.4, SI-22, SI-30).
 - `harden_process()` sets `RLIMIT_CORE` to 0 (soft and hard) and clears
   `PR_SET_DUMPABLE`. kickoffd's worker calls it before its runtime and refuses
   to start if it fails. The inspectable facade applies its one-byte core limit
-  as its first application action and verifies a genuine exec crash probe
-  before listening. Not dumpable means no core dump at all, even through a
+  (zero under an inherited zero hard limit) as its first application action
+  and verifies a genuine exec crash probe before listening; design §6.4 lists
+  which host crash configurations start and which refuse. Not dumpable means no core dump at all, even through a
   core-pattern pipe, and no `/proc/<pid>/mem` or `ptrace` access for other
   processes of the same user.
 - `identity` (Linux): `IdentityStore::{open, open_in, load_or_create, reset,
