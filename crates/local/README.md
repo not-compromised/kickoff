@@ -18,3 +18,8 @@ IPC owns roles, framing limits, deadlines and commands. Wire owns
 The shared kernel mutations live here and have the workspace release guard.
 Moved ancillary unit regressions remain with `DataOnly`; installed-recipient
 refusal is exercised in `tests/installed.rs`.
+
+`fds` owns the descriptor sweep: one `/proc/self/fd` listing through
+getdents64 with every error returned, and a checked close of everything above
+stdio. The kickoffd worker runs it at entry and the gamebox's trusted links run
+it before each exec, so there is one listing loop (SI-36).

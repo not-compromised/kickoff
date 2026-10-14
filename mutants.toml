@@ -263,35 +263,35 @@ note = "the worker keeps descriptors another facade thread opened while it was s
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-fd-errors-skipped"
-test = "si_36_worker_entry_close_fails_closed_on_any_error"
+test = "si_36_sweep_close_fails_closed_on_any_error"
 note = "a listed descriptor that fails to close is skipped and stays open"
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-listed-fds-looked-up"
 test = "si_36_descriptor_listing_keeps_every_enumerated_descriptor"
 note = "the listing keeps only numbers whose /proc/self/fd entry lstat finds, the reviewed lookup filter"
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-enumeration-looks-up"
 test = "si_36_descriptor_enumeration_keeps_entries_whose_lookup_fails"
 note = "the getdents64 enumeration keeps only names whose /proc/self/fd entry lstat finds, the reviewed filter moved below the listing's unit seam"
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-listing-error-ends"
 test = "si_36_descriptor_listing_refuses_an_enumeration_error"
 note = "a getdents64 error ends the listing as rustix's Dir does for ENOENT, so a short list passes"
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-listing-close-unchecked"
 test = "si_36_descriptor_listing_refuses_when_its_own_close_fails"
 note = "the listing descriptor's close result is ignored, so it can stay open while the listing succeeds"

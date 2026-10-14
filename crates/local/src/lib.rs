@@ -1,4 +1,7 @@
-//! Kernel-authenticated local transports shared by IPC and secret transmission.
+//! Kernel-authenticated local transports shared by IPC and secret transmission,
+//! and the descriptor sweep shared by every process that drops inherited authority.
+#[cfg(target_os = "linux")]
+pub mod fds;
 #[cfg(target_os = "linux")]
 mod stream;
 #[cfg(target_os = "linux")]
@@ -35,3 +38,7 @@ impl From<std::io::Error> for Error {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/support/exec.rs"]
+mod test_exec;

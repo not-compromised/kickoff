@@ -16,6 +16,11 @@ mutant-si7-no-exe-check = []
 mutant-si7-pid-not-pidfd = []
 mutant-si7-accept-ancillary = []
 mutant-si30-local-self-recipient = []
+mutant-si36-fd-errors-skipped = []
+mutant-si36-listing-error-ends = []
+mutant-si36-listing-close-unchecked = []
+mutant-si36-listed-fds-looked-up = []
+mutant-si36-enumeration-looks-up = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix.workspace = true
