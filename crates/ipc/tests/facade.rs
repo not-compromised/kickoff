@@ -212,6 +212,22 @@ fn process_helper() {
                     Err(_) => emit("rejected"),
                 }
             }
+            "racing-facade" => {
+                let base = std::path::PathBuf::from(std::env::var_os(BASE).unwrap());
+                let dir = kickoff_ipc::RuntimeDir::open_in(&base).unwrap();
+                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let racer = {
+                    let stop = std::sync::Arc::clone(&stop);
+                    let socket = dir.socket_path().to_path_buf();
+                    let canary = base.join(CANARY);
+                    std::thread::spawn(move || race_descriptors(&socket, &canary, &stop))
+                };
+                let facade = Facade::spawn(&dir, trust_me(), launch("worker")).await;
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                let opened = racer.join().unwrap();
+                facade.unwrap();
+                emit(&format!("raced {opened}"));
+            }
             "facade-zero-core" => {
                 let base = std::env::var_os(BASE).unwrap();
                 let dir = kickoff_ipc::RuntimeDir::open_in(std::path::Path::new(&base)).unwrap();
@@ -262,6 +278,35 @@ fn write_through_leaked_canary(base: &std::path::Path) {
             file.write_all(b"leaked").unwrap();
         }
     }
+}
+
+/// Opens descriptors to the canary without close-on-exec, as fast as it can,
+/// from when the listener exists (the probe is done) until `stop`. Returns
+/// how many it opened.
+fn race_descriptors(
+    socket: &std::path::Path,
+    canary: &std::path::Path,
+    stop: &std::sync::atomic::AtomicBool,
+) -> usize {
+    use std::sync::atomic::Ordering;
+    while !socket.exists() {
+        if stop.load(Ordering::Relaxed) {
+            return 0;
+        }
+        std::hint::spin_loop();
+    }
+    let mut held = std::collections::VecDeque::new();
+    let mut opened: usize = 0;
+    while !stop.load(Ordering::Relaxed) {
+        let file = std::fs::File::options().append(true).open(canary).unwrap();
+        rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty()).unwrap();
+        held.push_back(file);
+        if held.len() > 64 {
+            held.pop_front();
+        }
+        opened = opened.saturating_add(1);
+    }
+    opened
 }
 
 /// What a uid, gid, fsuid or capability change does to a hardened process
@@ -833,6 +878,30 @@ async fn worker_result(base: &TempBase) -> String {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("the worker recorded no refusal");
+}
+
+#[test]
+fn si_36_worker_never_holds_a_descriptor_opened_while_it_is_spawned() {
+    // Another thread of the facade opens inheritable descriptors while the
+    // worker is being spawned; a parent-side close list built beforehand
+    // misses them.
+    let mut raced: usize = 0;
+    for _ in 0..10 {
+        let base = TempBase::new();
+        let _dir = base.dir();
+        let canary = base.path().join(CANARY);
+        std::fs::write(&canary, b"").unwrap();
+        let mut running = helper(&base, "racing-facade");
+        let line = running.line();
+        let opened: usize = line.strip_prefix("raced ").unwrap().parse().unwrap();
+        raced = raced.saturating_add(opened);
+        assert_eq!(
+            std::fs::read(&canary).unwrap(),
+            b"",
+            "the worker held a descriptor opened during its spawn"
+        );
+    }
+    assert!(raced > 0, "the racer never ran during a worker spawn");
 }
 
 #[tokio::test]

@@ -251,7 +251,15 @@ crate = "kickoff-ipc"
 test_crate = "kickoff-ipc"
 feature = "mutant-si36-worker-inherits-fds"
 test = "si_36_worker_never_holds_a_descriptor_leaked_to_its_launcher"
-note = "the facade spawns the secret-holding worker without closing descriptors its launcher leaked"
+note = "the worker keeps the descriptors it inherited instead of closing them at entry"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si36-worker-inherits-fds"
+test = "si_36_worker_never_holds_a_descriptor_opened_while_it_is_spawned"
+note = "the worker keeps descriptors another facade thread opened while it was spawned"
 
 [[mutant]]
 si = "SI-30"

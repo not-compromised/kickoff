@@ -188,11 +188,18 @@ scaffolding M2.
 - Linux kickoffd applies the facade core policy as its first application action,
   before probe dispatch, arguments, runtime or trust. The genuine exec crash
   probe still gates listening. The probe and the worker are both spawned
-  through `posix_spawn` (`WorkerLaunch`, not `Command`), so every descriptor
-  the daemon inherited is closed in them, since safe Rust cannot own a leaked
-  descriptor to mark it close-on-exec. The worker becomes nondumpable with
-  zero limits before its runtime, and re-checks that before reading client
-  bytes. Which host crash configurations start
+  through `posix_spawn` (`WorkerLaunch`, not `Command`); safe Rust cannot own
+  a leaked descriptor to mark it close-on-exec. The worker closes every
+  descriptor above stdio itself at entry (`KICKOFF_IPC_WORKER`), which no
+  thread of the facade can race; neither the pinned rustix nor nix offers a
+  safe `close_range` or `closefrom` file action. The probe's close list is
+  built in the facade, so a descriptor another thread opens during that
+  spawn makes the probe refuse: startup fails closed. The worker becomes
+  nondumpable with zero limits before its runtime, and re-checks that before
+  reading client bytes.
+- Open SI-36 item (M3): the facade itself keeps descriptors its launcher
+  leaked. It holds no secret and reads no client payload; SI-36's kickoffd
+  descriptor sweep and inventory test land with M3. Which host crash configurations start
   and which refuse is the table in design §6.4; the gate's tests run on the
   host's own `core_pattern`, and the zero-hard-limit test expects the outcome
   that pattern implies. Runtime/loader work before Rust `main` remains outside

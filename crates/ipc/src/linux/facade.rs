@@ -84,9 +84,10 @@ impl WorkerLaunch {
 
     fn environment(&self) -> Vec<(OsString, OsString)> {
         let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| self.envs.iter().all(|(set, _)| set != key))
+            .filter(|(key, _)| key != WORKER_ENV && self.envs.iter().all(|(set, _)| set != key))
             .collect();
         env.extend(self.envs.iter().cloned());
+        env.push((WORKER_ENV.into(), "1".into()));
         env
     }
 }
@@ -118,7 +119,9 @@ impl Facade {
             &worker_launch.args,
             &worker_launch.environment(),
             Some(OwnedFd::from(child)),
-            !cfg!(feature = "mutant-si36-worker-inherits-fds"),
+            // The worker closes them itself at entry: a parent-side list
+            // races any thread opening a descriptor before the fork.
+            false,
         )?;
         let control = into_async(parent)?;
         let (tag, fds) = timeout(HANDSHAKE_DEADLINE, receive(&control))
@@ -548,6 +551,9 @@ fn connection_limit() -> usize {
 }
 
 const CORE_PROBE_ENV: &str = "KICKOFF_IPC_CORE_PROBE";
+/// Set by the facade for its worker, which then closes every descriptor
+/// above stdio at entry (SI-36). Descendants that inherit it do the same.
+const WORKER_ENV: &str = "KICKOFF_IPC_WORKER";
 
 fn harden_facade() -> Result<(), IpcError> {
     // Linux skips piped core handlers only for the recursion sentinel 1, and
@@ -578,6 +584,9 @@ fn harden_facade() -> Result<(), IpcError> {
 /// the private scratch directory the probe crashes in, null stdio and no other
 /// descriptor, and checks kernel wait status. No secrets may exist yet.
 pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
+    if std::env::var_os(WORKER_ENV).as_deref() == Some(OsStr::new("1")) {
+        close_inherited()?;
+    }
     if !cfg!(feature = "mutant-si30-late-facade-core") {
         harden_facade()?;
     }
@@ -612,6 +621,21 @@ pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
         }
     }
     std::process::abort();
+}
+
+/// Closes every descriptor above stdio, before this process has created any
+/// of its own: at entry, everything there was inherited across exec. This
+/// runs in the child, so no other thread of the launcher can add one later.
+fn close_inherited() -> Result<(), IpcError> {
+    if cfg!(feature = "mutant-si36-worker-inherits-fds") {
+        return Ok(());
+    }
+    for fd in open_descriptors()? {
+        if fd >= 3 {
+            nix::unistd::close(fd).map_err(io::Error::from)?;
+        }
+    }
+    Ok(())
 }
 
 /// Descriptor numbers open in this process. Collecting closes the enumeration
