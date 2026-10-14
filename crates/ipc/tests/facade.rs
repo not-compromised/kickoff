@@ -144,7 +144,11 @@ fn process_helper() {
                 }
                 let record = move |error: IpcError| {
                     if let Some(base) = &base {
-                        std::fs::write(base.join("worker.result"), format!("{error:?}")).unwrap();
+                        // Renamed into place, so a reader never sees the file
+                        // created but not yet written.
+                        let partial = base.join("worker.result.partial");
+                        std::fs::write(&partial, format!("{error:?}")).unwrap();
+                        std::fs::rename(&partial, base.join("worker.result")).unwrap();
                     }
                 };
                 loop {
