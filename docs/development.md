@@ -27,10 +27,21 @@ that it is not implemented yet.
 ## Checks
 
 ```
-scripts/check.sh
+scripts/check.sh            # the whole gate: fast, then mutants
+scripts/check.sh fast       # every step except the mutant step
+scripts/check.sh mutants    # only the mutant step (SI-33)
 ```
 
-Runs the dated advisory exception policy and its Python tests, the unsafe guard, the upstream-plus-patch vendor comparison, `cargo fmt --check`, clippy with `-D warnings`, the whole
+A revision passes the gate only when `fast` and `mutants` both pass on it;
+neither part alone proves anything. Hosted CI
+(`.github/workflows/check.yml`) runs the two parts as parallel jobs on
+separate runners, so the release latency step (in `fast`) never shares a
+machine with the mutant builds; its `gate passed` job is green only when
+both succeeded, and is the check to require. `scripts/tests/test_check_modes.py`
+lists each part's steps and fails unless `fast` followed by `mutants` runs
+exactly the commands of the whole gate.
+
+The whole gate runs the dated advisory exception policy and its Python tests, the unsafe guard, the upstream-plus-patch vendor comparison, `cargo fmt --check`, clippy with `-D warnings`, the whole
 test suite (every `si_n_*` test and the SI-33 policy test), the design §7
 latency tests in a release build, both cargo-deny scans, and then every mutant.
 The dated-exception owner is `advisory-exceptions.toml`;
