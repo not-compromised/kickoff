@@ -2,7 +2,7 @@
 //! user manager runs `kickoff-gamebox.service`, and cleans up every unit it
 //! started. Every unit is named `kickoff-m0-test-*`.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::unwrap_used, clippy::panic)]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -29,6 +29,11 @@ fn systemctl(args: &[&str]) -> std::process::Output {
 
 impl Supervisor {
     pub fn start(args: &[&str]) -> Supervisor {
+        Supervisor::start_with(&[], args)
+    }
+
+    /// `properties` are extra unit properties, such as an `OpenFile=` leak.
+    pub fn start_with(properties: &[String], args: &[&str]) -> Supervisor {
         let unit = format!(
             "kickoff-m0-test-{}-{}",
             std::process::id(),
@@ -40,6 +45,8 @@ impl Supervisor {
             .args(["--user", "--quiet", "--collect"])
             .arg(format!("--unit={unit}"))
             .arg("--property=KillMode=control-group")
+            .arg(format!("--property=RuntimeDirectory={unit}"))
+            .args(properties.iter().map(|p| format!("--property={p}")))
             .arg(format!("--property=StandardOutput=file:{}", out.display()))
             .arg(format!("--property=StandardError=file:{}", out.display()))
             .arg("--")
@@ -74,7 +81,8 @@ impl Supervisor {
         }
     }
 
-    /// Waits until the scope holds at least `count` processes running `exe`.
+    /// Waits until the scope holds at least `count` processes running `exe`
+    /// that finished their own checks and hold (process name `holding`).
     pub fn wait_procs(&self, exe: &str, count: usize) -> Vec<i32> {
         let dir = self.scope_dir();
         let started = Instant::now();
@@ -86,6 +94,8 @@ impl Supervisor {
                 .filter(|pid| {
                     std::fs::read_link(format!("/proc/{pid}/exe"))
                         .is_ok_and(|p| p.file_name().is_some_and(|n| n == exe))
+                        && std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                            .is_ok_and(|c| c.trim() == "holding")
                 })
                 .collect();
             if procs.len() >= count {
@@ -121,6 +131,15 @@ impl Supervisor {
         }
     }
 
+    pub fn main_pid(&self) -> i32 {
+        let out = systemctl(&["show", "--value", "-p", "MainPID", &self.unit]);
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
     pub fn report(&self) -> String {
         std::fs::read_to_string(&self.out).unwrap_or_default()
     }
@@ -135,6 +154,28 @@ impl Drop for Supervisor {
         }
         let _ = std::fs::remove_file(&self.out);
     }
+}
+
+/// Device and inode of what `/proc/<pid>/fd/<n>` refers to, for every open
+/// descriptor of `pid`.
+pub fn descriptors(pid: i32) -> Vec<(i32, (u64, u64))> {
+    use std::os::unix::fs::MetadataExt;
+    let mut fds: Vec<_> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .map(|e| {
+            let n: i32 = e.unwrap().file_name().to_str().unwrap().parse().unwrap();
+            let meta = std::fs::metadata(format!("/proc/{pid}/fd/{n}")).unwrap();
+            (n, (meta.dev(), meta.ino()))
+        })
+        .collect();
+    fds.sort();
+    fds
+}
+
+pub fn identity(path: &std::path::Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).unwrap();
+    (meta.dev(), meta.ino())
 }
 
 /// A process that exists and is not a zombie.

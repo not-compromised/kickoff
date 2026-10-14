@@ -15,6 +15,18 @@ pub fn close_descriptors_above_stdio() -> io::Result<()> {
     })
 }
 
+/// As [`close_descriptors_above_stdio`], keeping the descriptors in `keep`:
+/// the ones a link was handed on purpose, at numbers fixed by its caller.
+pub fn close_descriptors_above_stdio_except(keep: &[i32]) -> io::Result<()> {
+    let listed: Vec<i32> = open_descriptors()?
+        .into_iter()
+        .filter(|fd| !keep.contains(fd))
+        .collect();
+    close_above_stdio(&listed, |fd| {
+        nix::unistd::close(fd).map_err(io::Error::from)
+    })
+}
+
 /// Every listed descriptor above stdio must close, or startup is refused.
 /// Not every error leaves the descriptor open: Linux releases the number
 /// even when close reports EINTR or EIO, and EBADF means it was not open.

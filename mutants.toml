@@ -639,6 +639,10 @@ note = "the public Kick future owns publication after removing the peer"
 [[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-bindsto", test = "si_38_owner_death_ends_the_box_without_a_normal_stop", note = "the scope is not bound to the supervisor's service, so its death leaves the descendant running"
 [[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-sigterm-stop", test = "si_38_owner_death_ends_the_box_without_a_normal_stop", note = "the scope keeps the default SIGTERM stop, which the stand-in ignores past the deadline"
 
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-no-fd-sweep", test = "si_36_supervisor_never_holds_a_descriptor_leaked_to_its_service", note = "the supervisor keeps the descriptors its service was started with"
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-barrier-skip", test = "si_36_launch_barrier_refuses_each_faulted_property", note = "the barrier releases without its checks, inside or outside: every faulted setup reaches the payload"
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-barrier-skip", test = "si_36_game_holds_only_stdio_on_dev_null", note = "the barrier link execs at once and the payload inherits the barrier pipes"
+
 # Named by the design for later milestones; the code they mutate does not exist on M2.
 
 [[pending]]

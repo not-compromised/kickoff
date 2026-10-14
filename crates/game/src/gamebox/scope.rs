@@ -181,6 +181,21 @@ impl Scope {
         }
     }
 
+    /// Every process in the scope now.
+    pub(super) fn procs(&self) -> Result<Vec<i32>, Refused> {
+        let file = rustix::fs::openat(
+            &self.dir,
+            "cgroup.procs",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut text = String::new();
+        std::fs::File::from(file).read_to_string(&mut text)?;
+        text.lines()
+            .map(|l| l.parse().map_err(|_| Refused::Scope))
+            .collect()
+    }
+
     pub(super) fn wait_empty(&self, deadline: Duration) -> Result<(), Refused> {
         let started = Instant::now();
         while self.populated()? {

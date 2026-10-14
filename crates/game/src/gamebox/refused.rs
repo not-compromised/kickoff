@@ -1,5 +1,7 @@
 use std::io;
 
+use super::barrier::Check;
+
 /// Why a gamebox process refused or failed. Every trusted link exits with
 /// [`Refused::code`], so the supervisor sees which check stopped a launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -20,6 +22,16 @@ pub enum Refused {
     Scope,
     #[error("the game scope did not empty within the teardown deadline")]
     Teardown,
+    #[error("the host network could not be read")]
+    Network,
+    #[error("the box's network setup failed")]
+    NetworkSetup,
+    #[error("launch barrier: {0}")]
+    Barrier(Check),
+    #[error("the box ended before the launch barrier, status {0}")]
+    BoxEnded(i32),
+    #[error("the probe holds a descriptor beyond stdio")]
+    Leaked,
     #[error("i/o error: {0:?}")]
     Io(io::ErrorKind),
 }
@@ -38,6 +50,19 @@ impl Refused {
             Refused::Scope => 70,
             Refused::Teardown => 71,
             Refused::Io(_) => 72,
+            Refused::Network => 73,
+            Refused::Leaked => 76,
+            Refused::NetworkSetup => 74,
+            Refused::BoxEnded(_) => 75,
+            Refused::Barrier(check) => match check {
+                Check::Namespaces => 80,
+                Check::Nft => 81,
+                Check::Cgroup => 82,
+                Check::Rlimits => 83,
+                Check::Capabilities => 84,
+                Check::NoNewPrivs => 85,
+                Check::Descriptors => 86,
+            },
         }
     }
 }

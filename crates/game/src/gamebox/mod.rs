@@ -8,13 +8,17 @@
 //! They find each other only as installed siblings, never by a path taken
 //! from input.
 
+mod barrier;
 mod install;
 mod link;
+mod net;
 mod probe;
 mod refused;
 mod scope;
 mod supervisor;
+mod view;
 
+pub use barrier::Check;
 pub use link::link_main;
 pub use probe::probe_main;
 pub use refused::Refused;
