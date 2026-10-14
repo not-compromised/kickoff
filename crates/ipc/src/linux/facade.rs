@@ -1009,8 +1009,16 @@ mod tests {
         // fails: by number in this process (not held here), and through the
         // directory itself (EACCES once procfs revalidates its owner). A
         // lookup filter anywhere in the enumeration drops the entry.
+        // Root, even a user namespace's, still looks up a nondumpable
+        // process's entries, so as root the scenario reruns unprivileged.
         use std::io::{BufRead, Write};
         use std::process::{Command, Stdio};
+        if rustix::process::geteuid().is_root() {
+            rerun_unprivileged(
+                "linux::facade::tests::si_36_descriptor_enumeration_keeps_entries_whose_lookup_fails",
+            );
+            return;
+        }
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -1048,7 +1056,8 @@ mod tests {
             )
             .map(drop),
             Err(rustix::io::Errno::ACCESS),
-            "a lookup through the nondumpable process's listing succeeded"
+            "a lookup through the nondumpable process's listing succeeded: \
+             this process bypasses permission checks (CAP_DAC_*)"
         );
         let listed = list_and_close(listing, read_names, checked_close).unwrap();
         drop(stdin);
@@ -1056,6 +1065,40 @@ mod tests {
         assert!(
             listed.contains(&held.parse().unwrap()),
             "enumerated descriptor {held} was dropped because its lookup failed: {listed:?}"
+        );
+    }
+
+    /// Runs test `name` as uid and gid 65534 from a copy of this executable
+    /// that uid can run, and requires that it ran and passed. Dropping from
+    /// root to another uid clears every capability.
+    fn rerun_unprivileged(name: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        struct Dir(PathBuf);
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir =
+            Dir(std::env::temp_dir().join(format!("kickoff-unprivileged-{}", std::process::id())));
+        std::fs::create_dir(&dir.0).unwrap();
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.0.join("tests");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(&exe)
+            .args(["--exact", name, "--test-threads=1"])
+            .current_dir(&dir.0)
+            .uid(65534)
+            .gid(65534)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{name} failed as uid 65534:\n{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
