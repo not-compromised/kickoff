@@ -177,6 +177,30 @@ impl Supervisor {
         std::fs::write(self.gates.join(format!("{phase}.go")), b"").unwrap();
     }
 
+    /// Whether the scope is unknown to the manager.
+    pub fn scope_absent(&self) -> bool {
+        let out = systemctl(&["show", "--value", "-p", "ControlGroup", &self.scope_unit()]);
+        String::from_utf8(out.stdout).unwrap().trim().is_empty()
+    }
+
+    /// Processes in the scope running `exe`, whatever their state.
+    pub fn wait_procs_named(&self, exe: &str, count: usize) -> Vec<i32> {
+        let mut found = Vec::new();
+        let ok = within(Duration::from_secs(10), || {
+            found = self
+                .scope_procs()
+                .into_iter()
+                .filter(|pid| {
+                    std::fs::read_link(format!("/proc/{pid}/exe"))
+                        .is_ok_and(|p| p.file_name().is_some_and(|n| n == exe))
+                })
+                .collect();
+            found.len() >= count
+        });
+        assert!(ok, "no {exe} in the scope: {}", self.report());
+        found
+    }
+
     /// Every process in the scope now.
     pub fn scope_procs(&self) -> Vec<i32> {
         std::fs::read_to_string(self.scope_dir().join("cgroup.procs"))

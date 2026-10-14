@@ -138,3 +138,83 @@ fn si_38_stop_during_scope_registration_ends_within_the_deadline() {
     );
     assert!(supervisor.report().contains("box stopped"));
 }
+
+/// Which processes a kill at a hold point targets.
+#[derive(Clone, Copy, Debug)]
+enum Victim {
+    Supervisor,
+    /// The one trusted link alive at that phase (the others have exec'd).
+    Link,
+}
+
+#[test]
+fn si_38_kill_at_each_startup_phase_leaves_nothing() {
+    use Victim::{Link, Supervisor as Sup};
+    // Each hold point stops the supervisor or a link at an exact phase:
+    // before and after registration, before and after each link arms its
+    // parent-death signal (pasta started for `inner`), after the nft helper
+    // fork, at the barrier and during the outside helper. Every process the
+    // launch started must be gone within the deadline.
+    let cases: [(&str, &[Victim]); 9] = [
+        ("before-registration", &[Sup]),
+        ("scope-registered", &[Sup]),
+        ("enter-before-pdeathsig", &[Sup, Link]),
+        ("enter-after-pdeathsig", &[Sup, Link]),
+        ("inner-before-pdeathsig", &[Sup, Link]),
+        ("inner-after-pdeathsig", &[Sup, Link]),
+        ("inner-after-nft", &[Sup, Link]),
+        ("barrier", &[Sup, Link]),
+        ("helper", &[Sup]),
+    ];
+    for (phase, victims) in cases {
+        for victim in victims {
+            let mut options = Options {
+                env: vec![("KICKOFF_TEST_GATE", phase.to_owned())],
+                ..Options::default()
+            };
+            if phase == "helper" {
+                options
+                    .env
+                    .push(("KICKOFF_TEST_STALL_HELPER", "1".to_owned()));
+            }
+            let supervisor = Supervisor::start_with(options, &["probe", "inventory"]);
+            supervisor.wait_gate(phase);
+            if phase == "before-registration" {
+                supervisor.signal("SIGKILL");
+                assert!(supervisor.exited_within(DEADLINE));
+                std::thread::sleep(DEADLINE);
+                assert!(
+                    supervisor.scope_absent(),
+                    "{phase}: a scope appeared after the supervisor died"
+                );
+                continue;
+            }
+            let dir = supervisor.scope_dir();
+            let snapshot = supervisor.scope_procs();
+            match victim {
+                Sup => supervisor.signal("SIGKILL"),
+                Link => {
+                    let link = supervisor.wait_procs_named("kickoff-box-link", 1);
+                    let [pid] = link[..] else {
+                        panic!("{phase}: expected one live trusted link, found {link:?}");
+                    };
+                    std::process::Command::new("kill")
+                        .args(["-KILL", &pid.to_string()])
+                        .status()
+                        .unwrap();
+                    // A link killed while the supervisor holds: let the
+                    // supervisor go on and find it dead.
+                    if phase == "barrier" {
+                        supervisor.release_gate(phase);
+                    }
+                }
+            }
+            assert!(
+                within(DEADLINE, || !dir.exists()
+                    && !snapshot.iter().any(|p| alive(*p))),
+                "{phase}, {victim:?} killed: the launch outlived the deadline: {}",
+                supervisor.report()
+            );
+        }
+    }
+}

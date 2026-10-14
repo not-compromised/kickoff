@@ -25,6 +25,7 @@ use rustix::process::{Resource, Rlimit};
 
 use super::Refused;
 use super::barrier::{Check, FSIZE, Fault, NAMESPACES, NOFILE, Proc, identity};
+use super::gate;
 use super::install::require_null_stdio;
 use super::net::{GATEWAY, NFT, same_ruleset};
 
@@ -79,6 +80,7 @@ fn run(args: &[OsString]) -> Result<Infallible, Refused> {
 
 fn enter(parent: &str, scope: &str, next: &[OsString]) -> Result<Infallible, Refused> {
     sweep(&[])?;
+    gate::hold("enter-before-pdeathsig");
     arm_parent_death()?;
     // Parent-death signals never fire for a parent that is already dead.
     let parent: i32 = parent.parse().map_err(|_| Refused::Malformed)?;
@@ -87,6 +89,7 @@ fn enter(parent: &str, scope: &str, next: &[OsString]) -> Result<Infallible, Ref
         return Err(Refused::ParentGone);
     }
     require_scope(scope)?;
+    gate::hold("enter-after-pdeathsig");
     exec(next)
 }
 
@@ -102,7 +105,9 @@ fn inner(
     next: &[OsString],
 ) -> Result<Infallible, Refused> {
     sweep(&[])?;
+    gate::hold("inner-before-pdeathsig");
     arm_parent_death()?;
+    gate::hold("inner-after-pdeathsig");
     // The first descriptors opened after the sweep: READY_FD and RELEASE_FD.
     let ready = open_pipe(&run.join(READY), OFlags::WRONLY)?;
     let release = open_pipe(&run.join(RELEASE), OFlags::RDONLY)?;
@@ -135,6 +140,7 @@ fn inner(
     if !same_ruleset(&nft(&["list", "ruleset"], None)?, &ruleset) {
         return Err(Refused::Barrier(Check::Nft));
     }
+    gate::hold("inner-after-nft");
     if fault == Fault::Nft {
         nft(
             &["add", "rule", "inet", "gamebox", "output", "accept"],
