@@ -16,6 +16,7 @@ workspace = true
 mutant-si38-no-direct-kill = []
 mutant-si38-no-bindsto = []
 mutant-si38-sigterm-stop = []
+mutant-si38-no-limits = []
 mutant-si36-no-fd-sweep = []
 mutant-si36-barrier-skip = []
 mutant-si14-no-deny-set = []

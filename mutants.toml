@@ -649,6 +649,9 @@ note = "the public Kick future owns publication after removing the peer"
 [[mutant]] si = "SI-34", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si34-copy-writable", test = "si_34_game_cannot_change_its_copy_or_see_launcher_state", note = "the game copy is bound read-write into the box"
 [[mutant]] si = "SI-35", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si35-host-x11-mounted", test = "si_35_no_host_display_or_bus_socket_in_the_box", note = "the host's X11 socket directory is mounted into the box"
 
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-limits", test = "si_38_scope_carries_the_box_limits", note = "the scope is created without its memory, swap, task and CPU limits"
+[[unmutated]] test = "si_38_supervisor_killed_during_or_after_a_launch_leaves_nothing", reason = "positive composition through the whole chain: the scope binding and the links' parent-death signals each end it alone; each teardown path has its own mutant in the stand-in tests"
+
 # Named by the design for later milestones; the code they mutate does not exist on M2.
 
 [[pending]]

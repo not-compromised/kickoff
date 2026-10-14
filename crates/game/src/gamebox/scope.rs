@@ -92,7 +92,9 @@ pub(super) fn create_args(owner: &Owner, scope: &str) -> Vec<OsString> {
         args.push("--property=KillSignal=SIGKILL".into());
     }
     args.push("--property=SendSIGKILL=yes".into());
-    args.extend(LIMITS.iter().map(|l| format!("--property={l}")));
+    if !cfg!(feature = "mutant-si38-no-limits") {
+        args.extend(LIMITS.iter().map(|l| format!("--property={l}")));
+    }
     args.push("--".into());
     args.into_iter().map(OsString::from).collect()
 }
