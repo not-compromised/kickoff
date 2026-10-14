@@ -16,6 +16,8 @@ pub fn probe_main() -> ExitCode {
         Some("files") => return files(),
         Some("display") => return display(),
         Some("lans") => return lans(),
+        Some("limits") => return limits(),
+        Some("eat") => return eat(),
         _ => {}
     }
     let arg = args.first();
@@ -148,6 +150,73 @@ fn lans() -> ExitCode {
         return ExitCode::from(73);
     }
     ExitCode::SUCCESS
+}
+
+/// SI-38's limits, enforced rather than configured, under the probe's
+/// small limits (16 MiB prefix, 64 tasks, 64 MiB): filling the prefix in
+/// 1 MiB files stops with ENOSPC within its size; forking stops with EAGAIN
+/// below the task limit; and a child that keeps allocating is killed by the
+/// kernel. Every loop is bounded, so a missing limit fails the probe instead
+/// of loading the machine. Exit 0, or 80 to 82 for the failed check.
+fn limits() -> ExitCode {
+    use std::io::Write;
+    use std::os::unix::process::ExitStatusExt;
+    let chunk = vec![0x4bu8; 1 << 20];
+    let mut written = 0u64;
+    let mut stopped = false;
+    for n in 0..64 {
+        let file = std::fs::File::create(format!("/kickoff/prefix/fill-{n}"));
+        let result = file.and_then(|mut f| f.write_all(&chunk).and_then(|()| f.sync_all()));
+        match result {
+            Ok(()) => written = written.saturating_add(1 << 20),
+            Err(e) => {
+                stopped = e.raw_os_error() == Some(nix::errno::Errno::ENOSPC as i32);
+                break;
+            }
+        }
+    }
+    if !stopped || written > 16 << 20 {
+        return ExitCode::from(80);
+    }
+
+    let mut children = Vec::new();
+    let mut refused = false;
+    for _ in 0..80 {
+        match respawn("hold-leaf") {
+            Ok(child) => children.push(child),
+            Err(Refused::Io(std::io::ErrorKind::WouldBlock)) => {
+                refused = true;
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    let forked = children.len();
+    for mut child in children {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if !refused || forked >= 64 {
+        return ExitCode::from(81);
+    }
+
+    let killed = respawn("eat")
+        .and_then(|mut child| Ok(child.wait()?))
+        .is_ok_and(|status| status.signal() == Some(9));
+    if !killed {
+        return ExitCode::from(82);
+    }
+    ExitCode::SUCCESS
+}
+
+/// Allocates and touches up to 256 MiB, 1 MiB at a time; returns only if
+/// nothing stopped it.
+fn eat() -> ExitCode {
+    let mut held: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..256 {
+        held.push(std::hint::black_box(vec![0x4b; 1 << 20]));
+    }
+    ExitCode::from(u8::try_from(held.len() % 2).unwrap_or(0))
 }
 
 /// SI-34 from inside the box. Exit 0 only if every write, truncate, rename,

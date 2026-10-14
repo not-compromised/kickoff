@@ -20,13 +20,36 @@ pub(super) const TEARDOWN_DEADLINE: Duration = Duration::from_secs(2);
 pub(super) const REGISTRATION_DEADLINE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(5);
 
-/// Limits of design §3.2.2 step 1, carried by the scope.
-const LIMITS: [&str; 4] = [
-    "MemoryMax=12G",
-    "MemorySwapMax=0",
-    "TasksMax=512",
-    "CPUWeight=100",
-];
+/// What one box may use: the scope's memory and task limits and the size
+/// of the prefix's writable layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Limits {
+    pub memory: u64,
+    pub tasks: u32,
+    pub prefix: u64,
+    /// Whether an out-of-memory kill inside the box stops the whole scope.
+    pub oom_stops: bool,
+}
+
+impl Limits {
+    /// Design §3.2 and §3.2.2 step 1: 12 GiB, 512 tasks, a 4 GiB prefix.
+    pub(super) const GAME: Limits = Limits {
+        memory: 12 << 30,
+        tasks: 512,
+        prefix: 4 << 30,
+        oom_stops: true,
+    };
+
+    /// Small limits a probe can reach without loading the machine. An
+    /// out-of-memory kill leaves the rest of the box running, so the probe
+    /// sees its child killed.
+    pub(super) const PROBE: Limits = Limits {
+        memory: 64 << 20,
+        tasks: 64,
+        prefix: 16 << 20,
+        oom_stops: false,
+    };
+}
 
 /// The supervisor's own service unit, read from the kernel's view of its
 /// cgroup rather than from anything it was told.
@@ -73,7 +96,7 @@ impl Owner {
 
 /// `systemd-run` arguments that create the scope, ending in `--`: the
 /// command after them runs inside the scope once it is registered.
-pub(super) fn create_args(owner: &Owner, scope: &str) -> Vec<OsString> {
+pub(super) fn create_args(owner: &Owner, scope: &str, limits: Limits) -> Vec<OsString> {
     let mut args: Vec<String> = vec![
         "--user".into(),
         "--scope".into(),
@@ -93,7 +116,16 @@ pub(super) fn create_args(owner: &Owner, scope: &str) -> Vec<OsString> {
     }
     args.push("--property=SendSIGKILL=yes".into());
     if !cfg!(feature = "mutant-si38-no-limits") {
-        args.extend(LIMITS.iter().map(|l| format!("--property={l}")));
+        args.extend([
+            format!("--property=MemoryMax={}", limits.memory),
+            "--property=MemorySwapMax=0".to_owned(),
+            format!("--property=TasksMax={}", limits.tasks),
+            "--property=CPUWeight=100".to_owned(),
+            format!(
+                "--property=OOMPolicy={}",
+                if limits.oom_stops { "stop" } else { "continue" }
+            ),
+        ]);
     }
     args.push("--".into());
     args.into_iter().map(OsString::from).collect()

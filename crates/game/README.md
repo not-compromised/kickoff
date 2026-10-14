@@ -97,6 +97,16 @@ Any failure kills the cgroup. Each property except the cgroup name and
   exchange with a public resolver is the positive control (the test needs
   internet access). The host's own addresses are tested, but no synthetic
   LAN with public addresses and no route change yet.
+- **The prefix's writable layer is a sized tmpfs.** bwrap's `--tmp-overlay`
+  writes into its unsized root tmpfs, so the setup link (root of pasta's user
+  and mount namespaces) mounts a tmpfs of the request's size on the run
+  directory's `prefix-rw`, invisible to the host, and bwrap overlays the
+  prefix base with it. Both barrier sides check the overlay's size (statvfs
+  reports the upper layer). Game launches get 4 GiB; the `limits` probe gets
+  16 MiB, 64 tasks and 64 MiB and really fills, forks and allocates.
+- **OOMPolicy.** Game scopes use `OOMPolicy=stop` (an out-of-memory kill ends
+  the box); the `limits` probe's scope uses `continue`, so the probe sees its
+  allocating child killed.
 - **Absolute tool paths** (`/usr/bin/{systemd-run,systemctl,pasta,bwrap,nft,nsenter}`).
 - **The supervisor's run directory** is `box/` (mode 0700, created
   exclusively) inside the service's `RuntimeDirectory=`, so the manager

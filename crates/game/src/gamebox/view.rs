@@ -125,8 +125,15 @@ impl View<'_> {
         if cfg!(feature = "mutant-si35-host-x11-mounted") {
             a.s(&["--ro-bind", "/tmp/.X11-unix", "/tmp/.X11-unix"]);
         }
+        // The writable layer is the sized tmpfs the setup link mounted on
+        // prefix-rw, in its own mount namespace (design §3.2 table).
         a.bind("--overlay-src", &self.run.join("prefix"), Path::new(""));
-        a.s(&["--tmp-overlay", "/kickoff/prefix"]);
+        a.bind(
+            "--overlay",
+            &self.run.join("prefix-rw").join("upper"),
+            &self.run.join("prefix-rw").join("work"),
+        );
+        a.s(&["/kickoff/prefix"]);
         a.bind("--ro-bind", self.link, &Path::new(BOX_BIN).join(LINK));
         a.bind("--ro-bind", self.probe, &Path::new(BOX_BIN).join(PROBE));
         a.s(&["--chdir", "/kickoff", "--setenv", "HOME"]);

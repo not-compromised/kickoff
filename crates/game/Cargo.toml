@@ -21,6 +21,7 @@ mutant-si38-helper-unbounded = []
 mutant-si38-registration-deaf = []
 mutant-si14-main-table-only = []
 mutant-si14-no-host-watch = []
+mutant-si38-prefix-unsized = []
 mutant-si36-no-fd-sweep = []
 mutant-si36-barrier-skip = []
 mutant-si14-no-deny-set = []
@@ -33,5 +34,5 @@ kickoff-local.workspace = true
 netlink-packet-core.workspace = true
 netlink-packet-route.workspace = true
 nix = { workspace = true, features = ["signal"] }
-rustix = { workspace = true, features = ["event", "thread", "net"] }
+rustix = { workspace = true, features = ["event", "thread", "net", "mount"] }
 thiserror.workspace = true

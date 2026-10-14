@@ -218,3 +218,17 @@ fn si_38_kill_at_each_startup_phase_leaves_nothing() {
         }
     }
 }
+
+#[test]
+fn si_38_box_limits_are_enforced() {
+    // Under the probe's small limits (16 MiB prefix, 64 tasks, 64 MiB): a
+    // prefix fill stops with ENOSPC within its size, forking stops below the
+    // task limit, and a child that keeps allocating is killed.
+    let supervisor = Supervisor::start(&["probe", "limits"]);
+    supervisor.wait_exit();
+    let report = supervisor.report();
+    assert!(
+        report.contains("barrier: released") && report.contains("box exited: exit status: 0"),
+        "a limit did not hold (80: prefix fill; 81: forks; 82: memory): {report}"
+    );
+}

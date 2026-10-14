@@ -23,6 +23,7 @@ pub enum Check {
     Capabilities,
     NoNewPrivs,
     Descriptors,
+    PrefixSize,
 }
 
 impl fmt::Display for Check {
@@ -35,6 +36,7 @@ impl fmt::Display for Check {
             Check::Capabilities => "capability sets",
             Check::NoNewPrivs => "no_new_privs",
             Check::Descriptors => "descriptor inventory",
+            Check::PrefixSize => "prefix size",
         })
     }
 }
@@ -58,10 +60,12 @@ pub(super) enum Fault {
     /// pasta keeps its default mapping of the gateway to the host's
     /// loopback, which the setup link's startup probe must notice.
     PastaMapsHost,
+    /// The prefix's writable layer is left unsized.
+    PrefixUnsized,
 }
 
 impl Fault {
-    pub(super) const ALL: [(&'static str, Fault); 7] = [
+    pub(super) const ALL: [(&'static str, Fault); 8] = [
         ("none", Fault::None),
         ("namespaces", Fault::Namespaces),
         ("nft", Fault::Nft),
@@ -69,6 +73,7 @@ impl Fault {
         ("capabilities", Fault::Capabilities),
         ("descriptors", Fault::Descriptors),
         ("pasta-maps-host", Fault::PastaMapsHost),
+        ("prefix-unsized", Fault::PrefixUnsized),
     ];
 
     pub(super) fn parse(name: &str) -> Result<Fault, Refused> {
@@ -86,6 +91,9 @@ impl Fault {
             .map_or("none", |(n, _)| n)
     }
 }
+
+/// The prefix as the box sees it.
+pub(super) const PREFIX: &str = "/kickoff/prefix";
 
 /// The namespaces the box must not share with the host, in argv order.
 pub(super) const NAMESPACES: [&str; 5] = ["user", "net", "mnt", "pid", "ipc"];
@@ -184,6 +192,23 @@ impl Proc {
     /// A descriptor for one of the process's namespaces, for `setns`.
     pub(super) fn namespace_fd(&self, ns: &str) -> Result<OwnedFd, Refused> {
         self.open(&format!("ns/{ns}"))
+    }
+
+    /// The prefix's writable layer holds exactly `bytes` (an overlay reports
+    /// its upper layer's size).
+    pub(super) fn prefix_size(&self, bytes: u64) -> Result<(), Refused> {
+        let stat = match &self.0 {
+            Base::This => rustix::fs::statvfs(PREFIX)?,
+            Base::Pinned { dir, .. } => {
+                let path = format!("root{PREFIX}");
+                let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
+                rustix::fs::fstatvfs(rustix::fs::openat(dir, path, flags, Mode::empty())?)?
+            }
+        };
+        if stat.f_blocks.checked_mul(stat.f_frsize) != Some(bytes) {
+            return Err(Refused::Barrier(Check::PrefixSize));
+        }
+        Ok(())
     }
 
     /// Device and inode of the process's executable.

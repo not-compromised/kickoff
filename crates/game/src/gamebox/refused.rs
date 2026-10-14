@@ -71,6 +71,7 @@ impl Refused {
                 Check::Capabilities => 84,
                 Check::NoNewPrivs => 85,
                 Check::Descriptors => 86,
+                Check::PrefixSize => 87,
             },
         }
     }

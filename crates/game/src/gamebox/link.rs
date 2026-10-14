@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -65,14 +66,24 @@ fn run(args: &[OsString]) -> Result<Infallible, Refused> {
         .collect::<Result<_, _>>()?;
     match (stage.to_str(), own.as_slice()) {
         (Some("enter"), [parent, scope]) => enter(parent, scope, next),
-        (Some("inner"), [scope, run, fault, port]) => {
+        (Some("inner"), [scope, run, fault, port, prefix]) => {
             let port = port.parse().map_err(|_| Refused::Malformed)?;
-            inner(scope, Path::new(run), Fault::parse(fault)?, port, next)
+            let prefix = prefix.parse().map_err(|_| Refused::Malformed)?;
+            let setup = Setup {
+                run: Path::new(run),
+                fault: Fault::parse(fault)?,
+                canary: port,
+                prefix,
+            };
+            inner(scope, &setup, next)
         }
-        (Some("barrier"), [fault, ns @ ..]) if ns.len() == NAMESPACES.len().saturating_mul(2) => {
+        (Some("barrier"), [fault, prefix, ns @ ..])
+            if ns.len() == NAMESPACES.len().saturating_mul(2) =>
+        {
             let (host, setup) = ns.split_at(NAMESPACES.len());
             let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-            barrier(Fault::parse(fault)?, &own(host), &own(setup), next)
+            let prefix = prefix.parse().map_err(|_| Refused::Malformed)?;
+            barrier(Fault::parse(fault)?, prefix, &own(host), &own(setup), next)
         }
         _ => Err(Refused::Malformed),
     }
@@ -97,13 +108,23 @@ fn enter(parent: &str, scope: &str, next: &[OsString]) -> Result<Infallible, Ref
 /// link cannot see its parent. pasta is the supervisor's direct child, and
 /// the supervisor tears the scope down when it exits at any phase; this
 /// link's own death kills everything in its PID namespace.
-fn inner(
-    scope: &str,
-    run: &Path,
+/// What the setup link builds the box's network and prefix from.
+struct Setup<'a> {
+    run: &'a Path,
     fault: Fault,
+    /// The supervisor's loopback port the startup probe must not reach.
     canary: u16,
-    next: &[OsString],
-) -> Result<Infallible, Refused> {
+    /// Bytes of the prefix's writable layer.
+    prefix: u64,
+}
+
+fn inner(scope: &str, setup: &Setup<'_>, next: &[OsString]) -> Result<Infallible, Refused> {
+    let Setup {
+        run,
+        fault,
+        canary,
+        prefix,
+    } = *setup;
     sweep(&[])?;
     gate::hold("inner-before-pdeathsig");
     arm_parent_death()?;
@@ -164,6 +185,7 @@ fn inner(
         };
         rustix::process::setrlimit(Resource::Nofile, nofile)?;
     }
+    sized_prefix(run, prefix, fault)?;
     rustix::thread::set_no_new_privs(true)?;
     for pipe in [&ready, &release] {
         rustix::io::fcntl_setfd(pipe, rustix::io::FdFlags::empty())?;
@@ -181,11 +203,37 @@ fn inner(
     exec(&next)
 }
 
+/// The prefix's writable layer is a tmpfs of `bytes`, mounted on the
+/// supervisor's `prefix-rw` in pasta's mount namespace, which the host never
+/// sees (a namespace an unprivileged user creates gets no propagation back).
+/// RLIMIT_FSIZE bounds one file; this bounds them all.
+fn sized_prefix(run: &Path, bytes: u64, fault: Fault) -> Result<(), Refused> {
+    let rw = run.join("prefix-rw");
+    if fault != Fault::PrefixUnsized && !cfg!(feature = "mutant-si38-prefix-unsized") {
+        let data = std::ffi::CString::new(format!("size={bytes},mode=0700"))
+            .map_err(|_| Refused::Malformed)?;
+        rustix::mount::mount(
+            "tmpfs",
+            &rw,
+            "tmpfs",
+            rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NODEV,
+            data.as_c_str(),
+        )?;
+    }
+    for dir in ["upper", "work"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(rw.join(dir))?;
+    }
+    Ok(())
+}
+
 /// The last link. bwrap's `--die-with-parent` and PID namespace cover its
 /// parent; it checks itself, hands over to the supervisor's outside check
 /// and execs the payload only on the release byte.
 fn barrier(
     fault: Fault,
+    prefix: u64,
     host: &[String],
     setup: &[String],
     next: &[OsString],
@@ -200,6 +248,7 @@ fn barrier(
     me.cgroup_is(|path| path == "/")?;
     me.rlimits()?;
     me.privileges()?;
+    me.prefix_size(prefix)?;
     let ready_path = format!("/proc/self/fd/{READY_FD}");
     let release_path = format!("/proc/self/fd/{RELEASE_FD}");
     let pipes = [

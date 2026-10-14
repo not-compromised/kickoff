@@ -20,7 +20,7 @@ use super::install::{LINK, PROBE, sibling};
 use super::link::{READY, RELEASE, RULESET, SETUP_NS};
 use super::net::{self, PASTA, same_ruleset};
 use super::netlink::{self, HostWatch};
-use super::scope::{self, Owner, REGISTRATION_DEADLINE, Scope, TEARDOWN_DEADLINE};
+use super::scope::{self, Limits, Owner, REGISTRATION_DEADLINE, Scope, TEARDOWN_DEADLINE};
 use super::view::{BWRAP, View, in_box};
 
 const NSENTER: &str = "/usr/bin/nsenter";
@@ -57,6 +57,18 @@ enum Payload {
     Display,
     /// Sends to the test fixtures' globally addressed LANs (SI-14).
     Lans,
+    /// Fills the prefix, forks and allocates until the box's small probe
+    /// limits stop it (SI-38).
+    Limits,
+}
+
+impl Payload {
+    fn limits(self) -> Limits {
+        match self {
+            Payload::Limits => Limits::PROBE,
+            _ => Limits::GAME,
+        }
+    }
 }
 
 impl Request {
@@ -71,6 +83,7 @@ impl Request {
             "files" => Ok(Payload::Files),
             "display" => Ok(Payload::Display),
             "lans" => Ok(Payload::Lans),
+            "limits" => Ok(Payload::Limits),
             _ => Err(Refused::Malformed),
         };
         match args.as_slice() {
@@ -125,9 +138,14 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
     let mut events = Events::new()?;
 
     let name = owner.scope_name();
+    let limits = match request {
+        Request::StandIn => Limits::GAME,
+        Request::Probe(payload, _) => payload.limits(),
+    };
+    let prefix = limits.prefix.to_string();
     let mut chain = scope::create_command();
     chain
-        .args(scope::create_args(&owner, &name))
+        .args(scope::create_args(&owner, &name, limits))
         .arg(&link)
         .arg("enter")
         .arg(std::process::id().to_string())
@@ -170,10 +188,10 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
                 .arg(&link)
                 .args(["inner", &name])
                 .arg(&run.0)
-                .args([fault.name(), &canary_port, "--", BWRAP])
+                .args([fault.name(), &canary_port, &prefix, "--", BWRAP])
                 .args(view.bwrap_args(fault))
                 .arg(in_box(LINK))
-                .args(["barrier", fault.name()])
+                .args(["barrier", fault.name(), &prefix])
                 .args(&host)
                 .args(NAMESPACES.iter().map(|ns| format!("{SETUP_NS}{ns}")))
                 .arg("--")
@@ -188,6 +206,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
                         .map(Ipv4Addr::to_string),
                 ),
                 Payload::Lans => chain.arg("lans"),
+                Payload::Limits => chain.arg("limits"),
             };
             Some(Boxed {
                 _run: run,
@@ -198,6 +217,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
                 host,
                 ruleset,
                 link_id: identity(&link)?,
+                prefix: limits.prefix,
             })
         }
     };
@@ -287,6 +307,8 @@ fn conclude(halt: Halt) -> Result<End, Refused> {
 
 /// The supervisor's half of a launch through the whole chain.
 struct Boxed {
+    /// Bytes of the prefix's writable layer.
+    prefix: u64,
     /// Held, not read: the box's mounts come from it until teardown.
     _run: RunDir,
     canary: TcpListener,
@@ -398,6 +420,7 @@ impl Boxed {
         link.cgroup_is(|path| path.ends_with(&suffix))?;
         link.rlimits()?;
         link.privileges()?;
+        link.prefix_size(self.prefix)?;
         link.descriptors(&link.descriptor_numbers()?, &[self.release_id])?;
         if !cfg!(feature = "mutant-si14-no-startup-probe") {
             match self.canary.accept() {
@@ -495,7 +518,7 @@ impl RunDir {
         for (name, text) in files {
             std::fs::write(run.0.join(name), text)?;
         }
-        for dir in ["game", "prefix"] {
+        for dir in ["game", "prefix", "prefix-rw"] {
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(run.0.join(dir))?;
