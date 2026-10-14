@@ -3,12 +3,13 @@
 //! it never changes the DataOnly protocol used on external connections.
 
 use std::collections::BTreeMap;
+use std::ffi::{CString, OsStr, OsString};
 use std::io::{self, IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream as StdStream;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,47 +36,95 @@ const CONNECTION: u8 = 2;
 pub struct Facade {
     server: Server,
     control: UnixStream,
-    child: ChildGuard,
+    child: Spawned,
 }
 
-struct ChildGuard(Child);
+/// The worker the facade execs: the installed daemon's worker mode, or
+/// another mode of a test's own executable. It inherits the facade's
+/// environment with these overrides. Its stdin is the control pair, stdout
+/// and stderr are `/dev/null`, and it receives no other descriptor (SI-36).
+#[derive(Debug, Clone)]
+pub struct WorkerLaunch {
+    program: PathBuf,
+    args: Vec<OsString>,
+    envs: Vec<(OsString, OsString)>,
+}
 
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+impl WorkerLaunch {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            envs: Vec::new(),
+        }
+    }
+
+    pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+        self.args.push(arg.as_ref().to_owned());
+        self
+    }
+
+    pub fn args<I, S>(&mut self, args: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        for arg in args {
+            self.arg(arg);
+        }
+        self
+    }
+
+    pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
+        let key = key.as_ref().to_owned();
+        self.envs.retain(|(existing, _)| *existing != key);
+        self.envs.push((key, value.as_ref().to_owned()));
+        self
+    }
+
+    fn environment(&self) -> Vec<(OsString, OsString)> {
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| self.envs.iter().all(|(set, _)| set != key))
+            .collect();
+        env.extend(self.envs.iter().cloned());
+        env
     }
 }
 
 impl Facade {
-    /// `command` must exec the worker mode of the installed daemon. Tests use
-    /// another mode of their own executable. No secrets may exist in this
-    /// process, its argv, or its environment.
+    /// `worker` must exec the worker mode of the installed daemon. No
+    /// secrets may exist in this process, its argv, or its environment.
     pub async fn spawn(
         dir: &RuntimeDir,
         clients: Trust,
-        mut command: Command,
+        worker_launch: WorkerLaunch,
     ) -> Result<Self, IpcError> {
         harden_facade()?;
         let ours = std::fs::metadata(std::env::current_exe()?)?;
-        let worker = std::fs::metadata(command.get_program())?;
+        let worker = std::fs::metadata(&worker_launch.program)?;
         if !cfg!(feature = "mutant-si7-worker-exe-unchecked")
             && (ours.dev(), ours.ino()) != (worker.dev(), worker.ino())
         {
             return Err(IpcError::PeerRejected);
         }
         if !cfg!(feature = "mutant-si30-facade-no-probe") {
-            probe_core_suppression(dir, &command).await?;
+            probe_core_suppression(dir, &worker_launch).await?;
         }
         let mut server = Server::bind(dir, clients)?;
         server.slots = Arc::new(Semaphore::new(connection_limit()));
         let (parent, child) = StdStream::pair()?;
-        let mut child = ChildGuard(command.stdin(Stdio::from(OwnedFd::from(child))).spawn()?);
+        let mut child = spawn_clean(
+            &worker_launch.program,
+            &worker_launch.args,
+            &worker_launch.environment(),
+            Some(OwnedFd::from(child)),
+            !cfg!(feature = "mutant-si36-worker-inherits-fds"),
+        )?;
         let control = into_async(parent)?;
         let (tag, fds) = timeout(HANDSHAKE_DEADLINE, receive(&control))
             .await
             .map_err(|_| IpcError::Timeout)??;
-        if tag != READY || !fds.is_empty() || child.0.try_wait()?.is_some() {
+        if tag != READY || !fds.is_empty() || child.try_exit()?.is_some() {
             return Err(IpcError::Malformed);
         }
         Ok(Self {
@@ -99,7 +148,7 @@ impl Facade {
                     return Err(IpcError::Malformed);
                 }
                 _ = child_tick.tick() => {
-                    if self.child.0.try_wait()?.is_some() {
+                    if self.child.try_exit()?.is_some() {
                         return Err(IpcError::Closed);
                     }
                 }
@@ -337,6 +386,7 @@ impl Worker {
                 .await
                 .map_err(|_| IpcError::Closed)?;
             let transferred = self.incoming.recv().await.ok_or(IpcError::Closed)?;
+            still_nondumpable()?;
             if let Ok(channel) = admit_stream(
                 &self.clients,
                 Arc::clone(&self.health),
@@ -357,6 +407,19 @@ impl Drop for Worker {
         self.registry.close_all();
         self.slots.close();
         self.monitor.abort();
+    }
+}
+
+/// A credential change (uid, gid, fsuid, capabilities) resets "dumpable" to
+/// `fs.suid_dumpable`, which may be 2. The worker hardens once at startup, so
+/// it re-checks before reading any client bytes, which may carry secrets.
+pub(super) fn still_nondumpable() -> Result<(), IpcError> {
+    if cfg!(feature = "mutant-si30-worker-dumpable-unchecked") {
+        return Ok(());
+    }
+    match rustix::process::dumpable_behavior() {
+        Ok(rustix::process::DumpableBehavior::NotDumpable) => Ok(()),
+        _ => Err(IpcError::Hardening),
     }
 }
 
@@ -584,9 +647,24 @@ impl Drop for Scratch {
     }
 }
 
-/// Kills and reaps a spawned probe unless its status was already collected.
-struct ProbeGuard(Option<rustix::process::Pid>);
-impl Drop for ProbeGuard {
+/// A direct child, killed and reaped on drop unless its exit status was
+/// already collected, so its pid cannot be recycled under the handle.
+struct Spawned(Option<rustix::process::Pid>);
+
+impl Spawned {
+    fn try_exit(&mut self) -> io::Result<Option<rustix::process::WaitStatus>> {
+        let Some(pid) = self.0 else {
+            return Err(io::ErrorKind::NotFound.into());
+        };
+        let status = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG)?;
+        if status.is_some() {
+            self.0 = None;
+        }
+        Ok(status.map(|(_, status)| status))
+    }
+}
+
+impl Drop for Spawned {
     fn drop(&mut self) {
         if let Some(pid) = self.0.take() {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
@@ -597,33 +675,47 @@ impl Drop for ProbeGuard {
 
 /// posix_spawn rather than `Command`: its file actions close, by number, the
 /// descriptors this process inherited without close-on-exec from whatever
-/// launched it. Safe Rust cannot own those, and the probe must not carry them
-/// into a crash.
-fn spawn_probe(worker: &Command, scratch: &std::path::Path) -> Result<ProbeGuard, IpcError> {
+/// launched it. Safe Rust cannot own those to mark them close-on-exec. The
+/// child gets exactly `stdin` (or `/dev/null`) on 0, `/dev/null` on 1 and 2,
+/// and with `sweep` nothing else.
+fn spawn_clean(
+    program: &Path,
+    args: &[OsString],
+    env: &[(OsString, OsString)],
+    stdin: Option<OwnedFd>,
+    sweep: bool,
+) -> Result<Spawned, IpcError> {
     use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, posix_spawn};
-    use std::ffi::CString;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
-    let cstring = |bytes: &[u8]| CString::new(bytes).map_err(|_| IpcError::Hardening);
-    let program = cstring(worker.get_program().as_bytes())?;
+    let cstring = |bytes: &[u8]| {
+        CString::new(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+    };
+    let program = cstring(program.as_os_str().as_bytes())?;
     let mut argv = vec![program.clone()];
-    for arg in worker.get_args() {
+    for arg in args {
         argv.push(cstring(arg.as_bytes())?);
     }
-    let mut marker = format!("{CORE_PROBE_ENV}=").into_bytes();
-    marker.extend_from_slice(scratch.as_os_str().as_bytes());
-    let envp = [cstring(&marker)?];
+    let mut envp = Vec::with_capacity(env.len());
+    for (key, value) in env {
+        let mut pair = key.as_bytes().to_vec();
+        pair.push(b'=');
+        pair.extend_from_slice(value.as_bytes());
+        envp.push(cstring(&pair)?);
+    }
     let null = std::fs::File::options()
         .read(true)
         .write(true)
         .open("/dev/null")?;
+    let input = stdin.as_ref().map_or(null.as_raw_fd(), AsRawFd::as_raw_fd);
     let mut actions = PosixSpawnFileActions::init().map_err(io::Error::from)?;
-    for target in 0..3 {
+    actions.add_dup2(input, 0).map_err(io::Error::from)?;
+    for target in 1..3 {
         actions
             .add_dup2(null.as_raw_fd(), target)
             .map_err(io::Error::from)?;
     }
-    if !cfg!(feature = "mutant-si30-probe-inherits-fds") {
+    if sweep {
         for fd in open_descriptors()? {
             if fd >= 3 {
                 actions.add_close(fd).map_err(io::Error::from)?;
@@ -633,11 +725,12 @@ fn spawn_probe(worker: &Command, scratch: &std::path::Path) -> Result<ProbeGuard
     let attr = PosixSpawnAttr::init().map_err(io::Error::from)?;
     let pid =
         posix_spawn(program.as_c_str(), &actions, &attr, &argv, &envp).map_err(io::Error::from)?;
-    let pid = rustix::process::Pid::from_raw(pid.as_raw()).ok_or(IpcError::Hardening)?;
-    Ok(ProbeGuard(Some(pid)))
+    let pid = rustix::process::Pid::from_raw(pid.as_raw())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    Ok(Spawned(Some(pid)))
 }
 
-async fn probe_core_suppression(dir: &RuntimeDir, worker: &Command) -> Result<(), IpcError> {
+async fn probe_core_suppression(dir: &RuntimeDir, worker: &WorkerLaunch) -> Result<(), IpcError> {
     use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -661,21 +754,23 @@ async fn probe_core_suppression(dir: &RuntimeDir, worker: &Command) -> Result<()
         path,
         inode: (meta.dev(), meta.ino()),
     };
-    let mut probe = spawn_probe(worker, &scratch.path)?;
+    let mut probe = spawn_clean(
+        &worker.program,
+        &worker.args,
+        &[(
+            OsString::from(CORE_PROBE_ENV),
+            scratch.path.clone().into_os_string(),
+        )],
+        None,
+        !cfg!(feature = "mutant-si30-probe-inherits-fds"),
+    )?;
     timeout(Duration::from_secs(3), async {
         let mut tick = interval(Duration::from_millis(5));
         loop {
             tick.tick().await;
-            let Some(pid) = probe.0 else {
-                return Err(IpcError::Hardening);
-            };
-            let Some((_, status)) =
-                rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG)
-                    .map_err(io::Error::from)?
-            else {
+            let Some(status) = probe.try_exit()? else {
                 continue;
             };
-            probe.0 = None;
             // WCOREDUMP: the kernel wrote a core to a file, a pipe or a
             // socket handler. A file left in the cwd is a dump whatever the
             // status says.

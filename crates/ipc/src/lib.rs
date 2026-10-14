@@ -27,7 +27,7 @@ pub use command::{
 };
 #[cfg(target_os = "linux")]
 pub use linux::{
-    Channel, Client, Facade, RuntimeDir, Server, Trust, Worker, connect,
+    Channel, Client, Facade, RuntimeDir, Server, Trust, Worker, WorkerLaunch, connect,
     run_core_probe_if_requested,
 };
 
@@ -36,7 +36,7 @@ pub use linux::{
 pub enum IpcError {
     #[error("not supported on this platform yet")]
     Unsupported,
-    #[error("kernel core-dump suppression probe failed")]
+    #[error("core-dump suppression could not be verified")]
     Hardening,
     /// The startup probe showed that this system's crash handling would keep
     /// a dump of a Kickoff process. Kickoff refuses to start rather than risk

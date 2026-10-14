@@ -21,7 +21,7 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 fn linux_main() -> Result<(), kickoff_ipc::IpcError> {
     kickoff_ipc::run_core_probe_if_requested()?;
-    use kickoff_ipc::{Facade, IpcError, Refusal, Reply, RuntimeDir, Trust, Worker};
+    use kickoff_ipc::{Facade, IpcError, Refusal, Reply, RuntimeDir, Trust, Worker, WorkerLaunch};
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let worker = match args.as_slice() {
         [] => false,
@@ -55,12 +55,9 @@ fn linux_main() -> Result<(), kickoff_ipc::IpcError> {
             }
         } else {
             let dir = RuntimeDir::open()?;
-            let mut command = std::process::Command::new(std::env::current_exe()?);
-            command
-                .arg("--ipc-worker")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            Facade::spawn(&dir, Trust::clients()?, command)
+            let mut worker = WorkerLaunch::new(std::env::current_exe()?);
+            worker.arg("--ipc-worker");
+            Facade::spawn(&dir, Trust::clients()?, worker)
                 .await?
                 .run()
                 .await

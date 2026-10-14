@@ -187,10 +187,12 @@ scaffolding M2.
   operations without iroh's raw-key accessor or `Deref`.
 - Linux kickoffd applies the facade core policy as its first application action,
   before probe dispatch, arguments, runtime or trust. The genuine exec crash
-  probe still gates listening; it is spawned through `posix_spawn` so every
-  descriptor the daemon inherited is closed in it, since safe Rust cannot own
-  a leaked descriptor to mark it close-on-exec. The worker becomes nondumpable
-  with zero limits before its runtime. Which host crash configurations start
+  probe still gates listening. The probe and the worker are both spawned
+  through `posix_spawn` (`WorkerLaunch`, not `Command`), so every descriptor
+  the daemon inherited is closed in them, since safe Rust cannot own a leaked
+  descriptor to mark it close-on-exec. The worker becomes nondumpable with
+  zero limits before its runtime, and re-checks that before reading client
+  bytes. Which host crash configurations start
   and which refuse is the table in design §6.4; the gate's tests run on the
   host's own `core_pattern`, and the zero-hard-limit test expects the outcome
   that pattern implies. Runtime/loader work before Rust `main` remains outside

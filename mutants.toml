@@ -245,6 +245,30 @@ feature = "mutant-si30-probe-scratch-unchecked"
 test = "si_30_facade_refuses_by_name_when_the_probe_leaves_a_core"
 note = "a core file left in the probe's scratch directory does not refuse startup"
 
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si36-worker-inherits-fds"
+test = "si_36_worker_never_holds_a_descriptor_leaked_to_its_launcher"
+note = "the facade spawns the secret-holding worker without closing descriptors its launcher leaked"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-worker-dumpable-unchecked"
+test = "si_30_worker_refuses_clients_once_dumpable_again"
+note = "the worker accepts a client after becoming dumpable again"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
+test_crate = "kickoff-ipc"
+feature = "mutant-si30-worker-dumpable-unchecked"
+test = "si_30_worker_channel_refuses_requests_once_dumpable_again"
+note = "a worker channel reads a request after the worker became dumpable again"
+
 [[unmutated]]
 test = "si_30_facade_follows_a_zero_hard_core_limit"
 reason = "availability under an inherited zero hard core limit; its expected outcome follows the host's core_pattern, so a mutant would die on piped hosts and survive on file hosts. The refusal it relies on is held host-independently by mutant-si30-probe-scratch-unchecked"

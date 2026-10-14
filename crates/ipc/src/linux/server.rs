@@ -172,7 +172,7 @@ pub(super) async fn admit_stream(
         dead: false,
         health,
         _slot: slot,
-        _lease: lease,
+        lease,
     })
 }
 
@@ -201,7 +201,8 @@ pub struct Channel {
     dead: bool,
     health: Arc<Counters>,
     _slot: OwnedSemaphorePermit,
-    _lease: Option<super::facade::Lease>,
+    /// Present on channels a facade transferred to the hardened worker.
+    lease: Option<super::facade::Lease>,
 }
 
 impl std::fmt::Debug for Channel {
@@ -229,6 +230,12 @@ impl Channel {
     pub async fn recv(&mut self) -> Result<Request, IpcError> {
         if self.pending {
             self.reply(Reply::Refused(Refusal::Failed)).await?;
+        }
+        if self.lease.is_some()
+            && let Err(error) = super::facade::still_nondumpable()
+        {
+            self.dead = true;
+            return Err(error);
         }
         loop {
             if self.dead {

@@ -11,7 +11,7 @@ mod trust;
 
 pub use client::{Client, connect};
 pub use dir::RuntimeDir;
-pub use facade::{Facade, Worker, run_core_probe_if_requested};
+pub use facade::{Facade, Worker, WorkerLaunch, run_core_probe_if_requested};
 pub use server::{Channel, Server};
 pub(crate) use stream::AncillaryRefused;
 pub use trust::Trust;

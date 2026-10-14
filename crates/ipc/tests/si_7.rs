@@ -590,16 +590,13 @@ fn hardened_server_helper() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let dir = RuntimeDir::open_in(Path::new(&base)).unwrap();
-        let mut worker = std::process::Command::new(me());
+        let mut worker = kickoff_ipc::WorkerLaunch::new(me());
         worker.args([
             "--exact",
             "hardened_worker_helper",
             "--nocapture",
             "--test-threads=1",
         ]);
-        worker
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
         let facade = kickoff_ipc::Facade::spawn(&dir, trust_me(), worker)
             .await
             .unwrap();

@@ -30,9 +30,14 @@ diagnostics schema (design §3.4, §6.4, SI-22, SI-30).
   to start if it fails. The inspectable facade applies its one-byte core limit
   (zero under an inherited zero hard limit) as its first application action
   and verifies a genuine exec crash probe before listening; design §6.4 lists
-  which host crash configurations start and which refuse. Not dumpable means no core dump at all, even through a
-  core-pattern pipe, and no `/proc/<pid>/mem` or `ptrace` access for other
-  processes of the same user.
+  which host crash configurations start and which refuse. Not dumpable means
+  no core dump at all, even through a core-pattern pipe, and no
+  `/proc/<pid>/mem` or `ptrace` access for other processes of the same user.
+- Rule: a hardened process makes no credential change (uid, gid, fsuid,
+  capabilities) and no exec. Either resets "dumpable" to `fs.suid_dumpable`,
+  which may be 1 or 2. kickoffd's worker re-checks that it is still not
+  dumpable before it reads any client bytes and refuses with
+  `IpcError::Hardening` otherwise.
 - `identity` (Linux): `IdentityStore::{open, open_in, load_or_create, reset,
   trust_list, save_trust}` and `TrustList::{state, trusted, trust, revoke}`.
   The key lives in `$XDG_DATA_HOME/kickoff/state/identity` (0600, in a 0700

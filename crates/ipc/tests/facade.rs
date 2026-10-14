@@ -9,7 +9,9 @@
 mod common;
 use common::*;
 use kickoff_ipc::role::Cli;
-use kickoff_ipc::{CliCommand, Facade, IpcError, Reply, Request, Trust, Worker, connect};
+use kickoff_ipc::{
+    CliCommand, Facade, IpcError, Reply, Request, Trust, Worker, WorkerLaunch, connect,
+};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::process::CommandExt;
@@ -18,6 +20,10 @@ use std::time::Duration;
 
 const MODE: &str = "KIPC_FACADE_MODE";
 const BASE: &str = "KIPC_FACADE_BASE";
+/// Simulates the reset of "dumpable" that a credential change performs:
+/// `before-accept` or `after-accept`.
+const REDUMP: &str = "KIPC_FACADE_REDUMP";
+const CANARY: &str = "leak-canary";
 
 fn command(mode: &str) -> Command {
     let mut command = Command::new(me());
@@ -30,6 +36,19 @@ fn command(mode: &str) -> Command {
         ])
         .env(MODE, mode);
     command
+}
+
+fn launch(mode: &str) -> WorkerLaunch {
+    let mut worker = WorkerLaunch::new(me());
+    worker
+        .args([
+            "--exact",
+            "process_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(MODE, mode);
+    worker
 }
 
 fn emit(message: &str) {
@@ -47,7 +66,12 @@ fn process_helper() {
         // A launcher that leaks a descriptor or imposes a zero hard core
         // limit hands both to the facade across exec.
         let _leaked = if mode == "leaky-launcher" {
-            let leaked = std::fs::File::open("/dev/null").unwrap();
+            // Writable, as SI-36's inheritance test requires.
+            let base = std::env::var_os(BASE).unwrap();
+            let leaked = std::fs::File::options()
+                .append(true)
+                .open(std::path::Path::new(&base).join(CANARY))
+                .unwrap();
             rustix::io::fcntl_setfd(&leaked, rustix::io::FdFlags::empty()).unwrap();
             Some(leaked)
         } else {
@@ -86,8 +110,7 @@ fn process_helper() {
                 } else {
                     trust_me()
                 };
-                let mut worker_command = command("worker");
-                worker_command.stdout(Stdio::null()).stderr(Stdio::null());
+                let worker_command = launch("worker");
                 let facade = Facade::spawn(&dir, clients, worker_command).await.unwrap();
                 let limit = rustix::process::getrlimit(rustix::process::Resource::Core);
                 assert_eq!(limit.current, Some(1));
@@ -100,12 +123,11 @@ fn process_helper() {
                 let _ = facade.run().await;
             }
             "worker" => {
-                if let Some(base) = std::env::var_os(BASE) {
-                    std::fs::write(
-                        std::path::Path::new(&base).join("worker.pid"),
-                        std::process::id().to_string(),
-                    )
-                    .unwrap();
+                let base = std::env::var_os(BASE).map(std::path::PathBuf::from);
+                if let Some(base) = &base {
+                    std::fs::write(base.join("worker.pid"), std::process::id().to_string())
+                        .unwrap();
+                    write_through_leaked_canary(base);
                 }
                 kickoff_secret::harden_process().unwrap();
                 assert_eq!(
@@ -116,9 +138,37 @@ fn process_helper() {
                 assert_eq!(limit.current, Some(0));
                 assert_eq!(limit.maximum, Some(0));
                 let mut worker = Worker::inherit(trust_me(), trust_me()).await.unwrap();
-                while let Ok(mut channel) = worker.accept().await {
+                let redump = std::env::var(REDUMP).unwrap_or_default();
+                if redump == "before-accept" {
+                    make_dumpable();
+                }
+                let record = move |error: IpcError| {
+                    if let Some(base) = &base {
+                        std::fs::write(base.join("worker.result"), format!("{error:?}")).unwrap();
+                    }
+                };
+                loop {
+                    let mut channel = match worker.accept().await {
+                        Ok(channel) => channel,
+                        Err(error) => {
+                            record(error);
+                            break;
+                        }
+                    };
+                    let redump = redump.clone();
+                    let record = record.clone();
                     tokio::spawn(async move {
-                        while let Ok(request) = channel.recv().await {
+                        if redump == "after-accept" {
+                            make_dumpable();
+                        }
+                        loop {
+                            let request = match channel.recv().await {
+                                Ok(request) => request,
+                                Err(error) => {
+                                    record(error);
+                                    break;
+                                }
+                            };
                             let reply = match request {
                                 Request::Cli(CliCommand::Join(ticket)) => Reply::Invite(ticket),
                                 _ => Reply::Done,
@@ -165,8 +215,7 @@ fn process_helper() {
             "facade-zero-core" => {
                 let base = std::env::var_os(BASE).unwrap();
                 let dir = kickoff_ipc::RuntimeDir::open_in(std::path::Path::new(&base)).unwrap();
-                let mut worker = command("worker");
-                worker.stdout(Stdio::null()).stderr(Stdio::null());
+                let worker = launch("worker");
                 match Facade::spawn(&dir, trust_me(), worker).await {
                     Ok(_facade) => {
                         let limit = rustix::process::getrlimit(rustix::process::Resource::Core);
@@ -192,6 +241,33 @@ fn process_helper() {
             _ => panic!("unknown test mode"),
         }
     });
+}
+
+/// The SI-36 test hook: writes through every inherited descriptor that names
+/// the launcher's canary. A worker that received none leaves it empty.
+fn write_through_leaked_canary(base: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(canary) = std::fs::metadata(base.join(CANARY)) else {
+        return;
+    };
+    let fds: Vec<_> = std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    for fd in fds {
+        if let Ok(target) = std::fs::metadata(&fd)
+            && (target.dev(), target.ino()) == (canary.dev(), canary.ino())
+        {
+            let mut file = std::fs::File::options().append(true).open(&fd).unwrap();
+            file.write_all(b"leaked").unwrap();
+        }
+    }
+}
+
+/// What a uid, gid, fsuid or capability change does to a hardened process
+/// when `fs.suid_dumpable` is 1 or 2.
+fn make_dumpable() {
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::Dumpable).unwrap();
 }
 
 fn launcher_target(mode: &str) -> Option<&'static str> {
@@ -297,8 +373,13 @@ impl Running {
     }
 }
 fn helper(base: &TempBase, mode: &str) -> Running {
+    helper_with(base, mode, &[])
+}
+
+fn helper_with(base: &TempBase, mode: &str, envs: &[(&str, &str)]) -> Running {
     let mut child = command(mode)
         .env(BASE, base.path())
+        .envs(envs.iter().copied())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -311,7 +392,11 @@ fn helper(base: &TempBase, mode: &str) -> Running {
 }
 
 fn facade(base: &TempBase, mode: &str) -> Running {
-    let mut running = helper(base, mode);
+    facade_with(base, mode, &[])
+}
+
+fn facade_with(base: &TempBase, mode: &str, envs: &[(&str, &str)]) -> Running {
+    let mut running = helper_with(base, mode, envs);
     assert_eq!(running.line(), "ready");
     let pid = std::fs::read_to_string(base.path().join("worker.pid"))
         .unwrap()
@@ -587,7 +672,7 @@ async fn si_7_facade_refuses_substituted_worker_executable() {
     let dir = base.dir();
     let rogue = base.path().join("rogue-worker");
     std::fs::copy(me(), &rogue).unwrap();
-    let mut worker = Command::new(rogue);
+    let mut worker = WorkerLaunch::new(rogue);
     worker
         .args([
             "--exact",
@@ -595,9 +680,7 @@ async fn si_7_facade_refuses_substituted_worker_executable() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(MODE, "rogue-worker")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .env(MODE, "rogue-worker");
     assert!(
         matches!(
             Facade::spawn(&dir, trust_me(), worker).await,
@@ -619,7 +702,7 @@ fn bad_probe_helper() {
 async fn si_30_facade_requires_kernel_crash_probe() {
     let base = TempBase::new();
     let dir = base.dir();
-    let mut worker = Command::new(me());
+    let mut worker = WorkerLaunch::new(me());
     worker
         .args([
             "--exact",
@@ -627,9 +710,7 @@ async fn si_30_facade_requires_kernel_crash_probe() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(MODE, "worker")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .env(MODE, "worker");
     assert!(
         matches!(
             Facade::spawn(&dir, trust_me(), worker).await,
@@ -671,7 +752,7 @@ fn hanging_probe_helper() {
 async fn si_30_facade_core_probe_timeout_reaps_child_and_scratch() {
     let base = TempBase::new();
     let dir = base.dir();
-    let mut worker = Command::new(me());
+    let mut worker = WorkerLaunch::new(me());
     worker
         .args([
             "--exact",
@@ -679,9 +760,7 @@ async fn si_30_facade_core_probe_timeout_reaps_child_and_scratch() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(MODE, "worker")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .env(MODE, "worker");
     assert!(matches!(
         Facade::spawn(&dir, trust_me(), worker).await,
         Err(IpcError::Timeout)
@@ -715,12 +794,76 @@ async fn si_30_facade_probe_closes_descriptors_inherited_from_its_launcher() {
     // Kickoff from starting.
     let base = TempBase::new();
     let dir = base.dir();
+    std::fs::write(base.path().join(CANARY), b"").unwrap();
     let _running = facade(&base, "leaky-launcher");
     let mut client = connect::<Cli>(&dir, &trust_me()).await.unwrap();
     assert!(matches!(
         client.call(CliCommand::Status).await,
         Ok(Reply::Done)
     ));
+}
+
+#[tokio::test]
+async fn si_36_worker_never_holds_a_descriptor_leaked_to_its_launcher() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    let canary = base.path().join(CANARY);
+    std::fs::write(&canary, b"").unwrap();
+    let _running = facade(&base, "leaky-launcher");
+    let mut client = connect::<Cli>(&dir, &trust_me()).await.unwrap();
+    assert!(matches!(
+        client.call(CliCommand::Status).await,
+        Ok(Reply::Done)
+    ));
+    assert_eq!(
+        std::fs::read(&canary).unwrap(),
+        b"",
+        "the secret-holding worker held a descriptor its launcher leaked"
+    );
+}
+
+/// The worker records its refusal as it closes the client, so the client
+/// may see the close first.
+async fn worker_result(base: &TempBase) -> String {
+    let path = base.path().join("worker.result");
+    for _ in 0..200 {
+        if let Ok(result) = std::fs::read_to_string(&path) {
+            return result;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the worker recorded no refusal");
+}
+
+#[tokio::test]
+async fn si_30_worker_refuses_clients_once_dumpable_again() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    let _running = facade_with(&base, "facade", &[(REDUMP, "before-accept")]);
+    assert!(
+        connect::<Cli>(&dir, &trust_me()).await.is_err(),
+        "a worker that became dumpable read a client's bytes"
+    );
+    assert_eq!(worker_result(&base).await, "Hardening");
+}
+
+#[tokio::test]
+async fn si_30_worker_channel_refuses_requests_once_dumpable_again() {
+    let base = TempBase::new();
+    let dir = base.dir();
+    let _running = facade_with(&base, "facade", &[(REDUMP, "after-accept")]);
+    let mut client = connect::<Cli>(&dir, &trust_me()).await.unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.call(CliCommand::Join(canary_ticket("kickoff1REDUMPCANARY456"))),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.is_err(),
+        "a worker that became dumpable received a ticket"
+    );
+    assert_eq!(worker_result(&base).await, "Hardening");
 }
 
 #[test]
@@ -762,7 +905,7 @@ fn dumping_probe_helper() {
 async fn si_30_facade_refuses_by_name_when_the_probe_leaves_a_core() {
     let base = TempBase::new();
     let dir = base.dir();
-    let mut worker = Command::new(me());
+    let mut worker = WorkerLaunch::new(me());
     worker
         .args([
             "--exact",
@@ -770,9 +913,7 @@ async fn si_30_facade_refuses_by_name_when_the_probe_leaves_a_core() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(MODE, "worker")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .env(MODE, "worker");
     assert_eq!(
         Facade::spawn(&dir, trust_me(), worker).await.err(),
         Some(IpcError::CoreDumpsEnabled),
@@ -786,8 +927,7 @@ async fn si_30_facade_refuses_by_name_when_the_probe_leaves_a_core() {
 async fn si_10_control_ready_version_refused_before_serving() {
     let base = TempBase::new();
     let dir = base.dir();
-    let mut worker = command("bad-ready-version");
-    worker.stdout(Stdio::null()).stderr(Stdio::null());
+    let worker = launch("bad-ready-version");
     assert!(matches!(
         Facade::spawn(&dir, trust_me(), worker).await,
         Err(IpcError::Version)
