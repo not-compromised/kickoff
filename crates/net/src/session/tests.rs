@@ -438,7 +438,13 @@ async fn si_29_send_guard_drops_what_iroh_sends_to_a_refused_destination() {
 struct ContextRecorder(std::sync::Mutex<std::collections::HashSet<u64>>);
 impl kickoff_send_guard::Guard for ContextRecorder {
     fn admit(&self, context: u64, _: SocketAddr) -> bool {
-        self.0.lock().unwrap().insert(context);
+        // Runs inside the transport's connection driver, where a panic
+        // aborts the test process; a lock poisoned by a failed assertion is
+        // still usable.
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(context);
         true
     }
 }
@@ -478,7 +484,8 @@ async fn si_29_transport_carries_distinct_connection_contexts() {
     assert_ne!(first_context, second_context);
     assert_ne!(accepted.send_context(), first_context);
     assert_ne!(accepted_two.send_context(), second_context);
-    let contexts = recorded.0.lock().unwrap();
+    // A snapshot, so a failed assertion does not hold the recorder's lock.
+    let contexts = recorded.0.lock().unwrap().clone();
     assert!(
         contexts.contains(&first_context),
         "first connection lost its context on the IP send path"
@@ -571,7 +578,9 @@ async fn guard_connection_snapshot_worker() {
             }
             let admitted = kickoff_send_guard::Guard::admit(self.guard.as_ref(), context, dst);
             if selected {
-                self.completed.send(admitted).unwrap();
+                // A failed test has dropped the receiver; panicking here, in
+                // the connection driver, would abort the process.
+                let _ = self.completed.send(admitted);
             }
             admitted
         }
