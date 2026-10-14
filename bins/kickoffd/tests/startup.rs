@@ -29,6 +29,8 @@ const LEAKED_EVENTFD: i32 = 202;
 const LEAKED_EPOLL: i32 = 203;
 const RUNTIME_HELPER: &str = "KICKOFFD_TEST_RUNTIME";
 const RUNTIME_LINE: &str = "KICKOFFD-RUNTIME ";
+/// A connected Unix stream whose peer the same process holds.
+const IN_PROCESS: &str = "unix stream paired in-process";
 
 /// A daemon and the client it trusts, installed side by side in a private
 /// `$XDG_RUNTIME_DIR` stand-in that is removed on drop.
@@ -264,6 +266,7 @@ fn si_36_kickoffd_descriptor_table_equals_its_allowlist() {
     // Closed stdio comes back as /dev/null, so no later open can take 0-2.
     // Above it: the runtime, the listener and the worker's control pair.
     let mut expected = runtime_descriptors();
+    let runtime_pairs = expected.iter().filter(|kind| *kind == IN_PROCESS).count();
     expected.push(format!(
         "unix listener {}",
         install.dir.socket_path().display()
@@ -287,7 +290,7 @@ fn si_36_kickoffd_descriptor_table_equals_its_allowlist() {
         std::thread::sleep(Duration::from_millis(20));
     }
     canaries.assert_absent_from(&daemon.pid());
-    assert_own_descriptors(&daemon.pid(), &install.daemon);
+    assert_own_descriptors(&daemon.pid(), &install.daemon, runtime_pairs);
 }
 
 /// One leaked descriptor of each kind kickoffd holds above stdio, so a
@@ -362,11 +365,15 @@ impl Canaries {
 
 /// Each anonymous descriptor of kickoffd is its own. Every epoll entry names
 /// a descriptor kickoffd holds at that number with that inode, and every
-/// eventfd is one an epoll watches. Each connected socket pairs with one
-/// that neither kickoffd nor its launcher (this process) holds: the worker's
-/// end, whose own table is unreadable because the worker is nondumpable.
+/// eventfd is one an epoll watches. No connected socket pairs with one its
+/// launcher (this process) holds. Exactly one pairs with a socket kickoffd
+/// does not hold: the worker's end, whose own table is unreadable because the
+/// worker is nondumpable. The rest pair within kickoffd, and there are only
+/// as many as its runtime holds in a fresh process: tokio's signal driver,
+/// built in whenever any crate in the build turns on tokio's `signal`
+/// feature, keeps both ends of its wake-up pair. A kept lease pair adds two.
 /// kickoffd's only child is that worker.
-fn assert_own_descriptors(pid: &str, daemon: &Path) {
+fn assert_own_descriptors(pid: &str, daemon: &Path, runtime_pairs: usize) {
     let table = links(pid);
     let mut watched = Vec::new();
     for (fd, target) in &table {
@@ -385,6 +392,7 @@ fn assert_own_descriptors(pid: &str, daemon: &Path) {
     }
     let ours = links("self");
     let mut paired = 0;
+    let mut in_process = 0;
     for (fd, target) in &table {
         if target == "anon_inode:[eventfd]" {
             assert!(
@@ -395,17 +403,27 @@ fn assert_own_descriptors(pid: &str, daemon: &Path) {
         let Some(ino) = socket_inode(target) else {
             continue;
         };
-        let Some(peer) = unix_peer(ino) else {
-            continue;
+        let peer = match unix_peer(ino) {
+            Peer::Of(peer) => peer,
+            Peer::Unconnected => continue,
+            Peer::Closed => panic!("kickoffd's socket {fd} closed after its table matched"),
         };
-        assert_eq!(unix_peer(peer), Some(ino), "socket {fd} is not paired");
+        assert_eq!(unix_peer(peer), Peer::Of(ino), "socket {fd} is not paired");
         let peer = format!("socket:[{peer}]");
         assert!(
-            !table.values().chain(ours.values()).any(|t| *t == peer),
-            "kickoffd's socket {fd} is connected to kickoffd or its launcher: its peer {peer}\n  kickoffd {table:?}\n  launcher {ours:?}"
+            !ours.values().any(|t| *t == peer),
+            "kickoffd's socket {fd} is connected to its launcher: its peer {peer}\n  kickoffd {table:?}\n  launcher {ours:?}"
         );
-        paired += 1;
+        if table.values().any(|t| *t == peer) {
+            in_process += 1;
+        } else {
+            paired += 1;
+        }
     }
+    assert_eq!(
+        in_process, runtime_pairs,
+        "kickoffd holds both ends of socket pairs its runtime does not: {table:?}"
+    );
     assert_eq!(paired, 1, "kickoffd's control socket was not found paired");
     let children = children(pid);
     assert_eq!(children.len(), 1, "kickoffd's children: {children:?}");
@@ -491,9 +509,17 @@ fn children(pid: &str) -> Vec<String> {
     found
 }
 
-/// The peer inode of Unix socket `inode`, or `None` if it has none, from
-/// NETLINK_SOCK_DIAG (unix_diag_req with UDIAG_SHOW_PEER).
-fn unix_peer(inode: u32) -> Option<u32> {
+#[derive(Debug, PartialEq)]
+enum Peer {
+    Of(u32),
+    Unconnected,
+    /// Closed since it was listed.
+    Closed,
+}
+
+/// The peer of Unix socket `inode`, from NETLINK_SOCK_DIAG (unix_diag_req
+/// with UDIAG_SHOW_PEER).
+fn unix_peer(inode: u32) -> Peer {
     use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketType, netlink};
     const SOCK_DIAG_BY_FAMILY: u16 = 20;
     const NLM_F_REQUEST: u16 = 1;
@@ -522,19 +548,28 @@ fn unix_peer(inode: u32) -> Option<u32> {
     let reply = &reply[..len];
     let u16_at = |at: usize| u16::from_ne_bytes(reply[at..at + 2].try_into().unwrap());
     let u32_at = |at: usize| u32::from_ne_bytes(reply[at..at + 4].try_into().unwrap());
-    assert_ne!(u16_at(4), NLMSG_ERROR, "sock_diag refused socket {inode}");
+    if u16_at(4) == NLMSG_ERROR {
+        // nlmsgerr: a negative errno after the header.
+        let errno = i32::from_ne_bytes(reply[16..20].try_into().unwrap());
+        assert_eq!(
+            rustix::io::Errno::from_raw_os_error(-errno),
+            rustix::io::Errno::NOENT,
+            "sock_diag refused socket {inode}"
+        );
+        return Peer::Closed;
+    }
     assert_eq!(u32_at(20), inode, "sock_diag answered for another socket");
     // nlmsghdr (16) and unix_diag_msg (16), then 4-aligned attributes.
     let mut at = 32;
     while at + 8 <= reply.len() {
         let attr_len = usize::from(u16_at(at));
         if u16_at(at + 2) == UNIX_DIAG_PEER {
-            return Some(u32_at(at + 4));
+            return Peer::Of(u32_at(at + 4));
         }
         assert!(attr_len >= 4, "malformed sock_diag attribute");
         at += attr_len.next_multiple_of(4);
     }
-    None
+    Peer::Unconnected
 }
 
 /// What kickoffd's runtime opens, measured in a fresh process with the same
@@ -605,11 +640,14 @@ fn split_stdio(table: &BTreeMap<i32, String>) -> (Vec<String>, Vec<String>) {
 }
 
 /// What each descriptor of `pid` is: Unix sockets by their kernel entry,
-/// anonymous inodes by kind, `/dev/null` by inode, anything else by path.
+/// connected ones also by whether `pid` holds their peer, anonymous inodes
+/// by kind, `/dev/null` by inode, anything else by path.
 fn descriptors(pid: &str) -> std::io::Result<BTreeMap<i32, String>> {
     let null = std::fs::metadata("/dev/null")?;
     let unix = unix_sockets(pid)?;
     let mut table = BTreeMap::new();
+    let mut connected = Vec::new();
+    let mut held = Vec::new();
     for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
         let path = entry?.path();
         let fd: i32 = path
@@ -618,13 +656,16 @@ fn descriptors(pid: &str) -> std::io::Result<BTreeMap<i32, String>> {
             .ok_or(std::io::ErrorKind::InvalidData)?;
         let target = std::fs::read_link(&path)?;
         let target = target.to_string_lossy();
-        let kind = if let Some(inode) = target
-            .strip_prefix("socket:[")
-            .and_then(|rest| rest.strip_suffix(']'))
-        {
-            unix.get(inode)
+        let kind = if let Some(inode) = socket_inode(&target) {
+            held.push(inode);
+            let kind = unix
+                .get(&inode.to_string())
                 .cloned()
-                .unwrap_or_else(|| "socket, not unix".to_owned())
+                .unwrap_or_else(|| "socket, not unix".to_owned());
+            if kind == "unix stream connected" {
+                connected.push((fd, inode));
+            }
+            kind
         } else if target.starts_with("anon_inode:") {
             target.into_owned()
         } else {
@@ -636,6 +677,15 @@ fn descriptors(pid: &str) -> std::io::Result<BTreeMap<i32, String>> {
             }
         };
         table.insert(fd, kind);
+    }
+    for (fd, inode) in connected {
+        match unix_peer(inode) {
+            Peer::Of(peer) if held.contains(&peer) => {
+                table.insert(fd, IN_PROCESS.to_owned());
+            }
+            Peer::Closed => return Err(std::io::ErrorKind::NotFound.into()),
+            _ => {}
+        }
     }
     Ok(table)
 }
