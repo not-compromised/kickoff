@@ -50,6 +50,7 @@ mutant-si36-fd-errors-skipped = []
 mutant-si36-listing-error-ends = []
 mutant-si36-listing-close-unchecked = []
 mutant-si36-listed-fds-looked-up = []
+mutant-si36-enumeration-looks-up = []
 mutant-si36-no-fd-sweep = []
 
 [dependencies]

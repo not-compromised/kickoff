@@ -730,6 +730,13 @@ fn read_names(dir: BorrowedFd<'_>) -> io::Result<Vec<Vec<u8>>> {
     let mut names = Vec::new();
     while let Some(entry) = entries.next() {
         match entry {
+            Ok(entry)
+                if cfg!(feature = "mutant-si36-enumeration-looks-up")
+                    && entry.file_name().to_str().is_ok_and(|name| {
+                        name.parse::<i32>().is_ok()
+                            && std::fs::symlink_metadata(Path::new("/proc/self/fd").join(name))
+                                .is_err()
+                    }) => {}
             Ok(entry) => names.push(entry.file_name().to_bytes().to_vec()),
             Err(_) if cfg!(feature = "mutant-si36-listing-error-ends") => break,
             Err(error) => return Err(error.into()),
@@ -966,6 +973,89 @@ mod tests {
         assert_eq!(
             list_and_close(listing, |_| Ok(names), checked_close),
             Err(IpcError::Hardening)
+        );
+    }
+
+    const HOLDER: &str = "KIPC_DESCRIPTOR_HOLDER";
+    const HOLDER_FD: &str = "HOLDER-FD ";
+    const HOLDER_SEALED: &str = "HOLDER-NONDUMPABLE";
+    /// Far above anything the test process holds.
+    const HELD_FD: i32 = 900;
+
+    /// Holds [`HELD_FD`], then turns nondumpable when told on stdin, and
+    /// exits at stdin's EOF.
+    #[test]
+    fn descriptor_holder_helper() {
+        use std::io::{Read, Write};
+        if std::env::var_os(HOLDER).is_none() {
+            return;
+        }
+        let null = std::fs::File::open("/dev/null").unwrap();
+        let held = rustix::io::fcntl_dupfd_cloexec(&null, HELD_FD).unwrap();
+        println!("{HOLDER_FD}{}", held.as_raw_fd());
+        let mut byte = [0u8];
+        std::io::stdin().read_exact(&mut byte).unwrap();
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+            .unwrap();
+        println!("{HOLDER_SEALED}");
+        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    }
+
+    #[test]
+    fn si_36_descriptor_enumeration_keeps_entries_whose_lookup_fails() {
+        // getdents64 lists a descriptor directory opened earlier even after
+        // its process turns nondumpable, while every lookup of its entries
+        // fails: by number in this process (not held here), and through the
+        // directory itself (EACCES once procfs revalidates its owner). A
+        // lookup filter anywhere in the enumeration drops the entry.
+        use std::io::{BufRead, Write};
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "linux::facade::tests::descriptor_holder_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HOLDER, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut marked = |marker: &str| loop {
+            let line = lines.next().unwrap().unwrap();
+            if let Some((_, rest)) = line.split_once(marker) {
+                return rest.to_owned();
+            }
+        };
+        let held = marked(HOLDER_FD);
+        let listing = open_dir(&format!("/proc/{}/fd", child.id()));
+        stdin.write_all(b"x").unwrap();
+        marked(HOLDER_SEALED);
+        std::fs::symlink_metadata(format!("/proc/{}/fd", child.id())).unwrap();
+        assert!(
+            std::fs::symlink_metadata(format!("/proc/self/fd/{held}")).is_err(),
+            "this process holds {held} too"
+        );
+        assert_eq!(
+            rustix::fs::statat(
+                &listing,
+                held.as_str(),
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW
+            )
+            .map(drop),
+            Err(rustix::io::Errno::ACCESS),
+            "a lookup through the nondumpable process's listing succeeded"
+        );
+        let listed = list_and_close(listing, read_names, checked_close).unwrap();
+        drop(stdin);
+        child.wait().unwrap();
+        assert!(
+            listed.contains(&held.parse().unwrap()),
+            "enumerated descriptor {held} was dropped because its lookup failed: {listed:?}"
         );
     }
 

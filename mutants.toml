@@ -278,6 +278,13 @@ note = "the listing keeps only numbers whose /proc/self/fd entry lstat finds, th
 [[mutant]]
 si = "SI-36"
 crate = "kickoff-ipc"
+feature = "mutant-si36-enumeration-looks-up"
+test = "si_36_descriptor_enumeration_keeps_entries_whose_lookup_fails"
+note = "the getdents64 enumeration keeps only names whose /proc/self/fd entry lstat finds, the reviewed filter moved below the listing's unit seam"
+
+[[mutant]]
+si = "SI-36"
+crate = "kickoff-ipc"
 feature = "mutant-si36-listing-error-ends"
 test = "si_36_descriptor_listing_refuses_an_enumeration_error"
 note = "a getdents64 error ends the listing as rustix's Dir does for ENOENT, so a short list passes"
