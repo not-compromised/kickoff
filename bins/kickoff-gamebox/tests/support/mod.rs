@@ -16,6 +16,19 @@ pub const DEADLINE: Duration = Duration::from_secs(2);
 pub struct Supervisor {
     pub unit: String,
     out: PathBuf,
+    /// The hold-point directory (`KICKOFF_TEST_GATE_DIR`).
+    pub gates: PathBuf,
+}
+
+/// How to start a supervisor beyond its request.
+#[derive(Default)]
+pub struct Options<'a> {
+    /// Extra unit properties, such as an `OpenFile=` leak.
+    pub properties: Vec<String>,
+    /// Extra environment, such as `KICKOFF_TEST_GATE`.
+    pub env: Vec<(&'a str, String)>,
+    /// A command the supervisor runs under, such as `unshare`.
+    pub wrapper: Vec<String>,
 }
 
 fn systemctl(args: &[&str]) -> std::process::Output {
@@ -29,33 +42,51 @@ fn systemctl(args: &[&str]) -> std::process::Output {
 
 impl Supervisor {
     pub fn start(args: &[&str]) -> Supervisor {
-        Supervisor::start_with(&[], args)
+        Supervisor::start_with(Options::default(), args)
     }
 
-    /// `properties` are extra unit properties, such as an `OpenFile=` leak.
-    pub fn start_with(properties: &[String], args: &[&str]) -> Supervisor {
+    /// Starts a supervisor that holds at hold point `gate`.
+    pub fn start_gated(gate: &str, args: &[&str]) -> Supervisor {
+        let options = Options {
+            env: vec![("KICKOFF_TEST_GATE", gate.to_owned())],
+            ..Options::default()
+        };
+        Supervisor::start_with(options, args)
+    }
+
+    pub fn start_with(options: Options<'_>, args: &[&str]) -> Supervisor {
         let unit = format!(
             "kickoff-m0-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{unit}.out"));
+        let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+        let out = tmp.join(format!("{unit}.out"));
         let _ = std::fs::remove_file(&out);
+        let gates = tmp.join(format!("{unit}.gates"));
+        let _ = std::fs::remove_dir_all(&gates);
+        std::fs::create_dir_all(&gates).unwrap();
         let status = Command::new("systemd-run")
             .args(["--user", "--quiet", "--collect"])
             .arg(format!("--unit={unit}"))
             .arg("--property=KillMode=control-group")
             .arg(format!("--property=RuntimeDirectory={unit}"))
-            .args(properties.iter().map(|p| format!("--property={p}")))
+            .args(options.properties.iter().map(|p| format!("--property={p}")))
+            .arg(format!(
+                "--setenv=KICKOFF_TEST_GATE_DIR={}",
+                gates.display()
+            ))
+            .args(options.env.iter().map(|(k, v)| format!("--setenv={k}={v}")))
             .arg(format!("--property=StandardOutput=file:{}", out.display()))
             .arg(format!("--property=StandardError=file:{}", out.display()))
             .arg("--")
+            .args(&options.wrapper)
             .arg(env!("CARGO_BIN_EXE_kickoff-gamebox"))
             .args(args)
             .status()
             .unwrap();
         assert!(status.success(), "systemd-run failed for {unit}");
-        Supervisor { unit, out }
+        Supervisor { unit, out, gates }
     }
 
     pub fn scope_unit(&self) -> String {
@@ -133,6 +164,28 @@ impl Supervisor {
         })
     }
 
+    /// Waits until the supervisor or a link reaches hold point `phase`.
+    pub fn wait_gate(&self, phase: &str) {
+        assert!(
+            within(Duration::from_secs(10), || self.gates.join(phase).exists()),
+            "hold point {phase} never reached: {}",
+            self.report()
+        );
+    }
+
+    pub fn release_gate(&self, phase: &str) {
+        std::fs::write(self.gates.join(format!("{phase}.go")), b"").unwrap();
+    }
+
+    /// Every process in the scope now.
+    pub fn scope_procs(&self) -> Vec<i32> {
+        std::fs::read_to_string(self.scope_dir().join("cgroup.procs"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.parse().ok())
+            .collect()
+    }
+
     pub fn main_pid(&self) -> i32 {
         let out = systemctl(&["show", "--value", "-p", "MainPID", &self.unit]);
         String::from_utf8(out.stdout)
@@ -155,6 +208,7 @@ impl Drop for Supervisor {
             systemctl(&["reset-failed", &unit]);
         }
         let _ = std::fs::remove_file(&self.out);
+        let _ = std::fs::remove_dir_all(&self.gates);
     }
 }
 

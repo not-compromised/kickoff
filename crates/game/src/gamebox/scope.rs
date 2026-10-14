@@ -5,7 +5,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use rustix::fs::{Mode, OFlags};
@@ -17,7 +17,7 @@ const SYSTEMCTL: &str = "/usr/bin/systemctl";
 
 /// Design §3.2.6: on either teardown path the cgroup is empty within 2 s.
 pub(super) const TEARDOWN_DEADLINE: Duration = Duration::from_secs(2);
-const REGISTRATION_DEADLINE: Duration = Duration::from_secs(10);
+pub(super) const REGISTRATION_DEADLINE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(5);
 
 /// Limits of design §3.2.2 step 1, carried by the scope.
@@ -110,38 +110,32 @@ pub(super) struct Scope {
 }
 
 impl Scope {
-    /// Waits until `launcher` (the `systemd-run` child) is inside `name`'s
-    /// cgroup, then opens that cgroup. `systemd-run --scope` moves itself in
-    /// before it execs the first link, so nothing runs outside it.
-    pub(super) fn registered(name: &str, launcher: u32) -> Result<Scope, Refused> {
+    /// Opens `name`'s cgroup once `launcher` (the `systemd-run` child) is in
+    /// it; `None` until then. `systemd-run --scope` moves itself in before it
+    /// execs the first link, so nothing runs outside it.
+    pub(super) fn try_open(name: &str, launcher: u32) -> Result<Option<Scope>, Refused> {
         let uid = rustix::process::geteuid().as_raw();
         let suffix = format!("/{name}.scope");
-        let started = Instant::now();
-        loop {
-            let text = std::fs::read_to_string(format!("/proc/{launcher}/cgroup"))?;
-            if let Some(path) = text
-                .lines()
-                .filter_map(|l| l.strip_prefix("0::"))
-                .find(|p| p.ends_with(&suffix))
-            {
-                if !path.contains(&format!("/user@{uid}.service/")) || path.contains("/../") {
-                    return Err(Refused::Scope);
-                }
-                let dir = rustix::fs::open(
-                    format!("/sys/fs/cgroup{path}"),
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )?;
-                return Ok(Scope {
-                    name: name.to_owned(),
-                    dir,
-                });
-            }
-            if started.elapsed() > REGISTRATION_DEADLINE {
-                return Err(Refused::Scope);
-            }
-            std::thread::sleep(POLL);
+        let text = std::fs::read_to_string(format!("/proc/{launcher}/cgroup"))?;
+        let Some(path) = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("0::"))
+            .find(|p| p.ends_with(&suffix))
+        else {
+            return Ok(None);
+        };
+        if !path.contains(&format!("/user@{uid}.service/")) || path.contains("/../") {
+            return Err(Refused::Scope);
         }
+        let dir = rustix::fs::open(
+            format!("/sys/fs/cgroup{path}"),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(Some(Scope {
+            name: name.to_owned(),
+            dir,
+        }))
     }
 
     /// Kills every process in the scope in one kernel operation.
@@ -212,17 +206,23 @@ impl Scope {
     /// Asks the manager to stop the scope. After a direct kill it is empty
     /// and may already be collected, which systemctl reports as not loaded.
     pub(super) fn stop(&self) -> Result<(), Refused> {
-        let status = Command::new(SYSTEMCTL)
+        stop_named(&self.name)
+    }
+}
+
+/// The manager's stop of a scope by name, within the teardown deadline; for
+/// a scope that may have registered unseen, too. Its `KillSignal=SIGKILL`
+/// ends whatever is in it.
+pub(super) fn stop_named(name: &str) -> Result<(), Refused> {
+    let status = super::events::bounded(
+        Command::new(SYSTEMCTL)
             .args(["--user", "stop", "--"])
-            .arg(format!("{}.scope", self.name))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        match status.code() {
-            Some(0 | 5) => Ok(()),
-            _ => Err(Refused::Scope),
-        }
+            .arg(format!("{name}.scope")),
+        TEARDOWN_DEADLINE,
+    )?;
+    match status.code() {
+        Some(0 | 5) => Ok(()),
+        _ => Err(Refused::Scope),
     }
 }
 

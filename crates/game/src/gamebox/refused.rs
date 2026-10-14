@@ -34,6 +34,8 @@ pub enum Refused {
     Leaked,
     #[error("pasta maps the gateway to the host")]
     PastaMapsHost,
+    #[error("a helper failed or did not finish in time")]
+    HelperFailed,
     #[error("i/o error: {0:?}")]
     Io(io::ErrorKind),
 }
@@ -55,6 +57,7 @@ impl Refused {
             Refused::Network => 73,
             Refused::Leaked => 76,
             Refused::PastaMapsHost => 77,
+            Refused::HelperFailed => 78,
             Refused::NetworkSetup => 74,
             Refused::BoxEnded(_) => 75,
             Refused::Barrier(check) => match check {

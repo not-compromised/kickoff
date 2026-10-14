@@ -9,6 +9,8 @@
 //! from input.
 
 mod barrier;
+mod events;
+mod gate;
 mod install;
 mod link;
 mod net;

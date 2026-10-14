@@ -652,6 +652,9 @@ note = "the public Kick future owns publication after removing the peer"
 [[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-limits", test = "si_38_scope_carries_the_box_limits", note = "the scope is created without its memory, swap, task and CPU limits"
 [[unmutated]] test = "si_38_supervisor_killed_during_or_after_a_launch_leaves_nothing", reason = "positive composition through the whole chain: the scope binding and the links' parent-death signals each end it alone; each teardown path has its own mutant in the stand-in tests"
 
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-helper-unbounded", test = "si_38_stop_during_a_stalled_helper_ends_the_box_within_the_deadline", note = "the outside nft helper is waited on synchronously, unbounded and deaf to a stop"
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-registration-deaf", test = "si_38_stop_during_scope_registration_ends_within_the_deadline", note = "scope registration polls without reading the signal descriptor, so a stop waits out the registration deadline"
+
 # Named by the design for later milestones; the code they mutate does not exist on M2.
 
 [[pending]]

@@ -6,7 +6,7 @@
 
 mod support;
 
-use support::{DEADLINE, Supervisor, alive, within};
+use support::{DEADLINE, Options, Supervisor, alive, within};
 
 #[test]
 fn si_38_normal_stop_kills_the_cgroup_before_asking_the_manager() {
@@ -82,4 +82,59 @@ fn si_38_supervisor_killed_during_or_after_a_launch_leaves_nothing() {
             "after_release={after_release}: the launch outlived its supervisor"
         );
     }
+}
+
+/// Waits for the supervisor to exit and the box to be gone, from `start`.
+fn gone_within_deadline(supervisor: &Supervisor, dir: &std::path::Path, snapshot: &[i32]) -> bool {
+    within(DEADLINE, || {
+        !dir.exists()
+            && !snapshot.iter().any(|p| alive(*p))
+            && supervisor.exited_within(std::time::Duration::ZERO)
+    })
+}
+
+#[test]
+fn si_38_stop_during_a_stalled_helper_ends_the_box_within_the_deadline() {
+    // The outside nft listing is replaced by a helper that never finishes.
+    let options = Options {
+        env: vec![
+            ("KICKOFF_TEST_STALL_HELPER", "1".to_owned()),
+            ("KICKOFF_TEST_GATE", "helper".to_owned()),
+        ],
+        ..Options::default()
+    };
+    let supervisor = Supervisor::start_with(options, &["probe", "inventory"]);
+    let dir = supervisor.scope_dir();
+    supervisor.wait_gate("helper");
+    let snapshot = supervisor.scope_procs();
+    supervisor.signal("SIGTERM");
+    assert!(
+        gone_within_deadline(&supervisor, &dir, &snapshot),
+        "a stop during a stalled helper did not end the box and the supervisor in time: {}",
+        supervisor.report()
+    );
+    let report = supervisor.report();
+    assert!(
+        report.contains("box stopped") && !report.contains("barrier: released"),
+        "{report}"
+    );
+}
+
+#[test]
+fn si_38_stop_during_scope_registration_ends_within_the_deadline() {
+    // The supervisor never sees the scope registered and keeps waiting.
+    let options = Options {
+        env: vec![("KICKOFF_TEST_SLOW_REGISTRATION", "1".to_owned())],
+        ..Options::default()
+    };
+    let supervisor = Supervisor::start_with(options, &["probe", "standin"]);
+    let dir = supervisor.scope_dir();
+    let snapshot = supervisor.wait_procs("kickoff-box-probe", 2);
+    supervisor.signal("SIGTERM");
+    assert!(
+        gone_within_deadline(&supervisor, &dir, &snapshot),
+        "a stop during registration did not end the box and the supervisor in time: {}",
+        supervisor.report()
+    );
+    assert!(supervisor.report().contains("box stopped"));
 }

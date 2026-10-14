@@ -30,6 +30,17 @@ barrier) writes `cgroup.kill`, waits for `populated 0` and only then asks the
 manager to stop the scope; the supervisor logs the scope's state at that
 request. Owner death is the manager's `BindsTo=` with `KillSignal=SIGKILL`.
 
+**Waiting.** Every wait of the supervisor (scope registration, the
+barrier, helpers, the running box) polls one signalfd, so a stop is seen at
+once. Helpers are bounded (5 s) and killed and reaped on a stop, the chain's
+end or a timeout; once a stop is pending the barrier is never released.
+
+**Test seams.** Debug builds only: `KICKOFF_TEST_GATE=<phase>` with
+`KICKOFF_TEST_GATE_DIR` holds the supervisor or a link at a startup phase,
+`KICKOFF_TEST_STALL_HELPER` replaces the outside nft helper by one that
+never finishes, and `KICKOFF_TEST_SLOW_REGISTRATION` makes the supervisor
+never see its scope registered. Release builds compile none of it.
+
 **Launch barrier.** The barrier link checks namespaces, its cgroup namespace,
 rlimits, capability sets, `NoNewPrivs` and its descriptors, writes one byte on
 a pipe and closes it. The supervisor then checks the same link through

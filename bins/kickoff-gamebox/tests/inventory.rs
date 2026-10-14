@@ -9,7 +9,7 @@ mod support;
 
 use std::path::{Path, PathBuf};
 
-use support::{DEADLINE, Supervisor, descriptors, identity, within};
+use support::{DEADLINE, Options, Supervisor, descriptors, identity, within};
 
 const PROBE: &str = "kickoff-box-probe";
 
@@ -37,10 +37,11 @@ fn si_36_supervisor_never_holds_a_descriptor_leaked_to_its_service() {
     let canary = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("si36-canary-{}", std::process::id()));
     std::fs::write(&canary, b"canary\n").unwrap();
-    let supervisor = Supervisor::start_with(
-        &[format!("OpenFile={}:canary", canary.display())],
-        &["probe", "inventory"],
-    );
+    let options = Options {
+        properties: vec![format!("OpenFile={}:canary", canary.display())],
+        ..Options::default()
+    };
+    let supervisor = Supervisor::start_with(options, &["probe", "inventory"]);
     supervisor.wait_procs(PROBE, 1);
     let leaked = identity(&canary);
     let held = descriptors(supervisor.main_pid());

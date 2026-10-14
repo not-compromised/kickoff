@@ -4,28 +4,29 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{SigSet, Signal};
-use nix::sys::signalfd::SignalFd;
-use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 
 use super::Refused;
 use super::barrier::{Check, Fault, NAMESPACES, Proc, identity};
+use super::events::{Events, Halt, POLL, Wake, after};
+use super::gate;
 use super::install::{LINK, PROBE, sibling};
 use super::link::{READY, RELEASE, RULESET, SETUP_NS};
 use super::net::{self, PASTA, same_ruleset};
-use super::scope::{self, Owner, Scope, TEARDOWN_DEADLINE};
+use super::scope::{self, Owner, REGISTRATION_DEADLINE, Scope, TEARDOWN_DEADLINE};
 use super::view::{BWRAP, View, in_box};
 
 const NSENTER: &str = "/usr/bin/nsenter";
 /// From the scope's registration to the barrier link's ready byte.
 const BARRIER_DEADLINE: Duration = Duration::from_secs(30);
+/// Any one helper the supervisor waits on (the outside nft listing).
+const HELPER_LIMIT: Duration = Duration::from_secs(5);
 
 /// What the supervisor was asked to run. Until kickoffd's channel exists
 /// (design §2.7) the only requests are Kickoff's own containment probes.
@@ -117,13 +118,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
     let link = sibling(LINK)?;
     let probe = sibling(PROBE)?;
 
-    // Stop arrives as SIGTERM from the manager, and box exit as SIGCHLD;
-    // both are read from one descriptor instead of a handler.
-    let mut mask = SigSet::empty();
-    mask.add(Signal::SIGTERM);
-    mask.add(Signal::SIGCHLD);
-    mask.thread_block()?;
-    let signals = SignalFd::new(&mask)?;
+    let mut events = Events::new()?;
 
     let name = owner.scope_name();
     let mut chain = scope::create_command();
@@ -193,40 +188,87 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
             })
         }
     };
-    let mut child = chain
+    gate::hold("before-registration");
+    let mut chain = chain
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let scope = match Scope::registered(&name, child.id()) {
+    let scope = match register(&mut events, &name, &mut chain) {
         Ok(scope) => scope,
-        Err(refused) => {
-            // Not registered means nothing past systemd-run started; if it
-            // registered unseen, the binding ends it when this process exits.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(refused);
+        Err(halt) => {
+            // The chain's first process is ours to end; anything that
+            // registered unseen is ended by the manager's stop, and by the
+            // binding once this process exits.
+            if matches!(chain.try_wait(), Ok(None)) {
+                let _ = chain.kill();
+            }
+            let _ = chain.wait();
+            let stopped = scope::stop_named(&name);
+            let end = conclude(early(halt));
+            stopped?;
+            return end;
         }
     };
+    gate::hold("scope-registered");
     // `boxed` holds the run directory the box's mounts come from until the
     // scope is empty.
     let mut boxed = boxed;
-    let end = match boxed.as_mut() {
-        Some(boxed) => match boxed.barrier(&signals, &mut child, &scope, &name) {
-            Ok(None) => {
+    let halt = match boxed.as_mut() {
+        Some(boxed) => match boxed.barrier(&mut events, &mut chain, &scope, &name) {
+            Ok(()) => {
                 report("barrier: released");
-                wait(&signals, &mut child)
+                events.until_end(&mut chain)
             }
-            Ok(Some(end)) => Ok(end),
-            Err(refused) => Err(refused),
+            Err(halt) => early(halt),
         },
-        None => wait(&signals, &mut child),
+        None => events.until_end(&mut chain),
     };
-    let torn = teardown(&scope, &mut child);
+    let torn = teardown(&scope, &mut chain);
     drop(boxed);
-    let end = end?;
+    let end = conclude(halt);
     torn?;
-    Ok(end)
+    end
+}
+
+/// Waits until the chain is inside the scope, still answering a stop and
+/// the chain's end.
+fn register(events: &mut Events, name: &str, chain: &mut Child) -> Result<Scope, Halt> {
+    let deadline = after(REGISTRATION_DEADLINE);
+    loop {
+        if !gate::slow_registration()
+            && let Some(scope) = Scope::try_open(name, chain.id())?
+        {
+            return Ok(scope);
+        }
+        if cfg!(feature = "mutant-si38-registration-deaf") {
+            std::thread::sleep(POLL);
+        } else if events.wait(None, after(POLL).min(deadline))? == Wake::Child
+            && let Some(status) = chain.try_wait()?
+        {
+            return Err(Halt::Ended(status));
+        }
+        if Instant::now() >= deadline {
+            return Err(Refused::Scope.into());
+        }
+    }
+}
+
+/// Before the barrier is released, the chain ending is a refusal: some
+/// link refused, and its exit status says which check.
+fn early(halt: Halt) -> Halt {
+    match halt {
+        Halt::Ended(status) => Halt::Refused(Refused::BoxEnded(status.code().unwrap_or(-1))),
+        other => other,
+    }
+}
+
+fn conclude(halt: Halt) -> Result<End, Refused> {
+    match halt {
+        Halt::Stop => Ok(End::Stopped),
+        Halt::Ended(status) => Ok(End::Exited(status)),
+        Halt::Refused(refused) => Err(refused),
+    }
 }
 
 /// The supervisor's half of a launch through the whole chain.
@@ -244,74 +286,71 @@ struct Boxed {
 
 impl Boxed {
     /// Waits for the barrier link's ready byte, checks it from outside and
-    /// releases it. `Some` if the request ended first.
+    /// releases it, unless a stop arrived first.
     fn barrier(
         &mut self,
-        signals: &SignalFd,
-        child: &mut Child,
+        events: &mut Events,
+        chain: &mut Child,
         scope: &Scope,
         name: &str,
-    ) -> Result<Option<End>, Refused> {
+    ) -> Result<(), Halt> {
         if cfg!(feature = "mutant-si36-barrier-skip") {
             let release = self.release.take().ok_or(Refused::Malformed)?;
             std::fs::File::from(release).write_all(b"G")?;
-            return Ok(None);
+            return Ok(());
         }
-        let started = Instant::now();
-        loop {
-            let left = BARRIER_DEADLINE
-                .checked_sub(started.elapsed())
-                .ok_or(Refused::Barrier(Check::Descriptors))?;
-            let mut fds = [
-                PollFd::new(signals, PollFlags::IN),
-                PollFd::new(&self.ready, PollFlags::IN),
-            ];
-            rustix::event::poll(&mut fds, Some(&timespec(left)))?;
-            let [signal, ready] = fds;
-            if signal.revents().contains(PollFlags::IN) {
-                match next_signal(signals, child)? {
-                    Some(End::Exited(status)) => {
-                        return Err(Refused::BoxEnded(status.code().unwrap_or(-1)));
-                    }
-                    Some(End::Stopped) => return Ok(Some(End::Stopped)),
-                    None => {}
-                }
-            }
-            if !ready.revents().is_empty() {
-                break;
-            }
-        }
-        let mut byte = [0u8; 1];
+        let deadline = after(BARRIER_DEADLINE);
         let mut file = std::fs::File::from(self.ready.try_clone()?);
+        let mut byte = [0u8; 1];
+        loop {
+            match events.wait(Some(self.ready.as_fd()), deadline)? {
+                Wake::Extra => break,
+                Wake::Child => {
+                    if let Some(status) = chain.try_wait()? {
+                        return Err(Halt::Ended(status));
+                    }
+                }
+                Wake::Timeout => return Err(Refused::Barrier(Check::Descriptors).into()),
+            }
+        }
         match file.read(&mut byte)? {
             1 if byte == *b"R" => {}
             // The link closed its end without the byte: it refused, and its
             // exit status says which check.
-            0 => return Err(ended(child)),
-            _ => return Err(Refused::Barrier(Check::Descriptors)),
+            0 => return Err(Halt::Ended(ended(events, chain)?)),
+            _ => return Err(Refused::Barrier(Check::Descriptors).into()),
         }
         // The link closes its end after the byte; wait for that close, so
         // the inventory below sees only the release pipe.
-        let started = Instant::now();
+        let deadline = after(TEARDOWN_DEADLINE);
         loop {
             match file.read(&mut byte) {
                 Ok(0) => break,
-                Ok(_) => return Err(Refused::Barrier(Check::Descriptors)),
+                Ok(_) => return Err(Refused::Barrier(Check::Descriptors).into()),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e.into()),
             }
-            if started.elapsed() > TEARDOWN_DEADLINE {
-                return Err(Refused::Barrier(Check::Descriptors));
+            if events.wait(Some(self.ready.as_fd()), deadline)? == Wake::Timeout {
+                return Err(Refused::Barrier(Check::Descriptors).into());
             }
-            std::thread::sleep(Duration::from_millis(1));
         }
-        self.check_from_outside(scope, name)?;
+        gate::hold("barrier");
+        self.check_from_outside(events, chain, scope, name)?;
+        if events.stop_pending()? {
+            return Err(Halt::Stop);
+        }
         let release = self.release.take().ok_or(Refused::Malformed)?;
         std::fs::File::from(release).write_all(b"G")?;
-        Ok(None)
+        Ok(())
     }
 
-    fn check_from_outside(&self, scope: &Scope, name: &str) -> Result<(), Refused> {
+    fn check_from_outside(
+        &self,
+        events: &mut Events,
+        chain: &mut Child,
+        scope: &Scope,
+        name: &str,
+    ) -> Result<(), Halt> {
         let procs = scope.procs()?;
         let links: Vec<i32> = procs
             .iter()
@@ -319,7 +358,7 @@ impl Boxed {
             .filter(|pid| exe_is(*pid, self.link_id))
             .collect();
         let [pid] = links.as_slice() else {
-            return Err(Refused::Barrier(Check::Cgroup));
+            return Err(Refused::Barrier(Check::Cgroup).into());
         };
         let link = Proc::pid(*pid);
         let suffix = format!("/{name}.scope");
@@ -340,7 +379,7 @@ impl Boxed {
             })
             .collect();
         let [monitor] = monitors.as_slice() else {
-            return Err(Refused::Barrier(Check::Namespaces));
+            return Err(Refused::Barrier(Check::Namespaces).into());
         };
         let setup = Proc::pid(*monitor);
         let setup: Vec<String> = NAMESPACES
@@ -355,21 +394,32 @@ impl Boxed {
         if !cfg!(feature = "mutant-si14-no-startup-probe") {
             match self.canary.accept() {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                _ => return Err(Refused::PastaMapsHost),
+                _ => return Err(Refused::PastaMapsHost.into()),
             }
         }
 
-        let out = Command::new(NSENTER)
-            .arg(format!("--target={monitor}"))
-            .args(["--user", "--net", "--preserve-credentials", "--"])
-            .args([net::NFT, "list", "ruleset"])
-            .env_clear()
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()?;
-        let listed = String::from_utf8(out.stdout).map_err(|_| Refused::Barrier(Check::Nft))?;
-        if !out.status.success() || !same_ruleset(&listed, &self.ruleset) {
-            return Err(Refused::Barrier(Check::Nft));
+        let mut list = if gate::stall_helper() {
+            let mut stalled = Command::new("/usr/bin/sleep");
+            stalled.arg("3600");
+            stalled
+        } else {
+            let mut list = Command::new(NSENTER);
+            list.arg(format!("--target={monitor}"))
+                .args(["--user", "--net", "--preserve-credentials", "--"])
+                .args([net::NFT, "list", "ruleset"]);
+            list
+        };
+        list.env_clear().stdin(Stdio::null()).stderr(Stdio::null());
+        gate::mark("helper");
+        let (status, out) = if cfg!(feature = "mutant-si38-helper-unbounded") {
+            let out = list.output()?;
+            (out.status, out.stdout)
+        } else {
+            events.helper(chain, &mut list, HELPER_LIMIT)?
+        };
+        let listed = String::from_utf8(out).map_err(|_| Refused::Barrier(Check::Nft))?;
+        if !status.success() || !same_ruleset(&listed, &self.ruleset) {
+            return Err(Refused::Barrier(Check::Nft).into());
         }
         Ok(())
     }
@@ -449,16 +499,16 @@ impl Drop for RunDir {
 }
 
 /// The chain's exit status once it ends, within the teardown deadline.
-fn ended(child: &mut Child) -> Refused {
-    let started = Instant::now();
-    while started.elapsed() < TEARDOWN_DEADLINE {
-        match child.try_wait() {
-            Ok(Some(status)) => return Refused::BoxEnded(status.code().unwrap_or(-1)),
-            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-            Err(error) => return error.into(),
+fn ended(events: &mut Events, chain: &mut Child) -> Result<ExitStatus, Halt> {
+    let deadline = after(TEARDOWN_DEADLINE);
+    loop {
+        if let Some(status) = chain.try_wait()? {
+            return Ok(status);
+        }
+        if events.wait(None, deadline)? == Wake::Timeout {
+            return Err(Refused::BoxEnded(-1).into());
         }
     }
-    Refused::BoxEnded(-1)
 }
 
 fn home() -> Result<PathBuf, Refused> {
@@ -486,38 +536,9 @@ fn open_pipe(path: &Path, flags: OFlags) -> Result<OwnedFd, Refused> {
     )?)
 }
 
-fn timespec(d: Duration) -> Timespec {
-    Timespec {
-        tv_sec: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
-        tv_nsec: i64::from(d.subsec_nanos()),
-    }
-}
-
-fn next_signal(signals: &SignalFd, child: &mut Child) -> Result<Option<End>, Refused> {
-    let Some(info) = signals.read_signal()? else {
-        return Ok(None);
-    };
-    let signal = i32::try_from(info.ssi_signo)
-        .ok()
-        .and_then(|n| Signal::try_from(n).ok());
-    match signal {
-        Some(Signal::SIGTERM) => Ok(Some(End::Stopped)),
-        Some(Signal::SIGCHLD) => Ok(child.try_wait()?.map(End::Exited)),
-        _ => Ok(None),
-    }
-}
-
-fn wait(signals: &SignalFd, child: &mut Child) -> Result<End, Refused> {
-    loop {
-        if let Some(end) = next_signal(signals, child)? {
-            return Ok(end);
-        }
-    }
-}
-
 /// The normal stop: the direct kill first, then the manager is asked to
 /// stop a scope that is already empty (design §3.2.6, SI-38).
-fn teardown(scope: &Scope, child: &mut Child) -> Result<(), Refused> {
+fn teardown(scope: &Scope, chain: &mut Child) -> Result<(), Refused> {
     if !cfg!(feature = "mutant-si38-no-direct-kill") {
         scope.kill()?;
         scope.wait_empty(TEARDOWN_DEADLINE)?;
@@ -528,6 +549,13 @@ fn teardown(scope: &Scope, child: &mut Child) -> Result<(), Refused> {
     ));
     scope.stop()?;
     scope.wait_empty(TEARDOWN_DEADLINE)?;
-    child.wait()?;
+    // Everything in the scope is dead, the chain's first process included.
+    let deadline = after(TEARDOWN_DEADLINE);
+    while chain.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            return Err(Refused::Teardown);
+        }
+        std::thread::sleep(POLL);
+    }
     Ok(())
 }
