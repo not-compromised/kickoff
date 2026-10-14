@@ -16,7 +16,9 @@ Spec: [design.md](design.md). Standing security rules: [SECURITY-INVARIANTS.md](
 | `crates/budget` | shared saturating token arithmetic; rates and charging order stay local | M2 |
 | `crates/send-guard` | the registry called by vendored iroh before IP sends | M2 |
 | `bins/kickoffd` | Linux listener facade and hardened IPC worker; commands refuse until adapters exist | M2 startup, M6 adapters |
-| `crates/{store,parse,maps,game}`, `bins/kickoff` | placeholders | M5, M6 |
+| `crates/game` | the Linux gamebox spawn path (design §3.2.6), running synthetic containment probes only | M0 |
+| `bins/kickoff-gamebox` | the gamebox supervisor, its trusted links (`kickoff-box-link`) and the synthetic probe (`kickoff-box-probe`) | M0 |
+| `crates/{store,parse,maps}`, `bins/kickoff` | placeholders | M5, M6 |
 | `xtask` | the SI-33 harness: mutant runner, release guard check, policy test | M2 |
 
 M2 crates and Linux daemon IPC startup are implemented. Game, map and session

@@ -13,6 +13,7 @@ publish = false
 
 [workspace.dependencies]
 kickoff-local = { path = "crates/local" }
+kickoff-game = { path = "crates/game" }
 kickoff-budget = { path = "crates/budget" }
 kickoff-wire = { path = "crates/wire" }
 kickoff-vlan = { path = "crates/vlan" }

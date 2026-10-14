@@ -5,8 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
 
 [lints]
 workspace = true
 
-[dependencies]
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si38-no-direct-kill = []
+mutant-si38-no-bindsto = []
+mutant-si38-sigterm-stop = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kickoff-local.workspace = true
+nix = { workspace = true, features = ["signal"] }
+rustix = { workspace = true, features = ["thread"] }
+thiserror.workspace = true

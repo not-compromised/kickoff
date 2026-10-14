@@ -633,6 +633,12 @@ note = "the public Kick future owns publication after removing the peer"
 
 [[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-bind-any-port", test = "si_29_binding_skips_unusable_ports_before_publishing_a_reachable_endpoint", note = "binding publishes a local port the peer send guard refuses; the recipient denylist remains enforced"
 
+# kickoff-game (the gamebox spawn path, design §3.2.6)
+
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-direct-kill", test = "si_38_normal_stop_kills_the_cgroup_before_asking_the_manager", note = "normal stop skips cgroup.kill and leaves the kill to the manager's scope stop"
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-bindsto", test = "si_38_owner_death_ends_the_box_without_a_normal_stop", note = "the scope is not bound to the supervisor's service, so its death leaves the descendant running"
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-sigterm-stop", test = "si_38_owner_death_ends_the_box_without_a_normal_stop", note = "the scope keeps the default SIGTERM stop, which the stand-in ignores past the deadline"
+
 # Named by the design for later milestones; the code they mutate does not exist on M2.
 
 [[pending]]
