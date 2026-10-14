@@ -754,18 +754,34 @@ fn spawn_clean(
     Ok(Spawned(Some(pid)))
 }
 
+/// Host crash configurations the facade can be kept out of (design §6.4),
+/// decided before the probe so no crash handler sees a crash it would keep.
+/// A `|` program ignores a zero limit. An `@` socket handler ignores every
+/// limit: while it is down or its queue is full the probe looks suppressed,
+/// and a later facade crash would dump. An unreadable pattern proves nothing.
+fn core_pattern_admits(pattern: Option<&[u8]>, hard_limit: Option<u64>) -> Result<(), IpcError> {
+    let Some(pattern) = pattern else {
+        return Err(IpcError::Hardening);
+    };
+    match pattern.first() {
+        Some(b'@') if !cfg!(feature = "mutant-si30-socket-handler-allowed") => {
+            Err(IpcError::CoreDumpsEnabled)
+        }
+        Some(b'|') if hard_limit == Some(0) => Err(IpcError::CoreDumpsEnabled),
+        _ => Ok(()),
+    }
+}
+
 async fn probe_core_suppression(dir: &RuntimeDir, worker: &WorkerLaunch) -> Result<(), IpcError> {
     use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    // A pipe handler ignores a zero limit, so the probe would only hand its
-    // crash to the handler before the same refusal.
-    if rustix::process::getrlimit(Resource::Core).maximum == Some(0)
-        && std::fs::read("/proc/sys/kernel/core_pattern")
-            .is_ok_and(|pattern| pattern.first() == Some(&b'|'))
-    {
-        return Err(IpcError::CoreDumpsEnabled);
-    }
+    core_pattern_admits(
+        std::fs::read("/proc/sys/kernel/core_pattern")
+            .ok()
+            .as_deref(),
+        rustix::process::getrlimit(Resource::Core).maximum,
+    )?;
     let parent = dir.socket_path().parent().ok_or(IpcError::UnsafeDir)?;
     let path = parent.join(format!(
         ".core-probe-{}-{}",
@@ -812,4 +828,46 @@ async fn probe_core_suppression(dir: &RuntimeDir, worker: &WorkerLaunch) -> Resu
     })
     .await
     .map_err(|_| IpcError::Timeout)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Case = (Option<&'static [u8]>, Option<u64>, Result<(), IpcError>);
+
+    #[test]
+    fn si_30_core_pattern_policy_follows_the_host_table() {
+        let coredump: &'static [u8] = b"|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h\n";
+        let cases: [Case; 9] = [
+            (Some(b"core\n"), None, Ok(())),
+            (Some(b"core\n"), Some(0), Ok(())),
+            (Some(b"/var/crash/core.%p\n"), Some(0), Ok(())),
+            (Some(coredump), None, Ok(())),
+            (Some(coredump), Some(0), Err(IpcError::CoreDumpsEnabled)),
+            (
+                Some(b"@/run/coredump.socket\n"),
+                None,
+                Err(IpcError::CoreDumpsEnabled),
+            ),
+            (
+                Some(b"@@/run/coredump.socket\n"),
+                Some(0),
+                Err(IpcError::CoreDumpsEnabled),
+            ),
+            (
+                Some(b"@/run/coredump.socket\n"),
+                Some(1),
+                Err(IpcError::CoreDumpsEnabled),
+            ),
+            (None, None, Err(IpcError::Hardening)),
+        ];
+        for (pattern, hard_limit, expected) in cases {
+            assert_eq!(
+                core_pattern_admits(pattern, hard_limit),
+                expected,
+                "pattern {pattern:?} with hard limit {hard_limit:?}"
+            );
+        }
+    }
 }

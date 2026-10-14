@@ -939,7 +939,7 @@ async fn si_30_worker_channel_refuses_requests_once_dumpable_again() {
 fn si_30_facade_follows_a_zero_hard_core_limit() {
     // A hard limit of 0 cannot be raised to the pipe sentinel 1. It still
     // stops file dumps, so the facade starts; a `|` program or `@` socket
-    // handler ignores it, so the probe's dump must refuse startup by name.
+    // handler ignores it, so startup is refused by name before any probe.
     let base = TempBase::new();
     let _dir = base.dir();
     let pattern = std::fs::read_to_string("/proc/sys/kernel/core_pattern").unwrap();

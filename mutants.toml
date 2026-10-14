@@ -264,6 +264,13 @@ note = "the worker keeps descriptors another facade thread opened while it was s
 [[mutant]]
 si = "SI-30"
 crate = "kickoff-ipc"
+feature = "mutant-si30-socket-handler-allowed"
+test = "si_30_core_pattern_policy_follows_the_host_table"
+note = "an `@` socket core handler, which ignores every core limit, is accepted"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-ipc"
 test_crate = "kickoff-ipc"
 feature = "mutant-si30-worker-dumpable-unchecked"
 test = "si_30_worker_refuses_clients_once_dumpable_again"
