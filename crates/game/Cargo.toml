@@ -20,6 +20,8 @@ mutant-si36-no-fd-sweep = []
 mutant-si36-barrier-skip = []
 mutant-si14-no-deny-set = []
 mutant-si14-no-startup-probe = []
+mutant-si34-copy-writable = []
+mutant-si35-host-x11-mounted = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kickoff-local.workspace = true

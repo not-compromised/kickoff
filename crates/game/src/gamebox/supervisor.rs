@@ -49,6 +49,10 @@ enum Payload {
     /// to its network; exits 0 only if the box allows exactly the internet
     /// (SI-14).
     Network,
+    /// Tries to change the game copy and to find launcher state (SI-34).
+    Files,
+    /// Looks for host display and bus sockets (SI-35, direct half).
+    Display,
 }
 
 impl Request {
@@ -60,6 +64,8 @@ impl Request {
         let payload = |name: &str| match name {
             "inventory" => Ok(Payload::Inventory),
             "network" => Ok(Payload::Network),
+            "files" => Ok(Payload::Files),
+            "display" => Ok(Payload::Display),
             _ => Err(Refused::Malformed),
         };
         match args.as_slice() {
@@ -169,6 +175,8 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
                 .arg(in_box(PROBE));
             match payload {
                 Payload::Inventory => chain.arg("inventory"),
+                Payload::Files => chain.arg("files"),
+                Payload::Display => chain.arg("display"),
                 Payload::Network => chain
                     .arg("network")
                     .args(net::host_addresses()?.iter().map(Ipv4Addr::to_string)),
@@ -419,6 +427,8 @@ impl RunDir {
                 .mode(0o700)
                 .create(run.0.join(dir))?;
         }
+        // Stands in for the game copy's files until copy generations exist.
+        std::fs::write(run.0.join("game").join("canary"), b"copy\n")?;
         for pipe in [READY, RELEASE] {
             rustix::fs::mknodat(
                 rustix::fs::CWD,

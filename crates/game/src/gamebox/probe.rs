@@ -11,8 +11,11 @@ use super::Refused;
 
 pub fn probe_main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("network") {
-        return network(args.get(1..).unwrap_or_default());
+    match args.first().map(String::as_str) {
+        Some("network") => return network(args.get(1..).unwrap_or_default()),
+        Some("files") => return files(),
+        Some("display") => return display(),
+        _ => {}
     }
     let arg = args.first();
     let result = match arg.map(String::as_str) {
@@ -119,6 +122,85 @@ fn resolves(resolver: std::net::Ipv4Addr) -> bool {
                 .recv(&mut reply)
                 .is_ok_and(|n| n >= 2 && reply.get(..2) == Some(&query[..2]))
     })
+}
+
+/// SI-34 from inside the box. Exit 0 only if every write, truncate, rename,
+/// delete and create in the game copy fails, the copy is readable, the
+/// prefix is writable, and no launcher or Kickoff state of the host is
+/// visible. Otherwise 60 plus the failed check's index.
+fn files() -> ExitCode {
+    use std::fs::OpenOptions;
+    let canary = "/kickoff/game/canary";
+    let home = std::env::var("HOME").unwrap_or_default();
+    let refused: [bool; 5] = [
+        OpenOptions::new().append(true).open(canary).is_err(),
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(canary)
+            .is_err(),
+        std::fs::rename(canary, "/kickoff/game/renamed").is_err(),
+        std::fs::remove_file(canary).is_err(),
+        std::fs::write("/kickoff/game/created", b"x").is_err(),
+    ];
+    let controls = [
+        std::fs::read(canary).is_ok_and(|b| !b.is_empty()),
+        std::fs::write("/kickoff/prefix/written", b"x").is_ok(),
+    ];
+    let absent = [
+        ".config/legendary",
+        ".config/heroic",
+        ".var/app",
+        ".local/share/kickoff",
+        ".ssh",
+    ]
+    .map(|p| {
+        std::fs::symlink_metadata(std::path::Path::new(&home).join(p))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    });
+    first_failure(60, refused.iter().chain(&controls).chain(&absent))
+}
+
+/// The direct half of SI-35 from inside the box: no host X11, Wayland or
+/// bus socket exists in its view, and the host's abstract X11 sockets are
+/// unreachable (the box has its own network namespace, so its own abstract
+/// namespace). Paths are only looked at, never connected to. Exit 0, or 50
+/// plus the failed check's index.
+fn display() -> ExitCode {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+    let empty_or_absent = |dir: &str| match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+    let abstract_unreachable = (0..10).all(|n| {
+        SocketAddr::from_abstract_name(format!("/tmp/.X11-unix/X{n}"))
+            .and_then(|addr| UnixStream::connect_addr(&addr))
+            .is_err()
+    });
+    // Positive control: the same connect reaches a listener of the box's own.
+    let control = SocketAddr::from_abstract_name("kickoff-probe-control")
+        .and_then(|addr| UnixListener::bind_addr(&addr).map(|l| (l, addr)))
+        .and_then(|(listener, addr)| UnixStream::connect_addr(&addr).map(|s| (listener, s)))
+        .is_ok();
+    let checks = [
+        empty_or_absent("/tmp/.X11-unix"),
+        empty_or_absent(&runtime),
+        std::fs::symlink_metadata("/run/dbus/system_bus_socket").is_err(),
+        abstract_unreachable,
+        control,
+    ];
+    first_failure(50, checks.iter())
+}
+
+fn first_failure<'a>(base: u8, checks: impl Iterator<Item = &'a bool>) -> ExitCode {
+    for (offset, ok) in (0u8..).zip(checks) {
+        if !*ok {
+            return ExitCode::from(base.saturating_add(offset));
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// The game's descriptor inventory (SI-36): first it writes to every

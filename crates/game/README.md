@@ -22,7 +22,7 @@ kickoff-gamebox (user service; sweeps descriptors first)
 ```
 
 The supervisor's request is a closed set of probes (`probe standin`,
-`probe inventory [--fault F]`, `probe network`); no path, command or argument comes from
+`probe inventory [--fault F]`, `probe network`, `probe files`, `probe display`); no path, command or argument comes from
 input. The three binaries find each other only as installed siblings.
 
 **Teardown.** Normal stop (SIGTERM to the supervisor, box exit or a refused

@@ -116,11 +116,15 @@ impl View<'_> {
         a.s(&["--dir"]);
         a.p(self.home);
         a.s(&["--dir", "/kickoff"]);
-        a.bind(
-            "--ro-bind",
-            &self.run.join("game"),
-            Path::new("/kickoff/game"),
-        );
+        let copy = if cfg!(feature = "mutant-si34-copy-writable") {
+            "--bind"
+        } else {
+            "--ro-bind"
+        };
+        a.bind(copy, &self.run.join("game"), Path::new("/kickoff/game"));
+        if cfg!(feature = "mutant-si35-host-x11-mounted") {
+            a.s(&["--ro-bind", "/tmp/.X11-unix", "/tmp/.X11-unix"]);
+        }
         a.bind("--overlay-src", &self.run.join("prefix"), Path::new(""));
         a.s(&["--tmp-overlay", "/kickoff/prefix"]);
         a.bind("--ro-bind", self.link, &Path::new(BOX_BIN).join(LINK));
