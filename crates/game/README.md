@@ -38,8 +38,11 @@ end or a timeout; once a stop is pending the barrier is never released.
 **Test seams.** Debug builds only: `KICKOFF_TEST_GATE=<phase>` with
 `KICKOFF_TEST_GATE_DIR` holds the supervisor or a link at a startup phase,
 `KICKOFF_TEST_STALL_HELPER` replaces the outside nft helper by one that
-never finishes, and `KICKOFF_TEST_SLOW_REGISTRATION` makes the supervisor
-never see its scope registered. Release builds compile none of it.
+never finishes, `KICKOFF_TEST_SLOW_REGISTRATION` makes the supervisor
+never see its scope registered, `KICKOFF_TEST_BARRIER=inside|outside` keeps
+one barrier side only, and `KICKOFF_TEST_WITNESS_DIR` is bound into the box
+for the probe's payload-entry witness. Release builds compile none of it,
+and the barrier link refuses a one-sided request in a release build.
 
 **Launch barrier.** The barrier link checks namespaces, its cgroup namespace,
 rlimits, capability sets, `NoNewPrivs` and its descriptors, writes one byte on
@@ -48,8 +51,12 @@ a pipe and closes it. The supervisor then checks the same link through
 `nsenter` into bwrap's monitor, which stayed in pasta's user namespace), and
 releases it with one byte on a second pipe. The link closes that pipe,
 re-checks that only stdio on `/dev/null` is open, and execs the payload.
-Any failure kills the cgroup. Each property except the cgroup name and
-`NoNewPrivs` has an injectable fault (`--fault`), refused in the SI-36 test.
+Any failure kills the cgroup. Every property has an injectable fault (`--fault`) except `NoNewPrivs`:
+bwrap sets it unconditionally and it cannot be cleared, so its check is
+tested on a status-file fixture. The SI-36 tests refuse each fault with both
+sides and with each side alone, and a witness the payload writes on entry
+must stay absent. `--fault` belongs to probe requests only and stays out of
+the game-launch request.
 
 ## Decisions open for review
 

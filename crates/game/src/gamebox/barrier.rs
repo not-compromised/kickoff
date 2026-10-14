@@ -62,10 +62,16 @@ pub(super) enum Fault {
     PastaMapsHost,
     /// The prefix's writable layer is left unsized.
     PrefixUnsized,
+    /// The setup link moves into a child cgroup of the scope, so the barrier
+    /// link is not directly in the game scope.
+    Cgroup,
+    /// The box shares the setup link's cgroup namespace and sees the host's
+    /// cgroup path.
+    CgroupNamespace,
 }
 
 impl Fault {
-    pub(super) const ALL: [(&'static str, Fault); 8] = [
+    pub(super) const ALL: [(&'static str, Fault); 10] = [
         ("none", Fault::None),
         ("namespaces", Fault::Namespaces),
         ("nft", Fault::Nft),
@@ -74,6 +80,8 @@ impl Fault {
         ("descriptors", Fault::Descriptors),
         ("pasta-maps-host", Fault::PastaMapsHost),
         ("prefix-unsized", Fault::PrefixUnsized),
+        ("cgroup", Fault::Cgroup),
+        ("cgroup-namespace", Fault::CgroupNamespace),
     ];
 
     pub(super) fn parse(name: &str) -> Result<Fault, Refused> {
@@ -89,6 +97,55 @@ impl Fault {
             .iter()
             .find(|(_, f)| *f == self)
             .map_or("none", |(n, _)| n)
+    }
+}
+
+/// Which sides of the barrier check. Every launch checks both; debug builds
+/// let a test disable one (`KICKOFF_TEST_BARRIER=inside|outside` keeps
+/// only that side), to show each side refuses alone (SI-36).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Sides {
+    Both,
+    Inside,
+    Outside,
+}
+
+impl Sides {
+    pub(super) fn requested() -> Sides {
+        if !cfg!(debug_assertions) {
+            return Sides::Both;
+        }
+        match std::env::var("KICKOFF_TEST_BARRIER").as_deref() {
+            Ok("inside") => Sides::Inside,
+            Ok("outside") => Sides::Outside,
+            _ => Sides::Both,
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Sides::Both => "both",
+            Sides::Inside => "inside",
+            Sides::Outside => "outside",
+        }
+    }
+
+    /// Release builds accept only both sides.
+    pub(super) fn parse(name: &str) -> Result<Sides, Refused> {
+        match name {
+            "both" => Ok(Sides::Both),
+            "inside" if cfg!(debug_assertions) => Ok(Sides::Inside),
+            "outside" if cfg!(debug_assertions) => Ok(Sides::Outside),
+            _ => Err(Refused::Malformed),
+        }
+    }
+
+    pub(super) fn inside(self) -> bool {
+        self != Sides::Outside && !cfg!(feature = "mutant-si36-inside-barrier-skip")
+    }
+
+    pub(super) fn outside(self) -> bool {
+        self != Sides::Inside && !cfg!(feature = "mutant-si36-outside-barrier-skip")
     }
 }
 
@@ -114,7 +171,12 @@ pub(super) struct Proc(Base);
 
 enum Base {
     This,
-    Pinned { dir: OwnedFd, pidfd: OwnedFd },
+    Pinned {
+        dir: OwnedFd,
+        pidfd: OwnedFd,
+    },
+    #[cfg(test)]
+    Fixture(std::path::PathBuf),
 }
 
 impl Proc {
@@ -136,6 +198,12 @@ impl Proc {
         proc.read("stat")?;
         proc.still_running()?;
         Ok(proc)
+    }
+
+    /// A directory standing in for `/proc/<pid>`, for the checks' tests.
+    #[cfg(test)]
+    pub(super) fn fixture(dir: &Path) -> Proc {
+        Proc(Base::Fixture(dir.to_owned()))
     }
 
     /// The pinned process has not exited (a pidfd turns readable when it
@@ -162,6 +230,8 @@ impl Proc {
         Ok(match &self.0 {
             Base::This => rustix::fs::open(format!("/proc/self/{name}"), flags, Mode::empty())?,
             Base::Pinned { dir, .. } => rustix::fs::openat(dir, name, flags, Mode::empty())?,
+            #[cfg(test)]
+            Base::Fixture(dir) => rustix::fs::open(dir.join(name), flags, Mode::empty())?,
         })
     }
 
@@ -169,6 +239,8 @@ impl Proc {
         Ok(match &self.0 {
             Base::This => rustix::fs::stat(format!("/proc/self/{name}"))?,
             Base::Pinned { dir, .. } => rustix::fs::statat(dir, name, AtFlags::empty())?,
+            #[cfg(test)]
+            Base::Fixture(dir) => rustix::fs::stat(dir.join(name))?,
         })
     }
 
@@ -185,6 +257,8 @@ impl Proc {
         let link = match &self.0 {
             Base::This => rustix::fs::readlink(format!("/proc/self/{name}"), Vec::new())?,
             Base::Pinned { dir, .. } => rustix::fs::readlinkat(dir, name, Vec::new())?,
+            #[cfg(test)]
+            Base::Fixture(dir) => rustix::fs::readlink(dir.join(name), Vec::new())?,
         };
         link.into_string().map_err(|_| Refused::Malformed)
     }
@@ -204,6 +278,8 @@ impl Proc {
                 let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
                 rustix::fs::fstatvfs(rustix::fs::openat(dir, path, flags, Mode::empty())?)?
             }
+            #[cfg(test)]
+            Base::Fixture(dir) => rustix::fs::statvfs(dir.join("prefix"))?,
         };
         if stat.f_blocks.checked_mul(stat.f_frsize) != Some(bytes) {
             return Err(Refused::Barrier(Check::PrefixSize));
@@ -279,7 +355,7 @@ impl Proc {
                 return Err(Refused::Barrier(Check::Capabilities));
             }
         }
-        if field("NoNewPrivs:") != Some("1") {
+        if !cfg!(feature = "mutant-si36-nnp-unchecked") && field("NoNewPrivs:") != Some("1") {
             return Err(Refused::Barrier(Check::NoNewPrivs));
         }
         Ok(())
@@ -323,4 +399,47 @@ impl Proc {
 pub(super) fn identity(path: &Path) -> Result<(u64, u64), Refused> {
     let meta = std::fs::metadata(path)?;
     Ok((meta.dev(), meta.ino()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(no_new_privs: &str, effective: &str) -> String {
+        format!(
+            "Name:\tprobe\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n\
+             CapEff:\t{effective}\nCapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\n\
+             NoNewPrivs:\t{no_new_privs}\n"
+        )
+    }
+
+    #[test]
+    fn si_36_barrier_refuses_a_payload_without_no_new_privs() {
+        // bwrap sets no_new_privs unconditionally and it cannot be cleared,
+        // so no setup can fault it: the check is shown on a status file.
+        let dir = std::env::temp_dir().join(format!("kickoff-nnp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cases = [
+            ("1", "0000000000000000", Ok(())),
+            (
+                "0",
+                "0000000000000000",
+                Err(Refused::Barrier(Check::NoNewPrivs)),
+            ),
+            (
+                "1",
+                "0000000000200000",
+                Err(Refused::Barrier(Check::Capabilities)),
+            ),
+        ];
+        for (nnp, eff, want) in cases {
+            std::fs::write(dir.join("status"), status(nnp, eff)).unwrap();
+            assert_eq!(
+                Proc::fixture(&dir).privileges(),
+                want,
+                "NoNewPrivs {nnp}, CapEff {eff}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

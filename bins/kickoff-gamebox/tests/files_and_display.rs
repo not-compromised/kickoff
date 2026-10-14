@@ -4,13 +4,28 @@
 //! gamescope, WlFilter and the security context (the rest of SI-35) are
 //! not in this box yet.
 
+#![allow(clippy::unwrap_used)]
+
 mod support;
 
-use support::Supervisor;
+use support::{Options, Supervisor};
 
 fn run_probe(payload: &str) -> String {
-    let supervisor = Supervisor::start(&["probe", payload]);
+    // A stand-in for the host's X11 directory, holding a live socket: what
+    // the X11 mutant mounts, so it never depends on (or touches) the real
+    // one. The probe only looks at names; nothing connects to it.
+    let fixture = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("x11-{}-{payload}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fixture);
+    std::fs::create_dir_all(&fixture).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(fixture.join("X0")).unwrap();
+    let options = Options {
+        env: vec![("KICKOFF_TEST_X11_DIR", fixture.display().to_string())],
+        ..Options::default()
+    };
+    let supervisor = Supervisor::start_with(options, &["probe", payload]);
     supervisor.wait_exit();
+    std::fs::remove_dir_all(&fixture).unwrap();
     supervisor.report()
 }
 

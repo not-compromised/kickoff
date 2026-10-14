@@ -8,8 +8,11 @@ use std::time::Duration;
 use nix::sys::signal::{SigSet, Signal};
 
 use super::Refused;
+use super::view::WITNESS;
 
 pub fn probe_main() -> ExitCode {
+    // The payload-entry witness: present only where a test bound one.
+    let _ = std::fs::write(format!("{WITNESS}/entered"), b"");
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("network") => return network(args.get(1..).unwrap_or_default()),
@@ -55,7 +58,8 @@ const RESOLVERS: [[u8; 4]; 2] = [[1, 1, 1, 1], [9, 9, 9, 9]];
 /// (the fixed list, then each host address given as an argument) is
 /// dropped, a public resolver answers, and the box cannot change its
 /// link, routes or ruleset. Otherwise 20 plus the destination's index, 40
-/// for no internet, or 41 to 43 for a change that went through.
+/// for no internet, 41 to 43 for a change not refused with EPERM, or 44 if
+/// a control failed.
 fn network(hosts: &[String]) -> ExitCode {
     use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
     let mut forbidden: Vec<SocketAddr> = FORBIDDEN
@@ -79,27 +83,55 @@ fn network(hosts: &[String]) -> ExitCode {
     if !RESOLVERS.iter().any(|r| resolves(Ipv4Addr::from(*r))) {
         return ExitCode::from(40);
     }
-    let changes: [&[&str]; 3] = [
-        &["/usr/bin/ip", "link", "set", "lo", "down"],
-        &["/usr/bin/ip", "route", "add", "203.0.113.0/24", "dev", "lo"],
-        &["/usr/bin/nft", "flush", "ruleset"],
-    ];
-    for (code, change) in (41u8..).zip(changes) {
-        let Some((program, args)) = change.split_first() else {
-            continue;
-        };
-        let applied = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if applied {
+    let refused = network_changes();
+    for (code, refused) in (41u8..).zip(refused) {
+        if !refused {
             return ExitCode::from(code);
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Asks the kernel directly, over netlink, to take the loopback down, add a
+/// route and add an nft table, and requires each to be refused with EPERM
+/// (the box has no capability over its network namespace). Then two
+/// controls: a netlink dump works from here, and a request the kernel does
+/// not know is refused with something other than EPERM, so EPERM is the
+/// answer to these requests and not to every request.
+fn network_changes() -> [bool; 4] {
+    use super::netlink::{answer, host_view, request};
+    const REQUEST_ACK: u16 = 0x1 | 0x4;
+    const CREATE_EXCL: u16 = 0x400 | 0x200;
+    let eperm = nix::errno::Errno::EPERM as i32;
+    let mut link_down = vec![0u8, 0, 0, 0];
+    link_down.extend_from_slice(&1i32.to_ne_bytes()); // lo
+    link_down.extend_from_slice(&0u32.to_ne_bytes()); // flags
+    link_down.extend_from_slice(&1u32.to_ne_bytes()); // change IFF_UP
+    let mut route_add = vec![2u8, 24, 0, 0, 254, 4, 253, 1];
+    route_add.extend_from_slice(&0u32.to_ne_bytes());
+    route_add.extend_from_slice(&8u16.to_ne_bytes());
+    route_add.extend_from_slice(&1u16.to_ne_bytes()); // RTA_DST
+    route_add.extend_from_slice(&[203, 0, 113, 0]);
+    route_add.extend_from_slice(&8u16.to_ne_bytes());
+    route_add.extend_from_slice(&4u16.to_ne_bytes()); // RTA_OIF
+    route_add.extend_from_slice(&1u32.to_ne_bytes());
+    let nft_table = [1u8, 0, 0, 0]; // nfgenmsg: NFPROTO_INET
+    let netfilter = Some(rustix::net::netlink::NETFILTER);
+    let refused = |protocol, kind, flags, body: &[u8]| {
+        request(kind, flags, body)
+            .and_then(|m| answer(protocol, &m))
+            .is_ok_and(|errno| errno == eperm)
+    };
+    let controls = host_view().is_ok_and(|v| !v.routes.is_empty())
+        && request(0x7ff0, REQUEST_ACK, &[0; 16])
+            .and_then(|m| answer(None, &m))
+            .is_ok_and(|errno| errno != 0 && errno != eperm);
+    [
+        refused(None, 16, REQUEST_ACK, &link_down),
+        refused(None, 24, REQUEST_ACK | CREATE_EXCL, &route_add),
+        refused(netfilter, 10 << 8, REQUEST_ACK, &nft_table),
+        controls,
+    ]
 }
 
 /// One DNS query for the root's NS records gets an answer with its id.

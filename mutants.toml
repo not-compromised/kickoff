@@ -663,6 +663,10 @@ note = "the public Kick future owns publication after removing the peer"
 [[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-limits", test = "si_38_box_limits_are_enforced", note = "without the scope's limits the fork probe passes the task limit"
 [[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-prefix-unsized", test = "si_38_box_limits_are_enforced", note = "the prefix's writable layer is not a sized tmpfs; the barrier's size check refuses the launch"
 
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-inside-barrier-skip", test = "si_36_inside_barrier_refuses_each_fault_alone", note = "the barrier link skips its own checks; with the outside check off, faulted setups reach the payload"
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-outside-barrier-skip", test = "si_36_outside_barrier_refuses_each_fault_alone", note = "the supervisor skips its outside check; with the inside checks off, faulted setups reach the payload"
+[[mutant]] si = "SI-36", crate = "kickoff-game", feature = "mutant-si36-nnp-unchecked", test = "si_36_barrier_refuses_a_payload_without_no_new_privs", note = "the barrier stops checking NoNewPrivs"
+
 # Named by the design for later milestones; the code they mutate does not exist on M2.
 
 [[pending]]

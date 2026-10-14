@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use rustix::fs::{Mode, OFlags};
 
 use super::Refused;
-use super::barrier::{Check, Fault, NAMESPACES, Proc, identity};
+use super::barrier::{Check, Fault, NAMESPACES, Proc, Sides, identity};
 use super::events::{Events, Halt, POLL, Wake, after};
 use super::gate;
 use super::install::{LINK, PROBE, sibling};
@@ -143,6 +143,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
         Request::Probe(payload, _) => payload.limits(),
     };
     let prefix = limits.prefix.to_string();
+    let sides = Sides::requested();
     let mut chain = scope::create_command();
     chain
         .args(scope::create_args(&owner, &name, limits))
@@ -174,7 +175,9 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
             let canary = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
             canary.set_nonblocking(true)?;
             let canary_port = canary.local_addr()?.port().to_string();
+            let witness = witness_dir();
             let view = View {
+                witness: witness.as_deref(),
                 run: &run.0,
                 link: &link,
                 probe: &probe,
@@ -191,7 +194,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
                 .args([fault.name(), &canary_port, &prefix, "--", BWRAP])
                 .args(view.bwrap_args(fault))
                 .arg(in_box(LINK))
-                .args(["barrier", fault.name(), &prefix])
+                .args(["barrier", fault.name(), sides.name(), &prefix])
                 .args(&host)
                 .args(NAMESPACES.iter().map(|ns| format!("{SETUP_NS}{ns}")))
                 .arg("--")
@@ -218,6 +221,7 @@ fn run(args: &[OsString]) -> Result<End, Refused> {
                 ruleset,
                 link_id: identity(&link)?,
                 prefix: limits.prefix,
+                sides,
             })
         }
     };
@@ -309,6 +313,7 @@ fn conclude(halt: Halt) -> Result<End, Refused> {
 struct Boxed {
     /// Bytes of the prefix's writable layer.
     prefix: u64,
+    sides: Sides,
     /// Held, not read: the box's mounts come from it until teardown.
     _run: RunDir,
     canary: TcpListener,
@@ -371,7 +376,9 @@ impl Boxed {
             }
         }
         gate::hold("barrier");
-        self.check_from_outside(events, chain, scope, name)?;
+        if self.sides.outside() {
+            self.check_from_outside(events, chain, scope, name)?;
+        }
         events.pending()?;
         let release = self.release.take().ok_or(Refused::Malformed)?;
         std::fs::File::from(release).write_all(b"G")?;
@@ -555,6 +562,15 @@ fn ended(events: &mut Events, chain: &mut Child) -> Result<ExitStatus, Halt> {
             return Err(Refused::BoxEnded(-1).into());
         }
     }
+}
+
+/// Debug builds: a test's payload-entry witness directory.
+fn witness_dir() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let dir = PathBuf::from(std::env::var_os("KICKOFF_TEST_WITNESS_DIR")?);
+    dir.is_absolute().then_some(dir)
 }
 
 fn home() -> Result<PathBuf, Refused> {

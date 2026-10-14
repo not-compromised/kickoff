@@ -38,7 +38,13 @@ pub(super) struct View<'a> {
     pub home: &'a Path,
     pub uid: u32,
     pub gid: u32,
+    /// Debug builds' payload-entry witness directory (see [`WITNESS`]).
+    pub witness: Option<&'a Path>,
 }
+
+/// Where a test's witness directory appears in the box: the probe writes
+/// `entered` there first thing, so a refused launch must leave it absent.
+pub(super) const WITNESS: &str = "/kickoff/witness";
 
 impl View<'_> {
     pub(super) fn bwrap_args(&self, fault: Fault) -> Vec<OsString> {
@@ -59,9 +65,11 @@ impl View<'_> {
         if fault != Fault::Namespaces {
             a.s(&["--unshare-ipc"]);
         }
+        if fault != Fault::CgroupNamespace {
+            a.s(&["--unshare-cgroup-try"]);
+        }
         a.s(&[
             "--unshare-uts",
-            "--unshare-cgroup-try",
             "--hostname",
             "kickoff",
             "--die-with-parent",
@@ -122,8 +130,15 @@ impl View<'_> {
             "--ro-bind"
         };
         a.bind(copy, &self.run.join("game"), Path::new("/kickoff/game"));
-        if cfg!(feature = "mutant-si35-host-x11-mounted") {
-            a.s(&["--ro-bind", "/tmp/.X11-unix", "/tmp/.X11-unix"]);
+        // The mutant mounts a test-owned stand-in for the host's X11
+        // directory, never the real one.
+        if cfg!(feature = "mutant-si35-host-x11-mounted")
+            && let Some(dir) = std::env::var_os("KICKOFF_TEST_X11_DIR")
+        {
+            a.bind("--ro-bind", Path::new(&dir), Path::new("/tmp/.X11-unix"));
+        }
+        if let Some(dir) = self.witness {
+            a.bind("--bind", dir, Path::new(WITNESS));
         }
         // The writable layer is the sized tmpfs the setup link mounted on
         // prefix-rw, in its own mount namespace (design §3.2 table).

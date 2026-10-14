@@ -198,3 +198,59 @@ impl AsFd for HostWatch {
         self.0.as_fd()
     }
 }
+
+/// One netlink request (`kind`, `flags`, `body`) with its header.
+pub(super) fn request(kind: u16, flags: u16, body: &[u8]) -> Result<Vec<u8>, Refused> {
+    let len = u32::try_from(body.len().saturating_add(16)).map_err(|_| Refused::Malformed)?;
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&len.to_ne_bytes());
+    out.extend_from_slice(&kind.to_ne_bytes());
+    out.extend_from_slice(&flags.to_ne_bytes());
+    out.extend_from_slice(&1u32.to_ne_bytes());
+    out.extend_from_slice(&0u32.to_ne_bytes());
+    out.extend_from_slice(body);
+    Ok(out)
+}
+
+/// Sends `message` (which must ask for an acknowledgement) on a socket of
+/// `protocol` and returns the errno the kernel answered with, 0 for success.
+pub(super) fn answer(
+    protocol: Option<rustix::net::Protocol>,
+    message: &[u8],
+) -> Result<i32, Refused> {
+    let sock = rustix::net::socket_with(
+        rustix::net::AddressFamily::NETLINK,
+        SocketType::RAW,
+        SocketFlags::CLOEXEC,
+        protocol,
+    )?;
+    rustix::net::bind(&sock, &SocketAddrNetlink::new(0, 0))?;
+    rustix::net::sendto(
+        &sock,
+        message,
+        SendFlags::empty(),
+        &SocketAddrNetlink::new(0, 0),
+    )?;
+    let mut buf = [0u8; 4096];
+    let (_, len) = rustix::net::recv(&sock, &mut buf[..], RecvFlags::empty())?;
+    let reply = buf.get(..len).ok_or(Refused::Network)?;
+    let field = |at: usize| -> Result<[u8; 4], Refused> {
+        reply
+            .get(at..at.saturating_add(4))
+            .and_then(|b| b.try_into().ok())
+            .ok_or(Refused::Network)
+    };
+    // NLMSG_ERROR, then the negated errno after the 16-byte header.
+    let kind = u16::from_ne_bytes(
+        reply
+            .get(4..6)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(Refused::Network)?,
+    );
+    if kind != 2 {
+        return Err(Refused::Network);
+    }
+    i32::from_ne_bytes(field(16)?)
+        .checked_neg()
+        .ok_or(Refused::Network)
+}

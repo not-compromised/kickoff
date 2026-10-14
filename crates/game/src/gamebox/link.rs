@@ -25,7 +25,7 @@ use rustix::fs::{Mode, OFlags};
 use rustix::process::{Resource, Rlimit};
 
 use super::Refused;
-use super::barrier::{Check, FSIZE, Fault, NAMESPACES, NOFILE, Proc, identity};
+use super::barrier::{Check, FSIZE, Fault, NAMESPACES, NOFILE, Proc, Sides, identity};
 use super::gate;
 use super::install::require_null_stdio;
 use super::net::{GATEWAY, NFT, same_ruleset};
@@ -77,13 +77,19 @@ fn run(args: &[OsString]) -> Result<Infallible, Refused> {
             };
             inner(scope, &setup, next)
         }
-        (Some("barrier"), [fault, prefix, ns @ ..])
+        (Some("barrier"), [fault, sides, prefix, ns @ ..])
             if ns.len() == NAMESPACES.len().saturating_mul(2) =>
         {
             let (host, setup) = ns.split_at(NAMESPACES.len());
             let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-            let prefix = prefix.parse().map_err(|_| Refused::Malformed)?;
-            barrier(Fault::parse(fault)?, prefix, &own(host), &own(setup), next)
+            let expect = Expect {
+                fault: Fault::parse(fault)?,
+                sides: Sides::parse(sides)?,
+                prefix: prefix.parse().map_err(|_| Refused::Malformed)?,
+                host: own(host),
+                setup: own(setup),
+            };
+            barrier(&expect, next)
         }
         _ => Err(Refused::Malformed),
     }
@@ -185,6 +191,9 @@ fn inner(scope: &str, setup: &Setup<'_>, next: &[OsString]) -> Result<Infallible
         };
         rustix::process::setrlimit(Resource::Nofile, nofile)?;
     }
+    if fault == Fault::Cgroup {
+        leave_the_scope()?;
+    }
     sized_prefix(run, prefix, fault)?;
     rustix::thread::set_no_new_privs(true)?;
     for pipe in [&ready, &release] {
@@ -201,6 +210,22 @@ fn inner(scope: &str, setup: &Setup<'_>, next: &[OsString]) -> Result<Infallible
         )
         .collect::<Result<Vec<_>, _>>()?;
     exec(&next)
+}
+
+/// The cgroup fault: this link (and so the box) moves into a child cgroup of
+/// the scope. Still killed with the scope, but no longer in it directly.
+fn leave_the_scope() -> Result<(), Refused> {
+    let text = std::fs::read_to_string("/proc/self/cgroup")?;
+    let path = text
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .ok_or(Refused::WrongScope)?;
+    let child = Path::new("/sys/fs/cgroup")
+        .join(path.trim_start_matches('/'))
+        .join("moved");
+    std::fs::create_dir(&child)?;
+    std::fs::write(child.join("cgroup.procs"), b"0")?;
+    Ok(())
 }
 
 /// The prefix's writable layer is a tmpfs of `bytes`, mounted on the
@@ -231,42 +256,50 @@ fn sized_prefix(run: &Path, bytes: u64, fault: Fault) -> Result<(), Refused> {
 /// The last link. bwrap's `--die-with-parent` and PID namespace cover its
 /// parent; it checks itself, hands over to the supervisor's outside check
 /// and execs the payload only on the release byte.
-fn barrier(
+/// What the barrier link checks itself against.
+struct Expect {
     fault: Fault,
+    sides: Sides,
+    /// Bytes of the prefix's writable layer.
     prefix: u64,
-    host: &[String],
-    setup: &[String],
-    next: &[OsString],
-) -> Result<Infallible, Refused> {
+    /// The host's and the setup link's namespaces.
+    host: Vec<String>,
+    setup: Vec<String>,
+}
+
+fn barrier(expect: &Expect, next: &[OsString]) -> Result<Infallible, Refused> {
     if cfg!(feature = "mutant-si36-barrier-skip") {
         return exec(next);
     }
     sweep(&[READY_FD, RELEASE_FD])?;
     let me = Proc::this();
-    me.namespaces_separate(host, setup)?;
-    // The box has its own cgroup namespace; the supervisor checks the name.
-    me.cgroup_is(|path| path == "/")?;
-    me.rlimits()?;
-    me.privileges()?;
-    me.prefix_size(prefix)?;
     let ready_path = format!("/proc/self/fd/{READY_FD}");
     let release_path = format!("/proc/self/fd/{RELEASE_FD}");
-    let pipes = [
-        identity(Path::new(&ready_path))?,
-        identity(Path::new(&release_path))?,
-    ];
-    me.descriptors(&kickoff_local::fds::open_descriptors()?, &pipes)?;
-
+    if expect.sides.inside() {
+        me.namespaces_separate(&expect.host, &expect.setup)?;
+        // The box has its own cgroup namespace; the supervisor checks the name.
+        me.cgroup_is(|path| path == "/")?;
+        me.rlimits()?;
+        me.privileges()?;
+        me.prefix_size(expect.prefix)?;
+        let pipes = [
+            identity(Path::new(&ready_path))?,
+            identity(Path::new(&release_path))?,
+        ];
+        me.descriptors(&kickoff_local::fds::open_descriptors()?, &pipes)?;
+    }
     let mut ready = std::fs::File::from(open_pipe(Path::new(&ready_path), OFlags::WRONLY)?);
     let release = open_pipe(Path::new(&release_path), OFlags::RDONLY)?;
     nix::unistd::close(READY_FD)?;
-    if fault != Fault::Descriptors {
+    if expect.fault != Fault::Descriptors {
         nix::unistd::close(RELEASE_FD)?;
     }
     ready.write_all(b"R")?;
     drop(ready);
     await_release(release)?;
-    me.descriptors(&kickoff_local::fds::open_descriptors()?, &[])?;
+    if expect.sides.inside() {
+        me.descriptors(&kickoff_local::fds::open_descriptors()?, &[])?;
+    }
     exec(next)
 }
 
