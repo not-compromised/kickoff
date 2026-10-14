@@ -306,7 +306,7 @@ async fn si_7_second_uid_refused() {
     let shared = TempBase::new();
     chmod(shared.path(), 0o755);
     let helper = shared.path().join("helper");
-    std::fs::copy(me(), &helper).unwrap();
+    copy_executable(me(), &helper);
     chmod(&helper, 0o755);
 
     let server =
@@ -497,7 +497,7 @@ fn pid_recycle_helper() {
 
         // An untrusted executable: a copy of this binary, another inode.
         let untrusted = base.join("untrusted");
-        std::fs::copy(me(), &untrusted).unwrap();
+        copy_executable(me(), &untrusted);
         let mut connector = run_role(&untrusted, "connect", dir.socket_path())
             .spawn()
             .unwrap();

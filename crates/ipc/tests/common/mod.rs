@@ -5,6 +5,10 @@
     clippy::indexing_slicing
 )]
 
+#[path = "../../../../tests/support/exec.rs"]
+mod exec;
+pub use exec::copy_executable;
+
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -171,7 +175,7 @@ pub fn installed_fixture(test: &str) -> bool {
     }
     let base = TempBase::new();
     let client = base.path().join("kickoff");
-    std::fs::copy(me(), &client).unwrap();
+    copy_executable(me(), &client);
     std::fs::hard_link(&client, base.path().join("kickoffd")).unwrap();
     let output = std::process::Command::new(client)
         .args(["--exact", test, "--nocapture", "--test-threads=1"])

@@ -10,6 +10,8 @@
     clippy::indexing_slicing
 )]
 
+#[path = "../../../tests/support/exec.rs"]
+mod exec;
 use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -312,7 +314,7 @@ fn si_22_another_user_cannot_read_the_identity_key() {
     let shared = TempBase::new();
     chmod(&shared.0, 0o755);
     let reader = shared.0.join("reader");
-    std::fs::copy(std::env::current_exe().unwrap(), &reader).unwrap();
+    exec::copy_executable(std::env::current_exe().unwrap(), &reader);
     chmod(&reader, 0o755);
 
     assert_eq!(read_as(&reader, &base.identity(), false), "read:38");

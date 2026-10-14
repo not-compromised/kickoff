@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[path = "../../../tests/support/exec.rs"]
+mod exec;
 use kickoff_local::{DataOnly, PeerKind, Trust};
 use tokio::io::AsyncReadExt;
 
@@ -82,7 +84,7 @@ async fn si_30_installed_self_recipient_is_refused_before_sending_bytes() {
     if std::env::var_os("KLOCAL_SELF_INSTALL").is_none() {
         let base = Temp::new();
         let program = base.0.join("kickoff");
-        std::fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+        exec::copy_executable(std::env::current_exe().unwrap(), &program);
         std::fs::hard_link(&program, base.0.join("kickoffd")).unwrap();
         let output = std::process::Command::new(&program)
             .args([

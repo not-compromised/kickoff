@@ -720,7 +720,7 @@ async fn si_7_facade_refuses_substituted_worker_executable() {
     let base = TempBase::new();
     let dir = base.dir();
     let rogue = base.path().join("rogue-worker");
-    std::fs::copy(me(), &rogue).unwrap();
+    copy_executable(me(), &rogue);
     let mut worker = WorkerLaunch::new(rogue);
     worker
         .args([

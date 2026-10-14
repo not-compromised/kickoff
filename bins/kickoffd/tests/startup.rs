@@ -5,6 +5,8 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
+#[path = "../../../tests/support/exec.rs"]
+mod exec;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -74,8 +76,8 @@ fn si_7_installed_daemon_modes_authenticate_with_hardening() {
     std::fs::create_dir(&installed).unwrap();
     let daemon = installed.join("kickoffd");
     let client = installed.join("kickoff");
-    std::fs::copy(env!("CARGO_BIN_EXE_kickoffd"), &daemon).unwrap();
-    std::fs::copy(std::env::current_exe().unwrap(), &client).unwrap();
+    exec::copy_executable(env!("CARGO_BIN_EXE_kickoffd"), &daemon);
+    exec::copy_executable(std::env::current_exe().unwrap(), &client);
     let dir = kickoff_ipc::RuntimeDir::open_in(&base.0).unwrap();
     let mut running = Daemon(
         Command::new(&daemon)
