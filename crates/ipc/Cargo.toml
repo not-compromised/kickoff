@@ -47,6 +47,9 @@ mutant-si30-worker-dumpable-unchecked = []
 mutant-si30-socket-handler-allowed = []
 mutant-si36-worker-inherits-fds = []
 mutant-si36-fd-errors-skipped = []
+mutant-si36-listing-error-ends = []
+mutant-si36-listing-close-unchecked = []
+mutant-si36-listed-fds-looked-up = []
 
 [dependencies]
 postcard.workspace = true

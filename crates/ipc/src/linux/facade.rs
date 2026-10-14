@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
 use std::io::{self, IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream as StdStream;
 use std::path::{Path, PathBuf};
@@ -635,8 +635,11 @@ fn close_inherited() -> Result<(), IpcError> {
     })
 }
 
-/// Every listed descriptor above stdio must close. A failure of any kind
-/// leaves it open, so it refuses startup rather than being skipped.
+/// Every listed descriptor above stdio must close, or startup is refused.
+/// Not every error leaves the descriptor open: Linux releases the number
+/// even when close reports EINTR or EIO, and EBADF means it was not open.
+/// But a filter that refuses the call leaves it open, and no error proves
+/// it closed, so every error refuses rather than being skipped.
 fn close_above_stdio(
     listed: &[i32],
     mut close: impl FnMut(i32) -> io::Result<()>,
@@ -651,51 +654,74 @@ fn close_above_stdio(
     Ok(())
 }
 
-/// Descriptor numbers open in this process, from `/proc/self/fd` read
-/// through a descriptor whose number is known, so that one alone is left
-/// out. Nothing listed is looked up, so no lookup error can hide an entry.
+/// Descriptor numbers open in this process, from `/proc/self/fd`.
 fn open_descriptors() -> Result<Vec<i32>, IpcError> {
-    use rustix::fs::{Dir, Mode, OFlags};
-    use std::os::fd::AsRawFd;
-    let fd = rustix::fs::open(
+    use rustix::fs::{Mode, OFlags};
+    let listing = rustix::fs::open(
         "/proc/self/fd",
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(io::Error::from)?;
-    let listing = fd.as_raw_fd();
-    let mut dir = Dir::new(fd).map_err(io::Error::from)?;
-    let mut names = Vec::new();
-    while let Some(entry) = dir.read() {
-        names.push(
-            entry
-                .map_err(io::Error::from)?
-                .file_name()
-                .to_bytes()
-                .to_vec(),
-        );
-    }
-    listed_descriptors(names.iter().map(Vec::as_slice), listing)
+    list_and_close(listing, read_names, |fd| {
+        nix::unistd::close(fd).map_err(io::Error::from)
+    })
 }
 
-fn listed_descriptors<'a>(
-    names: impl Iterator<Item = &'a [u8]>,
-    listing: i32,
+/// Lists the descriptor directory open on `listing` through `read`, then
+/// closes `listing` through `close`, checked like every other close: left
+/// open, it would be a descriptor outside the allowlist that the list no
+/// longer names. Only `listing`'s own number is left out and nothing listed
+/// is looked up, so no lookup error can hide an entry. Any read, close or
+/// name error refuses.
+fn list_and_close(
+    listing: OwnedFd,
+    read: impl FnOnce(BorrowedFd<'_>) -> io::Result<Vec<Vec<u8>>>,
+    close: impl FnOnce(OwnedFd) -> io::Result<()>,
 ) -> Result<Vec<i32>, IpcError> {
+    let own = listing.as_raw_fd();
+    let names = read(listing.as_fd());
+    let closed = close(listing);
+    let names = names?;
+    if !cfg!(feature = "mutant-si36-listing-close-unchecked") {
+        closed?;
+    }
     let mut open = Vec::new();
     for name in names {
         if name == b"." || name == b".." {
             continue;
         }
-        let fd = std::str::from_utf8(name)
+        let fd = std::str::from_utf8(&name)
             .ok()
             .and_then(|name| name.parse::<i32>().ok())
             .ok_or(IpcError::Hardening)?;
-        if fd != listing {
+        if cfg!(feature = "mutant-si36-listed-fds-looked-up")
+            && std::fs::symlink_metadata(Path::new("/proc/self/fd").join(fd.to_string())).is_err()
+        {
+            continue;
+        }
+        if fd != own {
             open.push(fd);
         }
     }
     Ok(open)
+}
+
+/// Every entry name of the directory open on `dir`, through getdents64,
+/// with every error returned. rustix's `Dir` ends the listing on ENOENT
+/// instead, which would turn a refused enumeration into a short list.
+fn read_names(dir: BorrowedFd<'_>) -> io::Result<Vec<Vec<u8>>> {
+    let mut buf = Vec::with_capacity(8192);
+    let mut entries = rustix::fs::RawDir::new(dir, buf.spare_capacity_mut());
+    let mut names = Vec::new();
+    while let Some(entry) = entries.next() {
+        match entry {
+            Ok(entry) => names.push(entry.file_name().to_bytes().to_vec()),
+            Err(_) if cfg!(feature = "mutant-si36-listing-error-ends") => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(names)
 }
 
 struct Scratch {
@@ -751,7 +777,6 @@ fn spawn_clean(
     sweep: bool,
 ) -> Result<Spawned, IpcError> {
     use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, posix_spawn};
-    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     let cstring = |bytes: &[u8]| {
         CString::new(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
@@ -877,18 +902,109 @@ mod tests {
 
     type Case = (Option<&'static [u8]>, Option<u64>, Result<(), IpcError>);
 
+    fn open_dir(path: &str) -> OwnedFd {
+        use rustix::fs::{Mode, OFlags};
+        rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap()
+    }
+
+    fn checked_close(fd: OwnedFd) -> io::Result<()> {
+        nix::unistd::close(fd).map_err(io::Error::from)
+    }
+
     #[test]
-    fn si_36_descriptor_listing_leaves_out_only_its_own_descriptor() {
-        let names: [&[u8]; 8] = [b".", b"..", b"0", b"1", b"2", b"3", b"5", b"9"];
-        assert_eq!(
-            listed_descriptors(names.into_iter(), 5),
-            Ok(vec![0, 1, 2, 3, 9])
+    fn si_36_descriptor_listing_keeps_every_enumerated_descriptor() {
+        // The real enumeration names the descriptors this test holds and
+        // leaves out only the listing's own number.
+        let held = [open_dir("/"), open_dir("/proc")];
+        let listing = open_dir("/proc/self/fd");
+        let own = listing.as_raw_fd();
+        let listed = list_and_close(listing, read_names, checked_close).unwrap();
+        for fd in &held {
+            assert!(
+                listed.contains(&fd.as_raw_fd()),
+                "held descriptor {} was enumerated but dropped, so it would stay open",
+                fd.as_raw_fd()
+            );
+        }
+        assert!(
+            !listed.contains(&own),
+            "the listing's own descriptor was listed"
         );
-        let names: [&[u8]; 2] = [b"3", b"not-a-number"];
+
+        // Every enumerated number is kept whether or not a lookup of it would
+        // succeed: i32::MAX is never open here, so a lookup filter drops it.
+        let listing = open_dir("/proc/self/fd");
+        let own = listing.as_raw_fd().to_string().into_bytes();
+        let mut names: Vec<Vec<u8>> = [".", "..", "0", "1", "2"].map(Vec::from).into();
+        names.extend([own, b"2147483647".to_vec()]);
         assert_eq!(
-            listed_descriptors(names.into_iter(), 5),
+            list_and_close(listing, |_| Ok(names), checked_close),
+            Ok(vec![0, 1, 2, i32::MAX]),
+            "an enumerated descriptor was dropped, so it would stay open"
+        );
+        let listing = open_dir("/proc/self/fd");
+        let names = vec![b"3".to_vec(), b"not-a-number".to_vec()];
+        assert_eq!(
+            list_and_close(listing, |_| Ok(names), checked_close),
             Err(IpcError::Hardening)
         );
+    }
+
+    #[test]
+    fn si_36_descriptor_listing_refuses_an_enumeration_error() {
+        // getdents64 on the descriptor directory of a reaped process fails
+        // with ENOENT, which rustix's Dir reports as the end of the listing.
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let listing = open_dir(&format!("/proc/{}/fd", child.id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let mut closed = Vec::new();
+        let listed = list_and_close(listing, read_names, |fd| {
+            closed.push(fd.as_raw_fd());
+            checked_close(fd)
+        });
+        assert_eq!(
+            listed,
+            Err(IpcError::Io(io::ErrorKind::NotFound)),
+            "an enumeration error passed as a complete listing"
+        );
+        assert_eq!(
+            closed.len(),
+            1,
+            "the listing was not closed after the error"
+        );
+    }
+
+    #[test]
+    fn si_36_descriptor_listing_refuses_when_its_own_close_fails() {
+        for errno in [io::ErrorKind::PermissionDenied, io::ErrorKind::Other] {
+            let listing = open_dir("/proc/self/fd");
+            let own = listing.as_raw_fd();
+            let mut closed = Vec::new();
+            let listed = list_and_close(listing, read_names, |fd| {
+                closed.push(fd.as_raw_fd());
+                drop(fd);
+                Err(errno.into())
+            });
+            assert_eq!(
+                listed,
+                Err(IpcError::Io(errno)),
+                "the listing descriptor failed to close ({errno:?}) and the listing still succeeded"
+            );
+            assert_eq!(
+                closed,
+                [own],
+                "the close was not given the listing descriptor"
+            );
+        }
     }
 
     #[test]
