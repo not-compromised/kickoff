@@ -54,6 +54,14 @@ context only: it is summed over all threads and the whole run, so it cannot
 show that any single slow datagram was caused by contention. Treat every
 failure as a possible regression until a rerun on an idle machine passes.
 
+The budgets are asserted exactly only where `KICKOFF_LATENCY_RUNNER` is
+unset: `scripts/check.sh` on the reference machine, which must pass before
+every merge and every release. Hosted CI sets `KICKOFF_LATENCY_RUNNER=hosted`:
+its shared runners measure about five times slower than the reference
+machine, so there the tests assert four times each budget, still failing on a
+large regression, and print the measured figures. Any other value makes the
+tests refuse.
+
 ### Mutants (SI-33)
 
 A mutant is a cargo feature `mutant-si<N>-<slug>` on the crate that holds a

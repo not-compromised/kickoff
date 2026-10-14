@@ -13,6 +13,8 @@
 )]
 
 mod common;
+#[path = "../../../tests/support/latency.rs"]
+mod latency;
 
 use std::time::{Duration, Instant};
 
@@ -77,10 +79,11 @@ async fn hot_path_codec_and_filter_within_2us_per_datagram() {
     let budget = if cfg!(debug_assertions) {
         Duration::from_micros(200)
     } else {
-        Duration::from_micros(2)
+        latency::budget(Duration::from_micros(2))
     };
     assert!(
         median <= budget,
-        "codec plus filter takes {median:?} per datagram, budget {budget:?}"
+        "codec plus filter takes {median:?} per datagram, over {budget:?} ({})",
+        latency::runner_label()
     );
 }

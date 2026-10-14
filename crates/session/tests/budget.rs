@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use kickoff_wire::{LanDatagram, PeerSlot};
-use latency::{contention, percentile, run_queue_wait};
+use latency::{budget, contention, percentile, run_queue_wait, runner_label};
 
 /// Every test here floods a host or times datagrams against a wall-clock
 /// ceiling. Run concurrently, one test's flood takes the cores another test is
@@ -280,13 +280,18 @@ async fn latency_p50_p99_over_10k_datagrams() {
     if cfg!(debug_assertions) {
         assert!(p99 < Duration::from_millis(20), "p99 {p99:?}; {contention}");
     } else {
+        let (p50_max, p99_max) = (
+            budget(Duration::from_micros(100)),
+            budget(Duration::from_micros(500)),
+        );
+        let asserted = runner_label();
         assert!(
-            p50 <= Duration::from_micros(100),
-            "p50 {p50:?} over the §7 budget; {contention}"
+            p50 <= p50_max,
+            "p50 {p50:?} over {p50_max:?} ({asserted}); {contention}"
         );
         assert!(
-            p99 <= Duration::from_micros(500),
-            "p99 {p99:?} over the §7 budget; {contention}"
+            p99 <= p99_max,
+            "p99 {p99:?} over {p99_max:?} ({asserted}); {contention}"
         );
     }
 }

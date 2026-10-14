@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use kickoff_net::Role;
-use latency::{contention, percentile, run_queue_wait};
+use latency::{budget, contention, percentile, run_queue_wait, runner_label};
 
 /// (label, payload length given the path's datagram limit, samples, batch).
 /// Each batch stays inside the receiver's datagram and byte burst, and the
@@ -79,13 +79,18 @@ async fn datagram_latency_p50_p99_over_10k() {
                 "{label}: p99 {p99:?}; {contention}"
             );
         } else {
+            let (p50_max, p99_max) = (
+                budget(Duration::from_micros(100)),
+                budget(Duration::from_micros(500)),
+            );
+            let asserted = runner_label();
             assert!(
-                p50 <= Duration::from_micros(100),
-                "{label}: p50 {p50:?} over §7; {contention}"
+                p50 <= p50_max,
+                "{label}: p50 {p50:?} over {p50_max:?} ({asserted}); {contention}"
             );
             assert!(
-                p99 <= Duration::from_micros(500),
-                "{label}: p99 {p99:?} over §7; {contention}"
+                p99 <= p99_max,
+                "{label}: p99 {p99:?} over {p99_max:?} ({asserted}); {contention}"
             );
         }
         let h = host_link.health();
@@ -93,6 +98,20 @@ async fn datagram_latency_p50_p99_over_10k() {
             h.dropped_budget + h.dropped_reassembly + h.dropped_malformed,
             0,
             "{h:?}"
+        );
+    }
+}
+
+#[test]
+fn latency_budgets_are_exact_unless_the_runner_is_named_hosted() {
+    use latency::{HOSTED_FACTOR, budget_for};
+    let budget = Duration::from_micros(100);
+    assert_eq!(budget_for(None, budget), budget);
+    assert_eq!(budget_for(Some("hosted"), budget), budget * HOSTED_FACTOR);
+    for typo in ["", "Hosted", "hosted ", "ci", "reference"] {
+        assert!(
+            std::panic::catch_unwind(|| budget_for(Some(typo), budget)).is_err(),
+            "{typo:?} was accepted as a runner name"
         );
     }
 }

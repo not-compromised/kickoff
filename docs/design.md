@@ -786,7 +786,7 @@ Each rule makes a class unreachable rather than detecting instances. Classes A t
 
 | Metric | Budget | Measured how |
 |---|---|---|
-| Added one-way latency, game socket to peer game socket, excluding the network path | p50 ≤ 100 µs, p99 ≤ 500 µs | CI: two in-process nodes over `Mem`, 10k datagrams. Baseline iroh datagram RTT p50 32-35 µs (V) |
+| Added one-way latency, game socket to peer game socket, excluding the network path | p50 ≤ 100 µs, p99 ≤ 500 µs | Two in-process nodes over `Mem`, 10k datagrams; asserted exactly by the gate on the reference machine before every merge and release, and at four times the budget on hosted CI runners (docs/development.md). Baseline iroh datagram RTT p50 32-35 µs (V) |
 | Tap adapter cost (Linux NsTap, Windows WinTap) | ≤ 20 µs per frame each way | netns bench; VM bench |
 | Added RTT on a real direct path | ≤ 1 ms p99 above raw UDP | netns with `tc netem delay 30ms` |
 | Hot path: codec, filter, generation check | ≤ 2 µs per datagram | criterion |

@@ -939,7 +939,12 @@ mod hot_path {
         }
         eprintln!("send guard, approved destination: {best:?} per send");
         if !cfg!(debug_assertions) {
-            assert!(best <= Duration::from_nanos(50), "{best:?} per send");
+            let ceiling = crate::test_latency::budget(Duration::from_nanos(50));
+            assert!(
+                best <= ceiling,
+                "{best:?} per send, over {ceiling:?} ({})",
+                crate::test_latency::runner_label()
+            );
         }
     }
 }

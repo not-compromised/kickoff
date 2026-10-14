@@ -25,6 +25,10 @@ mod stream;
 #[path = "../../../tests/support/ports.rs"]
 mod test_ports;
 
+#[cfg(test)]
+#[path = "../../../tests/support/latency.rs"]
+mod test_latency;
+
 use std::time::Duration;
 
 use iroh::endpoint::{QuicTransportConfig, VarInt};
