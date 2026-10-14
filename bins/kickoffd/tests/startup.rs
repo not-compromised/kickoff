@@ -402,7 +402,7 @@ fn assert_own_descriptors(pid: &str, daemon: &Path) {
         let peer = format!("socket:[{peer}]");
         assert!(
             !table.values().chain(ours.values()).any(|t| *t == peer),
-            "kickoffd's socket {fd} is connected to kickoffd or its launcher"
+            "kickoffd's socket {fd} is connected to kickoffd or its launcher: its peer {peer}\n  kickoffd {table:?}\n  launcher {ours:?}"
         );
         paired += 1;
     }
