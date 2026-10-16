@@ -298,3 +298,8 @@ Cancellation regressions destroy the actual public Leave/Kick future while
 retaining Session after observing the peer farewell. They require endpoint
 closure and Ended publication, or roster removal and persistent revocation,
 without another operation incidentally finishing that transition.
+
+Bound-invitation priority comes directly from the outstanding capability ledger.
+Spending one nonce leaves other invitations for the same identity eligible for
+reserved door capacity. Revocation filters that identity until explicit
+readmission; spending the final bound nonce removes its invitation priority.

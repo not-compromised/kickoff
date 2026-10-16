@@ -77,3 +77,85 @@ async fn si_23_zero_credit_replies_preserve_priority_capacity() {
         .await
         .expect("zero-credit outsiders starved a valid bound join");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn si_23_each_outstanding_bound_invite_retains_priority_after_admission_expires() {
+    let key = kickoff_secret::key::IdentityKey::new(iroh::SecretKey::generate());
+    let door = std::sync::Arc::new(kickoff_net::door_loopback(&key).await.unwrap());
+    let clock = kickoff_session::Clock::system();
+    let host = host_as(Identity { key, door }, |opts| opts.clock = clock.clone()).await;
+    let friend = raw_endpoint_with_window(Ipv4Addr::new(127, 0, 5, 100), 512 * 1024).await;
+    let first = host.bound(friend.id());
+    let remaining = host.bound(friend.id());
+    let redeem = |ticket, label| {
+        let friend = &friend;
+        let host = &host;
+        async move {
+            let conn = friend
+                .connect(host.identity.door.addr(), JOIN_ALPN)
+                .await
+                .unwrap();
+            let mut recv = kickoff_wire::prepare_message(&raw_request(ticket, friend.id()))
+                .unwrap()
+                .transmit_quic(&conn)
+                .await
+                .unwrap();
+            let mut prefix = [0u8; LEN_PREFIX_LEN];
+            recv.read_exact(&mut prefix).await.expect(label);
+            let len = kickoff_wire::frame_len::<JoinReply>(prefix).unwrap();
+            let mut body = vec![0; len];
+            recv.read_exact(&mut body).await.unwrap();
+            let reply = kickoff_wire::decode::<JoinReply>(&body).unwrap();
+            assert!(
+                matches!(reply, JoinReply::Admitted(_)),
+                "bound join refused: {reply:?}"
+            );
+            conn.close(iroh::endpoint::VarInt::from_u32(0), b"");
+        }
+    };
+    redeem(&first, "first invitation failed before expiry").await;
+    roster_slots(&host, &[1, 2]).await;
+    clock.advance(Duration::from_secs(31));
+    roster_slots(&host, &[1]).await;
+
+    let invalid = host.bound(iroh::SecretKey::generate().public());
+    let mut held = Vec::new();
+    for n in 1..=16u8 {
+        let raw = raw_endpoint_with_window(Ipv4Addr::new(127, 0, 5, n), 0).await;
+        let conn = raw
+            .connect(host.identity.door.addr(), JOIN_ALPN)
+            .await
+            .unwrap();
+        let recv = kickoff_wire::prepare_message(&raw_request(&invalid, raw.id()))
+            .unwrap()
+            .transmit_quic(&conn)
+            .await
+            .unwrap();
+        held.push((raw, conn, recv));
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while held
+            .iter()
+            .filter(|(_, conn, _)| conn.close_reason().is_some())
+            .count()
+            < 8
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("general replies did not fill their pool");
+    assert!(
+        held.iter()
+            .any(|(_, conn, _)| conn.close_reason().is_none())
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        redeem(
+            &remaining,
+            "remaining valid bound invite lost reserved capacity",
+        ),
+    )
+    .await
+    .expect("redeeming one invite erased another valid invite's reserved capacity");
+}

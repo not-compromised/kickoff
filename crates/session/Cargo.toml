@@ -38,6 +38,7 @@ mutant-si41-join-after-end = []
 mutant-si18-link-after-end = []
 mutant-si18-caller-owned-completion = []
 mutant-si23-no-priority-replies = []
+mutant-si23-no-outstanding-bound-priority = []
 mutant-si23-pong-deadline-during-write = []
 # Both ingress budgets at once: the link's (net) and the LAN's (vlan) each
 # hold the flooded guest alone.

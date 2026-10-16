@@ -86,9 +86,6 @@ pub(crate) struct Admission {
     host_keys: [EndpointId; 2],
     trusted: HashSet<EndpointId>,
     revoked: HashSet<EndpointId>,
-    /// Invitees of bound tickets not yet redeemed, for the door's priority
-    /// queue (§6.3, NET-18).
-    bound: HashSet<EndpointId>,
     invites: Invites,
     approvals: Approvals,
     seats: [Option<Seat>; SEATS],
@@ -114,7 +111,6 @@ impl Admission {
             host_keys: [door, host_session_key],
             trusted: trusted.into_iter().collect(),
             revoked: HashSet::new(),
-            bound: HashSet::new(),
             invites: Invites::new(door_key)?,
             approvals: Approvals::default(),
             seats: Default::default(),
@@ -138,13 +134,7 @@ impl Admission {
         invitee: Option<EndpointId>,
         now: Instant,
     ) -> Result<Cap, InviteError> {
-        let cap = self.invites.issue(door_key, invitee, now)?;
-        if let Some(id) = invitee
-            && self.bound.len() < kickoff_wire::MAX_OUTSTANDING
-        {
-            self.bound.insert(id);
-        }
-        Ok(cap)
+        self.invites.issue(door_key, invitee, now)
     }
 
     /// Decides a join request from `id`, the identity the door's TLS handshake
@@ -221,7 +211,6 @@ impl Admission {
             generation,
             state,
         });
-        self.bound.remove(&id);
         Ok(match approval {
             None => {
                 self.bump_epoch();
@@ -337,7 +326,6 @@ impl Admission {
         if !cfg!(feature = "mutant-si19-kick-does-not-revoke") {
             self.revoked.insert(id);
         }
-        self.bound.remove(&id);
         self.approvals.retire_peer(id);
         Ok(self.remove(id))
     }
@@ -410,9 +398,13 @@ impl Admission {
     pub(crate) fn priority(&self) -> Vec<EndpointId> {
         self.trusted
             .iter()
-            .chain(&self.bound)
-            .filter(|id| !self.revoked.contains(*id))
             .copied()
+            .chain(
+                self.invites
+                    .bound_invitees()
+                    .filter(|_| !cfg!(feature = "mutant-si23-no-outstanding-bound-priority")),
+            )
+            .filter(|id| !self.revoked.contains(id))
             .collect()
     }
 
@@ -532,6 +524,46 @@ mod tests {
             platform: Platform::Linux,
             game_build: BuildId::new("b").unwrap(),
             kickoff_version: KICKOFF_VERSION,
+        }
+    }
+
+    #[test]
+    fn si_23_bound_priority_follows_all_outstanding_nonces_and_revocation() {
+        let door = IdentityKey::new(SecretKey::from_bytes(&[200; 32]));
+        let id = key(8);
+        for bearer in [false, true] {
+            let now = Instant::now();
+            let mut adm = Admission::new(&door, key(0), Name::new("host").unwrap(), []).unwrap();
+            let first = adm
+                .issue(&door, if bearer { None } else { Some(id) }, now)
+                .unwrap();
+            let last = adm.issue(&door, Some(id), now).unwrap();
+            assert!(adm.priority().contains(&id));
+            adm.kick(id).unwrap();
+            assert!(!adm.priority().contains(&id));
+            adm.readmit(id);
+            assert!(
+                adm.priority().contains(&id),
+                "readmission lost an unspent invite"
+            );
+            let mut req = request(key(9));
+            req.cap = first;
+            let joined = adm.join(id, &req, now).unwrap();
+            assert!(
+                adm.priority().contains(&id),
+                "redeeming a different nonce erased priority"
+            );
+            let peer = match joined {
+                Joined::Admitted(peer) => peer,
+                Joined::Prompt(_) => seat(&adm, id).unwrap().0,
+            };
+            assert!(adm.evict(peer));
+            req.cap = last;
+            assert!(matches!(adm.join(id, &req, now), Ok(Joined::Admitted(_))));
+            assert!(
+                !adm.priority().contains(&id),
+                "the last spent invite kept reserved capacity"
+            );
         }
     }
 
