@@ -78,23 +78,16 @@ impl View<'_> {
         if fault != Fault::Capabilities {
             a.s(&["--cap-drop", "ALL"]);
         }
+        a.s(&["--clearenv", "--ro-bind", "/usr", "/usr"]);
+        // Preserve each distribution's loader and tool aliases. For example,
+        // Ubuntu's /lib64 resolves to /usr/lib64, not Arch's /usr/lib.
+        for name in ["/bin", "/sbin", "/lib", "/lib64"] {
+            let path = Path::new(name);
+            if path.exists() {
+                a.bind("--ro-bind", path, path);
+            }
+        }
         a.s(&[
-            "--clearenv",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--symlink",
-            "usr/bin",
-            "/sbin",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib",
-            "/lib64",
             "--proc",
             "/proc",
             "--dev",

@@ -28,7 +28,7 @@ use super::Refused;
 use super::barrier::{Check, FSIZE, Fault, NAMESPACES, NOFILE, Proc, Sides, identity};
 use super::gate;
 use super::install::require_null_stdio;
-use super::net::{GATEWAY, NFT, same_ruleset};
+use super::net::{GATEWAY, nft_binary, same_ruleset};
 
 /// The barrier pipes' numbers from `inner` through bwrap to `barrier`.
 pub(super) const READY_FD: i32 = 3;
@@ -379,7 +379,7 @@ fn open_pipe(path: &Path, access: OFlags) -> Result<OwnedFd, Refused> {
 }
 
 fn nft(args: &[&str], input: Option<&str>) -> Result<String, Refused> {
-    let mut child = Command::new(NFT)
+    let mut child = Command::new(nft_binary())
         .args(args)
         .env_clear()
         .stdin(if input.is_some() {

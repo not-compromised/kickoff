@@ -459,7 +459,7 @@ impl Boxed {
                 "--net=/proc/self/fd/2",
                 "--preserve-credentials",
                 "--",
-                net::NFT,
+                net::nft_binary(),
                 "list",
                 "ruleset",
             ])

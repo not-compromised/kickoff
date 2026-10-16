@@ -10,7 +10,15 @@ use super::netlink::HostView;
 use super::startup::Canaries;
 
 pub(super) const PASTA: &str = "/usr/bin/pasta";
-pub(super) const NFT: &str = "/usr/bin/nft";
+/// Distribution packages install nft in either of these system directories;
+/// never resolve it through a caller-controlled PATH.
+pub(super) fn nft_binary() -> &'static str {
+    if std::path::Path::new("/usr/bin/nft").is_file() {
+        "/usr/bin/nft"
+    } else {
+        "/usr/sbin/nft"
+    }
+}
 const PASTA_IF: &str = "gb0";
 const LAN_IF: &str = "kick0";
 

@@ -122,7 +122,9 @@ the game-launch request.
 - **OOMPolicy.** Game scopes use `OOMPolicy=stop` (an out-of-memory kill ends
   the box); the `limits` probe's scope uses `continue`, so the probe sees its
   allocating child killed.
-- **Absolute tool paths** (`/usr/bin/{systemd-run,systemctl,pasta,bwrap,nft,nsenter}`).
+- **Absolute tool paths** (`/usr/bin/{systemd-run,systemctl,pasta,bwrap,nsenter}`;
+  nft is `/usr/bin/nft` or `/usr/sbin/nft`). The read-only tool and library
+  directories preserve the distribution's loader layout.
 - **The supervisor's run directory** is `box/` (mode 0700, created
   exclusively) inside the service's `RuntimeDirectory=`, so the manager
   removes it whatever way the service ends.
