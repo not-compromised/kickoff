@@ -23,3 +23,9 @@ refusal is exercised in `tests/installed.rs`.
 getdents64 with every error returned, and a checked close of everything above
 stdio. The kickoffd worker runs it at entry and the gamebox's trusted links run
 it before each exec, so there is one listing loop (SI-36).
+
+`spawn::spawn_clean` owns a directly execed child, closes listed descriptors
+through spawn file actions, installs explicit stdio and environment, and kills
+and reaps an unfinished child on drop. Enumeration is not atomic with spawn:
+the gamebox uses it before creating threads; IPC workers sweep again at entry
+and crash probes independently refuse extra descriptors.

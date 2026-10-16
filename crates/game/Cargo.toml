@@ -13,6 +13,10 @@ workspace = true
 # Mutants (SI-33): each compiles one protection out; registered in
 # /mutants.toml, refused in release builds by the build script.
 [features]
+mutant-si30-game-handler-unchecked = []
+mutant-si30-game-core-zero = []
+mutant-si30-game-no-core-probe = []
+mutant-si30-core-canary-no-crash = []
 mutant-si38-no-direct-kill = []
 mutant-si38-no-bindsto = []
 mutant-si38-sigterm-stop = []

@@ -161,11 +161,8 @@ pub(super) const PREFIX: &str = "/kickoff/prefix";
 /// The namespaces the box must not share with the host, in argv order.
 pub(super) const NAMESPACES: [&str; 5] = ["user", "net", "mnt", "pid", "ipc"];
 
-pub(super) const RLIMITS: [(&str, &str); 3] = [
-    ("Max core file size", "0"),
-    ("Max file size", "4294967296"),
-    ("Max open files", "8192"),
-];
+pub(super) const RLIMITS: [(&str, &str); 2] =
+    [("Max file size", "4294967296"), ("Max open files", "8192")];
 pub(super) const FSIZE: u64 = 4 << 30;
 pub(super) const NOFILE: u64 = 8192;
 
@@ -333,7 +330,11 @@ impl Proc {
     /// Soft and hard limits both at the values of design §3.2.2 step 8.
     pub(super) fn rlimits(&self) -> Result<(), Refused> {
         let text = self.read("limits")?;
-        for (name, value) in RLIMITS {
+        let core = super::core::limit()?.to_string();
+        for (name, value) in RLIMITS
+            .into_iter()
+            .chain([("Max core file size", core.as_str())])
+        {
             let ok = text.lines().any(|line| {
                 line.strip_prefix(name).is_some_and(|rest| {
                     let mut words = rest.split_whitespace();

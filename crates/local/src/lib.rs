@@ -3,6 +3,8 @@
 #[cfg(target_os = "linux")]
 pub mod fds;
 #[cfg(target_os = "linux")]
+pub mod spawn;
+#[cfg(target_os = "linux")]
 mod stream;
 #[cfg(target_os = "linux")]
 mod trust;

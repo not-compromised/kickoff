@@ -40,6 +40,8 @@ pub enum Refused {
     HostChanged,
     #[error("pasta forwards ports between the box and the host")]
     PastaForwards,
+    #[error("core dump suppression could not be verified")]
+    CoreDumps,
     #[error("bwrap is setuid or setgid")]
     SetuidTool,
     #[error("i/o error: {0:?}")]
@@ -67,6 +69,7 @@ impl Refused {
             Refused::HostChanged => 79,
             Refused::PastaForwards => 88,
             Refused::SetuidTool => 89,
+            Refused::CoreDumps => 90,
             Refused::NetworkSetup => 74,
             Refused::BoxEnded(_) => 75,
             Refused::Barrier(check) => match check {

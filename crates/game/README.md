@@ -157,3 +157,18 @@ peer, until it is closed (design §11).
 `cargo test -p kickoff-gamebox` starts the real supervisor as transient user
 services named `kickoff-m0-test-*` and removes them. It needs systemd's user
 manager, unprivileged user namespaces, bubblewrap, passt and nft.
+
+## Core dumps
+
+The supervisor and trusted links select an exec-persistent core policy before
+arguments: hard and soft limits of 1, or 0 only when an inherited hard zero
+cannot be raised and the handler writes a file. Piped handlers with a hard zero,
+socket handlers and unreadable patterns refuse before any crash. Inspectable
+links stay dumpable so outside barrier checks retain access to `/proc`.
+
+Before releasing the payload, the contained barrier execs a disposable probe.
+It checks the exact inherited limits and dumpable state, null stdio and no extra
+descriptors, writes a pre-abort witness, then aborts. Its parent requires SIGABRT,
+no kernel core flag and no dump file. The M0 test also inspects `coredumpctl` as
+secondary evidence; journal recording can lag. A privileged change to the host
+handler after verification requires restart. No host core setting is changed.

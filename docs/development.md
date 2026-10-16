@@ -23,7 +23,7 @@ Spec: [design.md](design.md). Standing security rules: [SECURITY-INVARIANTS.md](
 
 M2 crates and Linux daemon IPC startup are implemented. Game, map and session
 application adapters are not wired; the daemon refuses their commands. The
-store, parse, maps and game crates remain placeholders, and the CLI reports
+store, parse and maps crates remain placeholders, and the CLI reports
 that it is not implemented yet.
 
 ## Checks

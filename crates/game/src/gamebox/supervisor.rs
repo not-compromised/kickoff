@@ -104,6 +104,10 @@ enum End {
 }
 
 pub fn supervisor_main() -> ExitCode {
+    if let Err(error) = super::core::enter() {
+        report(&format!("refused: {error}"));
+        return ExitCode::from(error.code());
+    }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match run(&args) {
         Ok(End::Exited(status)) => {
@@ -357,7 +361,13 @@ impl Boxed {
             }
         }
         match file.read(&mut byte)? {
-            1 if byte == *b"R" => {}
+            1 if byte == *b"C" => {
+                file.read_exact(&mut byte)?;
+                if byte != *b"R" {
+                    return Err(Refused::CoreDumps.into());
+                }
+                report("core probe: suppressed");
+            }
             // The link closed its end without the byte: it refused, and its
             // exit status says which check.
             0 => return Err(Halt::Ended(ended(events, chain)?)),

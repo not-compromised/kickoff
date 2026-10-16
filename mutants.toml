@@ -704,3 +704,38 @@ crate = "kickoff-session"
 feature = "mutant-si23-no-outstanding-bound-priority"
 test = "si_23_bound_priority_follows_all_outstanding_nonces_and_revocation"
 note = "unspent bound nonces cease to grant priority"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-game"
+feature = "mutant-si30-game-core-zero"
+test_crate = "kickoff-gamebox"
+test = "si_30_game_exec_keeps_the_verified_core_policy"
+note = "the exec chain lacks an effective core limit or a completed genuine crash probe"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-game"
+feature = "mutant-si30-game-no-core-probe"
+test_crate = "kickoff-gamebox"
+test = "si_30_game_exec_keeps_the_verified_core_policy"
+note = "the exec chain lacks an effective core limit or a completed genuine crash probe"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-game"
+feature = "mutant-si30-core-canary-no-crash"
+test_crate = "kickoff-gamebox"
+test = "si_30_game_exec_keeps_the_verified_core_policy"
+note = "the exec chain lacks an effective core limit or a completed genuine crash probe"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-game"
+feature = "mutant-si30-game-handler-unchecked"
+test = "si_30_exec_core_policy_refuses_unsupported_handlers_before_crashing"
+note = "unsupported host crash handlers are admitted"
+
+[[unmutated]]
+test = "si_30_piped_handler_with_inherited_zero_refuses_before_starting_a_scope"
+reason = "actual host configuration composition; policy decisions are separately mutated without crashing under an unsafe host policy"

@@ -11,6 +11,9 @@ use super::Refused;
 use super::view::WITNESS;
 
 pub fn probe_main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("core-canary") {
+        return super::core::canary(std::env::args().nth(2).as_deref());
+    }
     // The payload-entry witness: present only where a test bound one.
     let _ = std::fs::write(format!("{WITNESS}/entered"), b"");
     let args: Vec<String> = std::env::args().skip(1).collect();

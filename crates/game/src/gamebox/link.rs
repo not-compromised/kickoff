@@ -45,6 +45,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 const RELEASE_DEADLINE: Duration = Duration::from_secs(30);
 
 pub fn link_main() -> ExitCode {
+    if let Err(error) = super::core::enter() {
+        return ExitCode::from(error.code());
+    }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match run(&args) {
         Ok(never) => match never {},
@@ -171,11 +174,15 @@ fn inner(scope: &str, setup: &Setup<'_>, next: &[OsString]) -> Result<Infallible
             None,
         )?;
     }
-    let core = Rlimit {
-        current: Some(0),
-        maximum: Some(0),
-    };
-    rustix::process::setrlimit(Resource::Core, core)?;
+    if cfg!(feature = "mutant-si30-game-core-zero") {
+        rustix::process::setrlimit(
+            Resource::Core,
+            Rlimit {
+                current: Some(0),
+                maximum: Some(0),
+            },
+        )?;
+    }
     let fsize = Rlimit {
         current: Some(FSIZE),
         maximum: Some(FSIZE),
@@ -311,7 +318,10 @@ fn barrier(expect: &Expect, next: &[OsString]) -> Result<Infallible, Refused> {
     if expect.fault != Fault::Descriptors {
         nix::unistd::close(RELEASE_FD)?;
     }
-    ready.write_all(b"R")?;
+    if !cfg!(feature = "mutant-si30-game-no-core-probe") {
+        super::core::verify()?;
+    }
+    ready.write_all(b"CR")?;
     drop(ready);
     await_release(release)?;
     if expect.sides.inside() {
