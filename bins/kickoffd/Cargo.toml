@@ -16,5 +16,13 @@ tokio = { workspace = true, features = ["rt", "net", "time", "macros", "sync"] }
 
 
 [dev-dependencies]
+# The workspace's test build has tokio's signal driver (kickoff-session's
+# iroh-relay server turns it on), and so does this package's alone, so
+# kickoffd's descriptor tests see one table however they are run.
+tokio = { workspace = true, features = ["signal"] }
 kickoff-wire.workspace = true
 iroh-base.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix.workspace = true
+rustix = { workspace = true, features = ["event", "net"] }

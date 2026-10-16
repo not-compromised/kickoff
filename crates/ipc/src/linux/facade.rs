@@ -584,7 +584,9 @@ fn harden_facade() -> Result<(), IpcError> {
 /// the private scratch directory the probe crashes in, null stdio and no other
 /// descriptor, and checks kernel wait status. No secrets may exist yet.
 pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
-    if std::env::var_os(WORKER_ENV).as_deref() == Some(OsStr::new("1")) {
+    if std::env::var_os(WORKER_ENV).as_deref() == Some(OsStr::new("1"))
+        && !cfg!(feature = "mutant-si36-worker-inherits-fds")
+    {
         close_inherited()?;
     }
     if !cfg!(feature = "mutant-si30-late-facade-core") {
@@ -623,13 +625,25 @@ pub fn run_core_probe_if_requested() -> Result<(), IpcError> {
     std::process::abort();
 }
 
+/// kickoffd's own sweep (SI-36): call right after
+/// [`run_core_probe_if_requested`], before anything opens a descriptor.
+/// Closes every descriptor above stdio its launcher leaked and refuses to
+/// start if one fails to close. Rust's runtime has already reopened closed
+/// stdio on `/dev/null` before `main`, so later opens cannot take 0 to 2.
+/// The probe never gets here: it refuses inherited descriptors instead,
+/// which is what proves the facade's spawn. Not for a process with threads or
+/// descriptors of its own, such as a test harness.
+pub fn close_inherited_descriptors() -> Result<(), IpcError> {
+    if cfg!(feature = "mutant-si36-no-fd-sweep") {
+        return Ok(());
+    }
+    close_inherited()
+}
+
 /// Closes every descriptor above stdio, before this process has created any
 /// of its own: at entry, everything there was inherited across exec. This
 /// runs in the child, so no other thread of the launcher can add one later.
 fn close_inherited() -> Result<(), IpcError> {
-    if cfg!(feature = "mutant-si36-worker-inherits-fds") {
-        return Ok(());
-    }
     close_above_stdio(&open_descriptors()?, |fd| {
         nix::unistd::close(fd).map_err(io::Error::from)
     })
@@ -716,6 +730,13 @@ fn read_names(dir: BorrowedFd<'_>) -> io::Result<Vec<Vec<u8>>> {
     let mut names = Vec::new();
     while let Some(entry) = entries.next() {
         match entry {
+            Ok(entry)
+                if cfg!(feature = "mutant-si36-enumeration-looks-up")
+                    && entry.file_name().to_str().is_ok_and(|name| {
+                        name.parse::<i32>().is_ok()
+                            && std::fs::symlink_metadata(Path::new("/proc/self/fd").join(name))
+                                .is_err()
+                    }) => {}
             Ok(entry) => names.push(entry.file_name().to_bytes().to_vec()),
             Err(_) if cfg!(feature = "mutant-si36-listing-error-ends") => break,
             Err(error) => return Err(error.into()),
@@ -952,6 +973,132 @@ mod tests {
         assert_eq!(
             list_and_close(listing, |_| Ok(names), checked_close),
             Err(IpcError::Hardening)
+        );
+    }
+
+    const HOLDER: &str = "KIPC_DESCRIPTOR_HOLDER";
+    const HOLDER_FD: &str = "HOLDER-FD ";
+    const HOLDER_SEALED: &str = "HOLDER-NONDUMPABLE";
+    /// Far above anything the test process holds.
+    const HELD_FD: i32 = 900;
+
+    /// Holds [`HELD_FD`], then turns nondumpable when told on stdin, and
+    /// exits at stdin's EOF.
+    #[test]
+    fn descriptor_holder_helper() {
+        use std::io::{Read, Write};
+        if std::env::var_os(HOLDER).is_none() {
+            return;
+        }
+        let null = std::fs::File::open("/dev/null").unwrap();
+        let held = rustix::io::fcntl_dupfd_cloexec(&null, HELD_FD).unwrap();
+        println!("{HOLDER_FD}{}", held.as_raw_fd());
+        let mut byte = [0u8];
+        std::io::stdin().read_exact(&mut byte).unwrap();
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+            .unwrap();
+        println!("{HOLDER_SEALED}");
+        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    }
+
+    #[test]
+    fn si_36_descriptor_enumeration_keeps_entries_whose_lookup_fails() {
+        // getdents64 lists a descriptor directory opened earlier even after
+        // its process turns nondumpable, while every lookup of its entries
+        // fails: by number in this process (not held here), and through the
+        // directory itself (EACCES once procfs revalidates its owner). A
+        // lookup filter anywhere in the enumeration drops the entry.
+        // Root, even a user namespace's, still looks up a nondumpable
+        // process's entries, so as root the scenario reruns unprivileged.
+        use std::io::{BufRead, Write};
+        use std::process::{Command, Stdio};
+        if rustix::process::geteuid().is_root() {
+            rerun_unprivileged(
+                "linux::facade::tests::si_36_descriptor_enumeration_keeps_entries_whose_lookup_fails",
+            );
+            return;
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "linux::facade::tests::descriptor_holder_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HOLDER, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut marked = |marker: &str| loop {
+            let line = lines.next().unwrap().unwrap();
+            if let Some((_, rest)) = line.split_once(marker) {
+                return rest.to_owned();
+            }
+        };
+        let held = marked(HOLDER_FD);
+        let listing = open_dir(&format!("/proc/{}/fd", child.id()));
+        stdin.write_all(b"x").unwrap();
+        marked(HOLDER_SEALED);
+        std::fs::symlink_metadata(format!("/proc/{}/fd", child.id())).unwrap();
+        assert!(
+            std::fs::symlink_metadata(format!("/proc/self/fd/{held}")).is_err(),
+            "this process holds {held} too"
+        );
+        assert_eq!(
+            rustix::fs::statat(
+                &listing,
+                held.as_str(),
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW
+            )
+            .map(drop),
+            Err(rustix::io::Errno::ACCESS),
+            "a lookup through the nondumpable process's listing succeeded: \
+             this process bypasses permission checks (CAP_DAC_*)"
+        );
+        let listed = list_and_close(listing, read_names, checked_close).unwrap();
+        drop(stdin);
+        child.wait().unwrap();
+        assert!(
+            listed.contains(&held.parse().unwrap()),
+            "enumerated descriptor {held} was dropped because its lookup failed: {listed:?}"
+        );
+    }
+
+    /// Runs test `name` as uid and gid 65534 from a copy of this executable
+    /// that uid can run, and requires that it ran and passed. Dropping from
+    /// root to another uid clears every capability.
+    fn rerun_unprivileged(name: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        struct Dir(PathBuf);
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir =
+            Dir(std::env::temp_dir().join(format!("kickoff-unprivileged-{}", std::process::id())));
+        std::fs::create_dir(&dir.0).unwrap();
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = dir.0.join("tests");
+        crate::test_exec::copy_executable(std::env::current_exe().unwrap(), &exe);
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(&exe)
+            .args(["--exact", name, "--test-threads=1"])
+            .current_dir(&dir.0)
+            .uid(65534)
+            .gid(65534)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{name} failed as uid 65534:\n{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

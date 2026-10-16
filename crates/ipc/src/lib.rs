@@ -13,6 +13,10 @@
 //!         ◄── reply ──                     reply ── allowed for role?
 //! ```
 
+#[cfg(test)]
+#[path = "../../../tests/support/exec.rs"]
+mod test_exec;
+
 mod codec;
 mod command;
 mod frame;
@@ -27,8 +31,8 @@ pub use command::{
 };
 #[cfg(target_os = "linux")]
 pub use linux::{
-    Channel, Client, Facade, RuntimeDir, Server, Trust, Worker, WorkerLaunch, connect,
-    run_core_probe_if_requested,
+    Channel, Client, Facade, RuntimeDir, Server, Trust, Worker, WorkerLaunch,
+    close_inherited_descriptors, connect, run_core_probe_if_requested,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
