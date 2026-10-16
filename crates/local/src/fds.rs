@@ -1,5 +1,5 @@
 //! The descriptor sweep shared by every Kickoff process that starts with
-//! inherited authority it must drop: the kickoffd worker at entry and the
+//! inherited authority it must drop: kickoffd and its worker at entry, and the
 //! gamebox's trusted links before they exec the next link (SI-36).
 
 use std::io;
@@ -283,7 +283,7 @@ mod tests {
             "a lookup through the nondumpable process's listing succeeded: \
              this process bypasses permission checks (CAP_DAC_*)"
         );
-        let listed = list_and_close(listing, read_names, checked_close).unwrap();
+        let listed = list_and_close(listing, read_names, checked_close, Listing::Other).unwrap();
         drop(stdin);
         child.wait().unwrap();
         assert!(
