@@ -222,9 +222,10 @@ scaffolding M2.
   spawn makes the probe refuse: startup fails closed. The worker becomes
   nondumpable with zero limits before its runtime, and re-checks that before
   reading client bytes.
-- Open SI-36 item (M3): the facade itself keeps descriptors its launcher
-  leaked. It holds no secret and reads no client payload; SI-36's kickoffd
-  descriptor sweep and inventory test land with M3. Which host crash configurations start
+- The facade closes launcher-leaked descriptors above stdio before arguments
+  or runtime setup, refusing any enumeration or close error. The installed
+  startup tests compare its descriptor inventory against its allowlist and
+  check anonymous descriptor ownership. Which host crash configurations start
   and which refuse is the table in design §6.4; the gate's tests run on the
   host's own `core_pattern`, and the zero-hard-limit test expects the outcome
   that pattern implies. Runtime/loader work before Rust `main` remains outside
