@@ -97,6 +97,12 @@ impl Invites {
         Ok(Cap::sign(door_key, self.session_id, invitee, nonce))
     }
 
+    /// Identities with at least one unspent bound capability. The ledger owns
+    /// this metadata so redeeming one nonce cannot erase a different invite.
+    pub fn bound_invitees(&self) -> impl Iterator<Item = EndpointId> + '_ {
+        self.outstanding.values().filter_map(|entry| entry.invitee)
+    }
+
     /// Spends `cap` for `requester`, the identity the door's TLS handshake
     /// authenticated. Succeeds at most once per capability; every later call
     /// is refused. It spends the capability whatever the caller decides next

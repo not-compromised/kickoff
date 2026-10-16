@@ -649,3 +649,18 @@ reason = "game-log export paths arrive with the gamebox launcher (M1 harness pro
 si = "SI-7"
 item = "mutant-si7-supervisor-no-cgroup"
 reason = "the gamebox supervisor service and its kickoffd channel arrive with the bubblewrap launcher (M0/M3)"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-session"
+feature = "mutant-si23-no-outstanding-bound-priority"
+test_crate = "kickoff-session"
+test = "si_23_each_outstanding_bound_invite_retains_priority_after_admission_expires"
+note = "outstanding bound capabilities no longer reserve door capacity"
+
+[[mutant]]
+si = "SI-23"
+crate = "kickoff-session"
+feature = "mutant-si23-no-outstanding-bound-priority"
+test = "si_23_bound_priority_follows_all_outstanding_nonces_and_revocation"
+note = "unspent bound nonces cease to grant priority"
