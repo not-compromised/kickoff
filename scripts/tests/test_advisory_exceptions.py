@@ -40,12 +40,15 @@ import os
 from pathlib import Path
 import sys
 import subprocess
+if os.environ.get("KICKOFF_POLICY_RECORDER_ACTIVE"):
+    sys.exit("recursive policy Cargo recorder invocation refused")
 args = sys.argv[1:]
 with Path(os.environ["CARGO_CALLS"]).open("a") as calls:
     calls.write(" ".join(args) + "\\n")
 if args[0] == "deny":
     # Parse the recorded arguments with the installed CLI, without doing a scan.
-    parsed = subprocess.run([os.environ["REAL_CARGO"], *args, "--help"], capture_output=True, text=True)
+    env = dict(os.environ, KICKOFF_POLICY_RECORDER_ACTIVE="1")
+    parsed = subprocess.run([os.environ["REAL_CARGO_DENY"], *args, "--help"], env=env, cwd=os.environ["CARGO_DENY_WORKSPACE"], capture_output=True, text=True, timeout=10)
     if parsed.returncode:
         sys.stderr.write(parsed.stderr)
         sys.exit(parsed.returncode)
@@ -56,7 +59,10 @@ if args[0] == "deny":
     Path(os.environ["CARGO_SNAPSHOT"]).write_text(config.read_text())
 """)
         fake.chmod(0o755)
-        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", CARGO_CALLS=str(self.root / "calls"), CARGO_SNAPSHOT=str(self.root / "deny-snapshot"), REAL_CARGO=shutil.which("cargo"))
+        cargo_deny = shutil.which("cargo-deny")
+        if cargo_deny is None:
+            raise RuntimeError("policy tests require cargo-deny on PATH")
+        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", CARGO_CALLS=str(self.root / "calls"), CARGO_SNAPSHOT=str(self.root / "deny-snapshot"), REAL_CARGO_DENY=cargo_deny, CARGO_DENY_WORKSPACE=str(ROOT))
 
     def prepare(self, entries, today=TODAY):
         (self.root / "advisory-exceptions.toml").write_text(metadata(entries))
@@ -135,6 +141,20 @@ if args[0] == "deny":
                     self.assertNotIn("--offline", calls)
                 else:
                     self.assertIn("deny --config", calls)
+
+    def test_a_wrapper_cannot_reenter_the_policy_recorder(self):
+        wrapper = self.root / "cargo-deny-wrapper"
+        wrapper.write_text('#!/bin/sh\nexec "$POLICY_RECORDER" "$@"\n')
+        wrapper.chmod(0o755)
+        env = dict(self.env, REAL_CARGO_DENY=str(wrapper), POLICY_RECORDER=str(self.root / "cargo"))
+        result = subprocess.run(
+            [str(self.root / "cargo"), "deny", "--config", str(self.root / "deny.toml")],
+            cwd=self.root, env=env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recursive policy Cargo recorder invocation refused", result.stderr)
+        self.assertEqual((self.root / "calls").read_text().splitlines(), [f"deny --config {self.root / 'deny.toml'}"])
+        self.assertFalse((self.root / "deny-snapshot").exists())
 
     def test_recording_cargo_rejects_misplaced_global_config(self):
         result = subprocess.run([str(self.root / "cargo"), "deny", "check", "--config", str(self.root / "deny.toml"), "--hide-inclusion-graph"], cwd=self.root, env=self.env, capture_output=True, text=True)
