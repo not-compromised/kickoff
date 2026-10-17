@@ -56,7 +56,9 @@ pub(super) fn pasta_args(fault: Fault, canaries: &Canaries) -> Result<Vec<String
         "-I",
         PASTA_IF,
         "-a",
-        "192.0.2.2/24",
+        "192.0.2.2",
+        "-n",
+        "24",
         "-g",
         "192.0.2.1",
     ]
