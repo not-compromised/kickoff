@@ -18,7 +18,7 @@ jobs:
   # builds. The gate is passed only when both parts pass.
   linux:
     name: linux (${{ matrix.part }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -33,10 +33,19 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Install namespace test prerequisites
+      - name: Install Linux containment test prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --yes uidmap
+          sudo apt-get install --yes uidmap bubblewrap passt nftables systemd-coredump
+          # M0 needs overlay mounts and explicit pasta address mappings.
+          bwrap --help > /tmp/kickoff-bwrap-help
+          grep -F -- '--overlay-src' /tmp/kickoff-bwrap-help
+          pasta --help > /tmp/kickoff-pasta-help 2>&1
+          grep -F -- '--map-host-loopback' /tmp/kickoff-pasta-help
+          grep -F -- '--map-guest-addr' /tmp/kickoff-pasta-help
+          nft --version
+          coredumpctl --version
+          systemd-run --user --wait --pipe /usr/bin/true
           if ! awk -F: -v user="$(id -un)" '$1 == user { found=1 } END { exit !found }' /etc/subuid; then
             sudo usermod --add-subuids 1000000-1065535 --add-subgids 1000000-1065535 "$(id -un)"
           fi
