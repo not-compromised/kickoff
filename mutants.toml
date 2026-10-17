@@ -263,35 +263,35 @@ note = "the worker keeps descriptors another facade thread opened while it was s
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-fd-errors-skipped"
-test = "si_36_worker_entry_close_fails_closed_on_any_error"
+test = "si_36_sweep_close_fails_closed_on_any_error"
 note = "a listed descriptor that fails to close is skipped and stays open"
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-listed-fds-looked-up"
 test = "si_36_descriptor_listing_keeps_every_enumerated_descriptor"
 note = "the listing keeps only numbers whose /proc/self/fd entry lstat finds, the reviewed lookup filter"
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-enumeration-looks-up"
 test = "si_36_descriptor_enumeration_keeps_entries_whose_lookup_fails"
 note = "the getdents64 enumeration keeps only names whose /proc/self/fd entry lstat finds, the reviewed filter moved below the listing's unit seam"
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-listing-error-ends"
 test = "si_36_descriptor_listing_refuses_an_enumeration_error"
 note = "a getdents64 error ends the listing as rustix's Dir does for ENOENT, so a short list passes"
 
 [[mutant]]
 si = "SI-36"
-crate = "kickoff-ipc"
+crate = "kickoff-local"
 feature = "mutant-si36-listing-close-unchecked"
 test = "si_36_descriptor_listing_refuses_when_its_own_close_fails"
 note = "the listing descriptor's close result is ignored, so it can stay open while the listing succeeds"
@@ -633,6 +633,46 @@ note = "the public Kick future owns publication after removing the peer"
 
 [[mutant]] si = "SI-29", crate = "kickoff-net", feature = "mutant-si29-bind-any-port", test = "si_29_binding_skips_unusable_ports_before_publishing_a_reachable_endpoint", note = "binding publishes a local port the peer send guard refuses; the recipient denylist remains enforced"
 
+# kickoff-game (the gamebox spawn path, design §3.2.6)
+
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-direct-kill", test = "si_38_normal_stop_kills_the_cgroup_before_asking_the_manager", note = "normal stop skips cgroup.kill and leaves the kill to the manager's scope stop"
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-bindsto", test = "si_38_owner_death_ends_the_box_without_a_normal_stop", note = "the scope is not bound to the supervisor's service, so its death leaves the descendant running"
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-sigterm-stop", test = "si_38_owner_death_ends_the_box_without_a_normal_stop", note = "the scope keeps the default SIGTERM stop, which the stand-in ignores past the deadline"
+
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-no-fd-sweep", test = "si_36_supervisor_never_holds_a_descriptor_leaked_to_its_service", note = "the supervisor keeps the descriptors its service was started with"
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-barrier-skip", test = "si_36_launch_barrier_refuses_each_faulted_property", note = "the barrier releases without its checks, inside or outside: every faulted setup reaches the payload"
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-barrier-skip", test = "si_36_game_holds_only_stdio_on_dev_null", note = "the barrier link execs at once and the payload inherits the barrier pipes"
+
+[[mutant]] si = "SI-14", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si14-no-deny-set", test = "si_14_box_reaches_the_internet_and_no_host_or_private_destination", note = "the output chain lacks the deny-set drop, so host and private destinations leave through pasta"
+[[mutant]] si = "SI-14", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si14-no-startup-probe", test = "si_14_startup_probes_refuse_a_pasta_linking_box_and_host", note = "neither the setup link nor the supervisor runs the startup probes for pasta's gateway mapping and forwarding"
+
+[[mutant]] si = "SI-34", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si34-copy-writable", test = "si_34_game_cannot_change_its_copy_or_see_launcher_state", note = "the game copy is bound read-write into the box"
+[[mutant]] si = "SI-35", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si35-host-x11-mounted", test = "si_35_no_host_display_or_bus_socket_in_the_box", note = "the host's X11 socket directory is mounted into the box"
+
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-limits", test = "si_38_scope_carries_the_box_limits", note = "the scope is created without its memory, swap, task and CPU limits"
+[[unmutated]] test = "si_38_supervisor_killed_during_or_after_a_launch_leaves_nothing", reason = "positive composition through the whole chain: the scope binding and the links' parent-death signals each end it alone; each teardown path has its own mutant in the stand-in tests"
+
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-helper-unbounded", test = "si_38_stop_during_a_stalled_helper_ends_the_box_within_the_deadline", note = "the outside nft helper is waited on synchronously, unbounded and deaf to a stop"
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-registration-deaf", test = "si_38_stop_during_scope_registration_ends_within_the_deadline", note = "scope registration polls without reading the signal descriptor, so a stop waits out the registration deadline"
+
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-bindsto", test = "si_38_kill_at_each_startup_phase_leaves_nothing", note = "with the supervisor killed before the first link arms its parent-death signal, nothing but the binding ends the box"
+
+[[mutant]] si = "SI-14", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si14-main-table-only", test = "si_14_startup_deny_set_covers_lans_in_every_routing_table", note = "the deny set reads only the main routing table, as /proc/net/route does"
+[[mutant]] si = "SI-14", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si14-no-host-watch", test = "si_14_host_network_change_ends_the_box_within_the_deadline", note = "the supervisor does not watch host address, route and rule changes, so the box runs with a stale deny set"
+
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-no-limits", test = "si_38_box_limits_are_enforced", note = "without the scope's limits the fork probe passes the task limit"
+[[mutant]] si = "SI-38", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si38-prefix-unsized", test = "si_38_box_limits_are_enforced", note = "the prefix's writable layer is not a sized tmpfs; the barrier's size check refuses the launch"
+
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-inside-barrier-skip", test = "si_36_inside_barrier_refuses_each_fault_alone", note = "the barrier link skips its own checks; with the outside check off, faulted setups reach the payload"
+[[mutant]] si = "SI-36", crate = "kickoff-game", test_crate = "kickoff-gamebox", feature = "mutant-si36-outside-barrier-skip", test = "si_36_outside_barrier_refuses_each_fault_alone", note = "the supervisor skips its outside check; with the inside checks off, faulted setups reach the payload"
+[[mutant]] si = "SI-36", crate = "kickoff-game", feature = "mutant-si36-nnp-unchecked", test = "si_36_barrier_refuses_a_payload_without_no_new_privs", note = "the barrier stops checking NoNewPrivs"
+
+[[mutant]] si = "SI-36", crate = "kickoff-game", feature = "mutant-si36-setuid-bwrap-allowed", test = "si_36_launch_refuses_a_setuid_or_setgid_bwrap", note = "a setuid or setgid bwrap is accepted"
+
+[[mutant]] si = "SI-14", crate = "kickoff-game", feature = "mutant-si14-done-code-ignored", test = "si_14_a_dump_ending_in_an_error_is_refused", note = "a dump whose NLMSG_DONE carries an errno is taken as complete"
+
+[[mutant]] si = "SI-38", crate = "kickoff-game", feature = "mutant-si38-helper-deadline-late", test = "si_38_an_expired_deadline_wins_over_a_readable_helper_pipe", note = "a readable helper pipe is served before the expired deadline, so a helper that keeps it readable runs until the output cap"
+
 # Named by the design for later milestones; the code they mutate does not exist on M2.
 
 [[pending]]
@@ -664,3 +704,38 @@ crate = "kickoff-session"
 feature = "mutant-si23-no-outstanding-bound-priority"
 test = "si_23_bound_priority_follows_all_outstanding_nonces_and_revocation"
 note = "unspent bound nonces cease to grant priority"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-game"
+feature = "mutant-si30-game-core-zero"
+test_crate = "kickoff-gamebox"
+test = "si_30_game_exec_keeps_the_verified_core_policy"
+note = "the exec chain lacks an effective core limit or a completed genuine crash probe"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-game"
+feature = "mutant-si30-game-no-core-probe"
+test_crate = "kickoff-gamebox"
+test = "si_30_game_exec_keeps_the_verified_core_policy"
+note = "the exec chain lacks an effective core limit or a completed genuine crash probe"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-game"
+feature = "mutant-si30-core-canary-no-crash"
+test_crate = "kickoff-gamebox"
+test = "si_30_game_exec_keeps_the_verified_core_policy"
+note = "the exec chain lacks an effective core limit or a completed genuine crash probe"
+
+[[mutant]]
+si = "SI-30"
+crate = "kickoff-game"
+feature = "mutant-si30-game-handler-unchecked"
+test = "si_30_exec_core_policy_refuses_unsupported_handlers_before_crashing"
+note = "unsupported host crash handlers are admitted"
+
+[[unmutated]]
+test = "si_30_piped_handler_with_inherited_zero_refuses_before_starting_a_scope"
+reason = "actual host configuration composition; policy decisions are separately mutated without crashing under an unsafe host policy"

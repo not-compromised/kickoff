@@ -5,8 +5,44 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "../../scripts/mutant-guard.rs"
 
 [lints]
 workspace = true
 
-[dependencies]
+# Mutants (SI-33): each compiles one protection out; registered in
+# /mutants.toml, refused in release builds by the build script.
+[features]
+mutant-si30-game-handler-unchecked = []
+mutant-si30-game-core-zero = []
+mutant-si30-game-no-core-probe = []
+mutant-si30-core-canary-no-crash = []
+mutant-si38-no-direct-kill = []
+mutant-si38-no-bindsto = []
+mutant-si38-sigterm-stop = []
+mutant-si38-no-limits = []
+mutant-si38-helper-unbounded = []
+mutant-si38-registration-deaf = []
+mutant-si14-main-table-only = []
+mutant-si14-no-host-watch = []
+mutant-si38-prefix-unsized = []
+mutant-si36-inside-barrier-skip = []
+mutant-si36-outside-barrier-skip = []
+mutant-si36-nnp-unchecked = []
+mutant-si36-setuid-bwrap-allowed = []
+mutant-si14-done-code-ignored = []
+mutant-si38-helper-deadline-late = []
+mutant-si36-no-fd-sweep = []
+mutant-si36-barrier-skip = []
+mutant-si14-no-deny-set = []
+mutant-si14-no-startup-probe = []
+mutant-si34-copy-writable = []
+mutant-si35-host-x11-mounted = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kickoff-local.workspace = true
+netlink-packet-core.workspace = true
+netlink-packet-route.workspace = true
+nix = { workspace = true, features = ["signal"] }
+rustix = { workspace = true, features = ["event", "thread", "net", "mount"] }
+thiserror.workspace = true
