@@ -55,6 +55,28 @@ jobs:
           fi
           unshare --map-root-user --pid --fork --mount-proc true
           unshare --map-auto --setuid 0 --setgid 0 true
+      - name: Permit the exact gamebox test link through pasta
+        run: |
+          # The package profile already permits system binaries. Cargo's
+          # trusted link lives in this disposable workspace instead.
+          python3 scripts/ci-pasta-profile.py "$GITHUB_WORKSPACE" > /tmp/kickoff-pasta-test.profile
+          sudo apparmor_parser --replace /tmp/kickoff-pasta-test.profile
+          mkdir -p target/debug
+          test ! -e target/debug/kickoff-box-link && test ! -L target/debug/kickoff-box-link
+          test ! -e target/debug/kickoff-test-link-denied && test ! -L target/debug/kickoff-test-link-denied
+          trap 'rm -f -- target/debug/kickoff-box-link target/debug/kickoff-test-link-denied' EXIT
+          install -m 755 /usr/bin/true target/debug/kickoff-box-link
+          install -m 755 /usr/bin/true target/debug/kickoff-test-link-denied
+          args=(--config-net --quiet --foreground -I gb0 -a 192.0.2.2 -n 24 -g 192.0.2.1
+            -t none -u none -T none -U none --no-map-gw --map-host-loopback none
+            --map-guest-addr none --ipv4-only -D none --search none
+            --no-dhcp --no-ndp --no-dhcpv6 --no-ra)
+          pasta "${args[@]}" -- "$GITHUB_WORKSPACE/target/debug/kickoff-box-link"
+          if pasta "${args[@]}" -- "$GITHUB_WORKSPACE/target/debug/kickoff-test-link-denied" > /tmp/kickoff-pasta-denied.log 2>&1; then
+            echo 'pasta unexpectedly executed a neighboring workspace binary' >&2
+            exit 1
+          fi
+          grep -F 'Failed to start command or shell: Permission denied' /tmp/kickoff-pasta-denied.log
       - name: Install pinned Rust
         run: |
           toolchain=$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)
