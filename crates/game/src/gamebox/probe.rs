@@ -247,6 +247,10 @@ fn limits() -> ExitCode {
 /// Allocates and touches up to 256 MiB, 1 MiB at a time; returns only if
 /// nothing stopped it.
 fn eat() -> ExitCode {
+    // Select the deliberate allocator as the OOM victim instead of pasta.
+    if std::fs::write("/proc/self/oom_score_adj", b"1000").is_err() {
+        return ExitCode::from(82);
+    }
     let mut held: Vec<Vec<u8>> = Vec::new();
     for _ in 0..256 {
         held.push(std::hint::black_box(vec![0x4b; 1 << 20]));
